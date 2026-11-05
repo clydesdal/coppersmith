@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e3150"/>
+      <stop offset="1" stop-color="#121d31"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#tile)"/>
+  <!-- Copperview's stacked layers, with a trace being routed across the top one. -->
+  <g fill="none" stroke-width="30" stroke-linejoin="miter">
+    <path d="M256 262L418 354L256 446L94 354Z" stroke="#e56a6a"/>
+    <path d="M256 186L418 278L256 370L94 278Z" stroke="#f2d24b"/>
+    <path d="M256 110L418 202L256 294L94 202Z" stroke="#75abff"/>
+  </g>
+  <path d="M160 202L222 167L300 167L350 202" fill="none" stroke="#f2f1ee" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="160" cy="202" r="26" fill="#f2f1ee"/>
+  <circle cx="160" cy="202" r="11" fill="#18273f"/>
+  <circle cx="350" cy="202" r="26" fill="#f2f1ee"/>
+  <circle cx="350" cy="202" r="11" fill="#18273f"/>
+</svg>

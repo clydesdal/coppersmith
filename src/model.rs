@@ -1,0 +1,522 @@
+//! What a board is made of. This is also the saved file, written as JSON.
+
+use crate::geom::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
+pub enum Side {
+    Top,
+    Bottom,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::Top => Side::Bottom,
+            Side::Bottom => Side::Top,
+        }
+    }
+}
+
+/// Copper 0 is the top and 31 the bottom, whatever the layer count, so
+/// changing from two layers to four leaves the outer tracks where they are.
+pub const TOP: u8 = 0;
+pub const BOTTOM: u8 = 31;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
+pub enum Layer {
+    Cu(u8),
+    Silk(Side),
+    Mask(Side),
+    Paste(Side),
+    Fab(Side),
+    Court(Side),
+    Edge,
+}
+
+impl Layer {
+    pub fn side(self) -> Option<Side> {
+        match self {
+            Layer::Cu(TOP) => Some(Side::Top),
+            Layer::Cu(BOTTOM) => Some(Side::Bottom),
+            Layer::Cu(_) | Layer::Edge => None,
+            Layer::Silk(s) | Layer::Mask(s) | Layer::Paste(s) | Layer::Fab(s) | Layer::Court(s) => Some(s),
+        }
+    }
+
+    /// The same layer seen from the other side, for parts flipped underneath.
+    pub fn flipped(self) -> Layer {
+        match self {
+            Layer::Cu(TOP) => Layer::Cu(BOTTOM),
+            Layer::Cu(BOTTOM) => Layer::Cu(TOP),
+            Layer::Silk(s) => Layer::Silk(s.other()),
+            Layer::Mask(s) => Layer::Mask(s.other()),
+            Layer::Paste(s) => Layer::Paste(s.other()),
+            Layer::Fab(s) => Layer::Fab(s.other()),
+            Layer::Court(s) => Layer::Court(s.other()),
+            other => other,
+        }
+    }
+
+    pub fn on(self, side: Side) -> Layer {
+        if side == Side::Bottom { self.flipped() } else { self }
+    }
+
+    pub fn name(self) -> String {
+        let s = |side: Side| if side == Side::Top { "Top" } else { "Bottom" };
+        match self {
+            Layer::Cu(TOP) => "Top copper".into(),
+            Layer::Cu(BOTTOM) => "Bottom copper".into(),
+            Layer::Cu(n) => format!("Inner {n}"),
+            Layer::Silk(side) => format!("{} silkscreen", s(side)),
+            Layer::Mask(side) => format!("{} solder mask", s(side)),
+            Layer::Paste(side) => format!("{} paste", s(side)),
+            Layer::Fab(side) => format!("{} assembly", s(side)),
+            Layer::Court(side) => format!("{} courtyard", s(side)),
+            Layer::Edge => "Board outline".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub enum PadShape {
+    Circle,
+    Rect,
+    /// Corner radius as a share of the shorter side, up to a half.
+    RoundRect(f64),
+    Oval,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Pad {
+    pub num: String,
+    pub at: P,
+    pub size: P,
+    #[serde(default)]
+    pub rot: f64,
+    pub shape: PadShape,
+    /// Zero for a surface pad. A hole with no copper round it is a plain hole.
+    #[serde(default)]
+    pub drill: f64,
+    #[serde(default)]
+    pub net: u32,
+}
+
+impl Pad {
+    pub fn through(&self) -> bool {
+        self.drill > 0.0
+    }
+    /// A hole with no ring of copper, like a mounting hole.
+    pub fn bare_hole(&self) -> bool {
+        self.through() && self.size.x.min(self.size.y) <= self.drill + 1e-6
+    }
+
+    /// The pad's copper in the footprint's own coordinates.
+    pub fn blob_local(&self, grow: f64) -> Blob {
+        let (w, h) = (self.size.x + 2.0 * grow, self.size.y + 2.0 * grow);
+        match self.shape {
+            PadShape::Circle => Blob::dot(self.at, w.max(0.0)),
+            PadShape::Rect => Blob { core: rect_core(self.at, w, h, self.rot), r: 0.0 },
+            PadShape::RoundRect(k) => {
+                let r = (self.size.x.min(self.size.y) * k.clamp(0.0, 0.5) + grow).max(0.0);
+                Blob { core: rect_core(self.at, (w - 2.0 * r).max(1e-6), (h - 2.0 * r).max(1e-6), self.rot), r }
+            }
+            PadShape::Oval => {
+                let r = w.min(h) / 2.0;
+                let half = if w >= h { p(w / 2.0 - r, 0.0) } else { p(0.0, h / 2.0 - r) };
+                let half = half.rot(self.rot);
+                Blob::line(self.at.sub(half), self.at.add(half), 2.0 * r)
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum Graphic {
+    Line { a: P, b: P, w: f64, layer: Layer },
+    Circle { c: P, r: f64, w: f64, layer: Layer, fill: bool },
+}
+
+impl Graphic {
+    pub fn layer(&self) -> Layer {
+        match self {
+            Graphic::Line { layer, .. } | Graphic::Circle { layer, .. } => *layer,
+        }
+    }
+}
+
+/// A part on the board. Its pads and drawing are copied in from the library
+/// when it's placed, so the board file stands on its own.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Footprint {
+    pub id: u32,
+    pub def: String,
+    pub refdes: String,
+    #[serde(default)]
+    pub value: String,
+    pub at: P,
+    #[serde(default)]
+    pub rot: f64,
+    pub side: Side,
+    pub pads: Vec<Pad>,
+    #[serde(default)]
+    pub graphics: Vec<Graphic>,
+    /// Where the name sits, in the footprint's own coordinates.
+    #[serde(default)]
+    pub label_at: P,
+    #[serde(default)]
+    pub locked: bool,
+}
+
+impl Footprint {
+    /// From the footprint's own coordinates to the board's.
+    pub fn place(&self, q: P) -> P {
+        let q = if self.side == Side::Bottom { p(-q.x, q.y) } else { q };
+        self.at.add(q.rot(self.rot)).rounded()
+    }
+
+    pub fn place_blob(&self, b: Blob) -> Blob {
+        let mut core: Vec<P> = b.core.iter().map(|q| self.place(*q)).collect();
+        // A mirror turns the corners round the other way.
+        if self.side == Side::Bottom && core.len() > 2 {
+            core.reverse();
+        }
+        Blob { core, r: b.r }
+    }
+
+    pub fn pad_blob(&self, i: usize, grow: f64) -> Blob {
+        self.place_blob(self.pads[i].blob_local(grow))
+    }
+
+    pub fn pad_center(&self, i: usize) -> P {
+        self.place(self.pads[i].at)
+    }
+
+    /// The copper layer a surface pad sits on.
+    pub fn copper(&self) -> u8 {
+        if self.side == Side::Top { TOP } else { BOTTOM }
+    }
+
+    /// The part's footprint area: the courtyard if it has one, else the pads.
+    pub fn bbox(&self) -> BBox {
+        let mut b = BBox::default();
+        for g in &self.graphics {
+            if let Graphic::Line { a, b: e, layer: Layer::Court(_), .. } = g {
+                b.add(self.place(*a));
+                b.add(self.place(*e));
+            }
+        }
+        if b.is_empty() {
+            for i in 0..self.pads.len() {
+                b.union(&self.pad_blob(i, 0.0).bbox());
+            }
+            b = b.grown(0.25);
+        }
+        if b.is_empty() {
+            b = BBox::of(&[self.at]).grown(0.5);
+        }
+        b
+    }
+
+    pub fn label_pos(&self) -> P {
+        self.place(self.label_at)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Track {
+    pub id: u32,
+    pub a: P,
+    pub b: P,
+    pub w: f64,
+    pub layer: u8,
+    #[serde(default)]
+    pub net: u32,
+}
+
+impl Track {
+    pub fn blob(&self) -> Blob {
+        Blob::line(self.a, self.b, self.w)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Via {
+    pub id: u32,
+    pub at: P,
+    pub dia: f64,
+    pub drill: f64,
+    #[serde(default)]
+    pub net: u32,
+}
+
+impl Via {
+    pub fn blob(&self) -> Blob {
+        Blob::dot(self.at, self.dia)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Net {
+    pub id: u32,
+    pub name: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Rules {
+    pub clearance: f64,
+    pub track: f64,
+    pub via_dia: f64,
+    pub via_drill: f64,
+    pub min_track: f64,
+    pub min_drill: f64,
+    pub min_ring: f64,
+    pub edge_clearance: f64,
+    pub mask_margin: f64,
+    pub silk_width: f64,
+    pub text_height: f64,
+}
+
+impl Default for Rules {
+    /// What most low-cost board makers will build without asking.
+    fn default() -> Self {
+        Rules {
+            clearance: 0.2,
+            track: 0.25,
+            via_dia: 0.6,
+            via_drill: 0.3,
+            min_track: 0.15,
+            min_drill: 0.3,
+            min_ring: 0.13,
+            edge_clearance: 0.3,
+            mask_margin: 0.05,
+            silk_width: 0.15,
+            text_height: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Board {
+    pub format: u32,
+    pub name: String,
+    /// How many copper layers: 2, 4 or 6.
+    pub copper: u8,
+    /// The edge of the board, a closed ring.
+    pub outline: Vec<P>,
+    pub footprints: Vec<Footprint>,
+    pub tracks: Vec<Track>,
+    pub vias: Vec<Via>,
+    /// Net 0 is "not connected"; it's never stored here.
+    pub nets: Vec<Net>,
+    pub rules: Rules,
+    pub next_id: u32,
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Board {
+            format: 1,
+            name: "Untitled board".into(),
+            copper: 2,
+            outline: rect_outline(p(0.0, 0.0), p(50.0, 40.0)),
+            footprints: Vec::new(),
+            tracks: Vec::new(),
+            vias: Vec::new(),
+            nets: Vec::new(),
+            rules: Rules::default(),
+            next_id: 1,
+        }
+    }
+}
+
+pub fn rect_outline(a: P, b: P) -> Vec<P> {
+    vec![p(a.x, a.y), p(b.x, a.y), p(b.x, b.y), p(a.x, b.y)]
+}
+
+impl Board {
+    pub fn new_id(&mut self) -> u32 {
+        self.next_id += 1;
+        self.next_id - 1
+    }
+
+    /// The copper layers from top to bottom.
+    pub fn copper_layers(&self) -> Vec<u8> {
+        let mut v = vec![TOP];
+        v.extend(1..self.copper.saturating_sub(1));
+        v.push(BOTTOM);
+        v
+    }
+
+    pub fn net_name(&self, id: u32) -> &str {
+        if id == 0 {
+            return "No net";
+        }
+        self.nets.iter().find(|n| n.id == id).map(|n| n.name.as_str()).unwrap_or("?")
+    }
+
+    pub fn net_by_name(&self, name: &str) -> Option<u32> {
+        self.nets.iter().find(|n| n.name.eq_ignore_ascii_case(name)).map(|n| n.id)
+    }
+
+    /// The net with this name, made if it isn't there yet.
+    pub fn net(&mut self, name: &str) -> u32 {
+        if let Some(id) = self.net_by_name(name) {
+            return id;
+        }
+        let id = self.nets.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        self.nets.push(Net { id, name: name.to_string() });
+        id
+    }
+
+    pub fn fp(&self, id: u32) -> Option<&Footprint> {
+        self.footprints.iter().find(|f| f.id == id)
+    }
+    pub fn fp_mut(&mut self, id: u32) -> Option<&mut Footprint> {
+        self.footprints.iter_mut().find(|f| f.id == id)
+    }
+    pub fn track(&self, id: u32) -> Option<&Track> {
+        self.tracks.iter().find(|t| t.id == id)
+    }
+    pub fn via(&self, id: u32) -> Option<&Via> {
+        self.vias.iter().find(|v| v.id == id)
+    }
+
+    pub fn outline_bbox(&self) -> BBox {
+        BBox::of(&self.outline)
+    }
+
+    /// Everything on the board, for fitting it to the window.
+    pub fn extent(&self) -> BBox {
+        let mut b = self.outline_bbox();
+        for f in &self.footprints {
+            b.union(&f.bbox());
+        }
+        for t in &self.tracks {
+            b.union(&t.blob().bbox());
+        }
+        if b.is_empty() {
+            b = BBox::of(&[p(0.0, 0.0), p(50.0, 40.0)]);
+        }
+        b
+    }
+
+    /// The next free name with this prefix, like R7.
+    pub fn next_refdes(&self, prefix: &str) -> String {
+        let used: std::collections::HashSet<&str> = self.footprints.iter().map(|f| f.refdes.as_str()).collect();
+        (1..).map(|n| format!("{prefix}{n}")).find(|r| !used.contains(r.as_str())).unwrap()
+    }
+
+    pub fn save(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    pub fn load(text: &str) -> Result<Board, String> {
+        let mut b: Board = serde_json::from_str(text).map_err(|e| format!("This isn't a board file I can read ({e})"))?;
+        let top = b
+            .footprints
+            .iter()
+            .map(|f| f.id)
+            .chain(b.tracks.iter().map(|t| t.id))
+            .chain(b.vias.iter().map(|v| v.id))
+            .max()
+            .unwrap_or(0);
+        b.next_id = b.next_id.max(top + 1);
+        Ok(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bottom_parts_are_mirrored() {
+        let mut f = Footprint {
+            id: 1,
+            def: "x".into(),
+            refdes: "R1".into(),
+            value: String::new(),
+            at: p(10.0, 10.0),
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad {
+                num: "1".into(),
+                at: p(-1.0, 0.0),
+                size: p(1.0, 1.0),
+                rot: 0.0,
+                shape: PadShape::Rect,
+                drill: 0.0,
+                net: 0,
+            }],
+            graphics: vec![],
+            label_at: p(0.0, 2.0),
+            locked: false,
+        };
+        assert_eq!(f.pad_center(0), p(9.0, 10.0));
+        f.side = Side::Bottom;
+        assert_eq!(f.pad_center(0), p(11.0, 10.0));
+        assert!(ring_area(&f.pad_blob(0, 0.0).core) > 0.0, "corners stay counter-clockwise");
+    }
+
+    #[test]
+    fn saves_and_loads() {
+        let mut b = Board::default();
+        let n = b.net("GND");
+        b.tracks.push(Track { id: 7, a: p(0.0, 0.0), b: p(1.0, 0.0), w: 0.25, layer: TOP, net: n });
+        let again = Board::load(&b.save()).unwrap();
+        assert_eq!(again.tracks, b.tracks);
+        assert!(again.next_id > 7);
+    }
+}
+
+/// One stroke of drawing on a non-copper layer, already on the board.
+#[derive(Clone, Copy, Debug)]
+pub enum Ink {
+    Line(P, P, f64),
+    Dot(P, f64),
+    Ring(P, f64, f64),
+}
+
+impl Footprint {
+    /// The name's turn, kept readable: never upside down.
+    pub fn label_rot(&self) -> f64 {
+        let r = self.rot.rem_euclid(360.0);
+        if r > 90.0 + 1e-6 && r <= 270.0 + 1e-6 { r - 180.0 } else { r }
+    }
+
+    /// What this part draws on a board layer, with its name on the silkscreen.
+    pub fn art(&self, layer: Layer, rules: &Rules) -> Vec<Ink> {
+        let mut out = Vec::new();
+        let mirror = self.side == Side::Bottom;
+        for g in &self.graphics {
+            if g.layer().on(self.side) != layer {
+                continue;
+            }
+            match *g {
+                Graphic::Line { a, b, w, .. } => out.push(Ink::Line(self.place(a), self.place(b), w)),
+                Graphic::Circle { c, r, w, fill, .. } => {
+                    if fill {
+                        out.push(Ink::Dot(self.place(c), 2.0 * r));
+                    } else {
+                        out.push(Ink::Ring(self.place(c), r, w));
+                    }
+                }
+            }
+        }
+        let label_layer = Layer::Silk(self.side);
+        if layer == label_layer && !self.refdes.is_empty() {
+            let h = rules.text_height;
+            let strokes = crate::font::strokes(&self.refdes, self.label_pos(), h, self.label_rot(), mirror);
+            for s in strokes {
+                if s.len() == 1 || (s.len() == 2 && s[0].same(s[1])) {
+                    out.push(Ink::Dot(s[0], rules.silk_width));
+                }
+                for w in s.windows(2) {
+                    out.push(Ink::Line(w[0], w[1], rules.silk_width));
+                }
+            }
+        }
+        out
+    }
+}
