@@ -1,9 +1,10 @@
 //! The footprints a board can be built from. The common packages are made
 //! here from their datasheet sizes; more can be added as JSON files in
-//! ~/.local/share/coppersmith/footprints.
+//! a `footprints` folder in Coppersmith's data folder
+//! (see `platform::data_dir`).
 
-use crate::geom::*;
-use crate::model::*;
+use crate::pcb::geom::*;
+use crate::pcb::model::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -75,11 +76,7 @@ pub struct Library {
 }
 
 pub fn user_folder() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),
-    };
-    Some(base.join("coppersmith/footprints"))
+    Some(crate::platform::data_dir()?.join("footprints"))
 }
 
 impl Library {

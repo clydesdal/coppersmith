@@ -4,7 +4,7 @@
 //! Each glyph sits on a 4 × 6 grid. A stroke is a run of digit pairs (x then
 //! y); strokes are separated by spaces.
 
-use crate::geom::*;
+use crate::pcb::geom::*;
 
 fn glyph(c: char) -> &'static str {
     match c.to_ascii_uppercase() {

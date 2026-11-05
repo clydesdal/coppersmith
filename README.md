@@ -24,7 +24,7 @@ to it.
 Anywhere: R turn 90° (Shift+R the other way), L other side, Delete remove,
 Ctrl+D copy, Ctrl+A everything, N light up the net under the pointer, 1–6 or
 +/− or PgUp/PgDn change copper layer, F fit, X see it from underneath,
-G grid, U units, Ctrl+Z / Ctrl+Shift+Z undo and redo, Ctrl+S save,
+G grid, U units, Ctrl+Z / Ctrl+Shift+Z undo and redo, Ctrl+S save (⌘ on a Mac for all the Ctrl keys),
 Ctrl+O open, Ctrl+N new, Ctrl+E write Gerbers. Scroll or pinch to zoom,
 right- or middle-drag to pan.
 
@@ -48,18 +48,73 @@ resistors, capacitors and LEDs (0402–1206), SOIC, TSSOP, QFN, DIP, SOT-23,
 SOD-123, TO-220, pin headers, screw terminals, a tactile switch, a 3225
 crystal, mounting holes and a test pad.
 
-Your own go in `~/.local/share/coppersmith/footprints/*.json` (the folder
-button above the library opens it), one footprint or a list per file, in the
+Your own go in a `footprints` folder in Coppersmith's data folder (the folder
+button above the library opens it):
+
+| | |
+|---|---|
+| Linux | `~/.local/share/coppersmith/footprints/` |
+| macOS | `~/Library/Application Support/coppersmith/footprints/` |
+| Windows | `%APPDATA%\coppersmith\footprints\` |
+
+Put one footprint or a list per file, in the
 same shape as a footprint in a board file. A file can replace a built-in
 footprint by using its name.
 
-## Building and checking
+## Building
 
-    cargo build --release
+Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,
+macOS and Windows. Get Rust from https://rustup.rs, then:
+
+    cargo build --release        # the program is target/release/coppersmith(.exe)
     cargo test
+
+What each computer needs besides Rust:
+
+| | Needs | Package it |
+|---|---|---|
+| Linux | a C linker; on Debian/Ubuntu also `libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev` | `sh packaging/linux/install.sh` adds it to ~/Applications and the launcher |
+| macOS | Xcode command line tools (`xcode-select --install`) | `sh packaging/macos/make-app.sh` makes `target/Coppersmith.app` (`--universal` for Apple Silicon + Intel) |
+| Windows | Visual Studio Build Tools, "Desktop development with C++" | `packaging\windows\make-zip.ps1` makes a zip with `coppersmith.exe` |
+
+`.github/workflows/build.yml` builds, tests and packages all three on GitHub.
+
+### Where things are
+
+    src/
+      main.rs        command line, opening the window
+      pcb/           the board and everything worked out from it — no windows, no OS
+        geom.rs        points and the grown-shape sums behind clearance and picking
+        model.rs       the board, parts, pads, tracks, vias, nets, rules; the .cspcb file
+        library.rs     built-in footprints and your footprint files
+        copper.rs      what touches what, and the still-to-connect lines
+        drc.rs         the rule check
+        gerber.rs      Gerber and Excellon output
+        font.rs        the silkscreen stroke font
+        sample.rs      the 555 sample board
+      ui/            the window
+        app.rs         editor state, undo, edits, files, keys
+        view.rs        drawing the board and what the mouse does
+        panels.rs      top bar, side panels, status bar
+        theme.rs       Copperview's colours and fonts
+        icons.rs       line icons, the app picture
+        play.rs        scripted input for picture checks
+      platform/      what differs between Linux, macOS and Windows
+        mod.rs         data folder, opening folders, finding programs, install, console
+        pinch_wayland.rs  trackpad pinches on Linux (macOS and Windows get them free)
+        install_linux.rs  ~/Applications and the launcher entry
+    assets/          fonts (built in, so it looks the same everywhere) and icons
+    packaging/       per-platform install and bundle scripts
+
+Anything that touches the operating system goes in `platform/`, so `pcb/`
+and `ui/` stay the same on every computer.
+
+### Checking by picture
+
     coppersmith --screenshot out.png --zoom 25,18,30 --play 'key w; bclick 27.475 16.095; bclick 29 9.0875'
 
 `--play` acts out mouse and key steps; `bclick X Y` and friends take board
 millimetres, so scripts keep working whatever size the window is.
 
-Figtree is included under the SIL Open Font License (see assets/fonts/OFL.txt).
+Figtree and JetBrains Mono are included under the SIL Open Font License
+(see assets/fonts/OFL.txt and assets/fonts/OFL-JetBrainsMono.txt).

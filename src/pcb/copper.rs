@@ -1,8 +1,8 @@
 //! Every piece of copper on the board, which pieces touch, and the thin
 //! "still to connect" lines between the pieces of a net that don't yet.
 
-use crate::geom::*;
-use crate::model::*;
+use crate::pcb::geom::*;
+use crate::pcb::model::*;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]

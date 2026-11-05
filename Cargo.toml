@@ -2,6 +2,7 @@
 name = "coppersmith"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Lay out printed circuit boards: place parts, route copper, check the rules, and write Gerbers."
 
 [[bin]]
@@ -10,13 +11,17 @@ path = "src/main.rs"
 
 [dependencies]
 earcut = "0.4"
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11"] }
+eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 png = "0.18"
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.17.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Trackpad pinches on Linux, which the window library doesn't pass on.
+# Linux: both kinds of desktop, file dialogs through the desktop portal, and
+# trackpad pinches heard from Wayland, which the window library doesn't pass on.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "wayland", "x11"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 libc = "0.2"
 raw-window-handle = "0.6"
 wayland-client = "0.31"

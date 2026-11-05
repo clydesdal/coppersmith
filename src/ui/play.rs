@@ -1,8 +1,8 @@
 //! Acts out mouse and key steps through the same path real input takes, so a
 //! check run can prove that clicking really works.
 
-use crate::app::App;
-use crate::view::PLAY_FROM;
+use crate::ui::app::App;
+use crate::ui::view::PLAY_FROM;
 use eframe::egui::{self, Event, Key, Modifiers, MouseWheelUnit, PointerButton, pos2, vec2};
 
 #[derive(Clone, Debug)]
@@ -98,7 +98,7 @@ impl App {
         if let Step::Board(inner) = step {
             let tr = self.tr(self.canvas_rect);
             let at = |x: f32, y: f32| {
-                let q = tr.pt(crate::geom::p(x as f64, y as f64));
+                let q = tr.pt(crate::pcb::geom::p(x as f64, y as f64));
                 (q.x, q.y)
             };
             step = match *inner {

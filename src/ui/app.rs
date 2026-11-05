@@ -2,15 +2,14 @@
 //! the edits themselves. Drawing and clicking are in view.rs, the panels in
 //! panels.rs.
 
-use crate::copper::{self, Copper, Item};
-use crate::drc::{self, Problem};
-use crate::geom::*;
-use crate::library::{FootprintDef, Library};
-use crate::model::*;
-use crate::pinch::Pinch;
-use crate::theme;
+use crate::pcb::copper::{self, Copper, Item};
+use crate::pcb::drc::{self, Problem};
+use crate::pcb::geom::*;
+use crate::pcb::library::{FootprintDef, Library};
+use crate::pcb::model::*;
+use crate::platform::{self, Pinch};
+use crate::ui::theme;
 use eframe::egui::{self, ColorImage, Key, Panel, Rect, Ui, vec2};
-use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -189,7 +188,7 @@ pub struct App {
     pub asked_tx: mpsc::Sender<Asked>,
     asked_rx: mpsc::Receiver<Asked>,
     pub launch: Launch,
-    pub play: Vec<crate::play::Step>,
+    pub play: Vec<crate::ui::play::Step>,
     pub frames: u32,
     pub shot_sent: bool,
     applied_launch: bool,
@@ -209,7 +208,7 @@ impl App {
             s.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
         });
         let (asked_tx, asked_rx) = mpsc::channel();
-        let doc = crate::sample::board();
+        let doc = crate::pcb::sample::board();
         let mut hidden = HashSet::new();
         hidden.insert(Layer::Fab(Side::Top));
         hidden.insert(Layer::Fab(Side::Bottom));
@@ -262,24 +261,20 @@ impl App {
             after_save: None,
             may_close: false,
             pinch: Pinch::default(),
-            logo: crate::icons::picture_pixels(64).map(|(pixels, side)| {
+            logo: crate::ui::icons::picture_pixels(64).map(|(pixels, side)| {
                 let side = side as usize;
                 let picture = ColorImage::from_rgba_unmultiplied([side, side], &pixels);
                 cc.egui_ctx.load_texture("logo", picture, egui::TextureOptions::LINEAR)
             }),
             asked_tx,
             asked_rx,
-            play: crate::play::parse(launch.play.as_deref().unwrap_or("")),
+            play: crate::ui::play::parse(launch.play.as_deref().unwrap_or("")),
             launch,
             frames: 0,
             shot_sent: false,
             applied_launch: false,
         };
-        if let Ok(handle) = cc.display_handle()
-            && let RawDisplayHandle::Wayland(wayland) = handle.as_raw()
-        {
-            app.pinch.listen(wayland.display.as_ptr(), &cc.egui_ctx);
-        }
+        platform::listen_for_pinches(&mut app.pinch, cc);
         if let Some(path) = app.launch.path.take() {
             app.open(path);
         }
@@ -887,7 +882,7 @@ impl App {
 
     pub fn export_to(&mut self, dir: PathBuf) {
         self.refresh();
-        match crate::gerber::write(&self.doc, &dir) {
+        match crate::pcb::gerber::write(&self.doc, &dir) {
             Ok(files) => {
                 let errors = self.errors();
                 let warn = if errors > 0 { format!(" The checks found {errors} problems.") } else { String::new() };
@@ -970,9 +965,7 @@ impl App {
     }
 
     pub fn copperview() -> Option<PathBuf> {
-        let home = PathBuf::from(std::env::var_os("HOME")?);
-        let installed = home.join("Applications/copperview");
-        installed.exists().then_some(installed)
+        platform::find_program("copperview")
     }
 
     pub fn view_in_copperview(&mut self) {
@@ -1274,7 +1267,7 @@ mod tests {
 
     #[test]
     fn moving_a_part_drags_its_tracks() {
-        let mut b = crate::sample::board();
+        let mut b = crate::pcb::sample::board();
         let r3 = b.footprints.iter().find(|f| f.refdes == "R3").unwrap().id;
         App::move_selection(&mut b, &[Sel::Fp(r3)], p(0.0, -1.0));
         let led = b.tracks.iter().find(|t| t.b.same(p(16.9125, 27.0))).unwrap();

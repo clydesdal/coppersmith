@@ -222,16 +222,18 @@ pub fn draw(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
 
 /// The app's picture, drawn from assets/icon.svg by assets/make-icons.sh.
 pub const PICTURES: [(u32, &[u8]); 8] = [
-    (16, include_bytes!("../assets/icons/16.png")),
-    (24, include_bytes!("../assets/icons/24.png")),
-    (32, include_bytes!("../assets/icons/32.png")),
-    (48, include_bytes!("../assets/icons/48.png")),
-    (64, include_bytes!("../assets/icons/64.png")),
-    (128, include_bytes!("../assets/icons/128.png")),
-    (256, include_bytes!("../assets/icons/256.png")),
-    (512, include_bytes!("../assets/icons/512.png")),
+    (16, include_bytes!("../../assets/icons/16.png")),
+    (24, include_bytes!("../../assets/icons/24.png")),
+    (32, include_bytes!("../../assets/icons/32.png")),
+    (48, include_bytes!("../../assets/icons/48.png")),
+    (64, include_bytes!("../../assets/icons/64.png")),
+    (128, include_bytes!("../../assets/icons/128.png")),
+    (256, include_bytes!("../../assets/icons/256.png")),
+    (512, include_bytes!("../../assets/icons/512.png")),
 ];
-pub const SCALABLE: &str = include_str!("../assets/icon.svg");
+/// Only the Linux launcher entry uses the drawing itself.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const SCALABLE: &str = include_str!("../../assets/icon.svg");
 
 /// The app's picture as plain pixels, for the window and the top bar.
 pub fn picture_pixels(size: u32) -> Option<(Vec<u8>, u32)> {

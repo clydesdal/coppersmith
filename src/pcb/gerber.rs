@@ -1,8 +1,8 @@
 //! Writing the board out for the maker: one RS-274X Gerber per layer with X2
 //! attributes and Altium's file endings, and Excellon drill files.
 
-use crate::geom::*;
-use crate::model::*;
+use crate::pcb::geom::*;
+use crate::pcb::model::*;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn sample_board_writes_every_layer() {
-        let b = crate::sample::board();
+        let b = crate::pcb::sample::board();
         let f = files(&b);
         let names: Vec<&str> = f.iter().map(|(n, _)| n.rsplit('.').next().unwrap()).collect();
         for want in ["GTL", "GBL", "GTS", "GBS", "GTP", "GBP", "GTO", "GBO", "GKO", "drl"] {

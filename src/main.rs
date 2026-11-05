@@ -1,25 +1,21 @@
 //! Coppersmith: lay out printed circuit boards, in Copperview's clothes.
+//!
+//! - `pcb`: the board and everything worked out from it; no windows, no OS.
+//! - `ui`: the window.
+//! - `platform`: what differs between Linux, macOS and Windows.
 
-mod app;
-mod copper;
-mod drc;
-mod font;
-mod geom;
-mod gerber;
-mod icons;
-mod library;
-mod model;
-mod panels;
-mod pinch;
-mod play;
-mod sample;
-mod setup;
-mod theme;
-mod view;
+// A release build on Windows opens no console window behind the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use app::Launch;
+mod pcb;
+mod platform;
+mod ui;
+
+use pcb::{copper, drc, gerber, model, sample};
+use ui::app::{self, Launch};
+use ui::icons;
 use eframe::egui;
-use geom::p;
+use pcb::geom::p;
 use std::path::PathBuf;
 
 const HELP: &str = "\
@@ -27,8 +23,8 @@ Coppersmith: lay out printed circuit boards.
 
   coppersmith                   open the window with the sample board
   coppersmith BOARD.cspcb       open a board
-  coppersmith install           add to the Applications folder and app launcher
-  coppersmith uninstall         take it out again
+  coppersmith install           Linux: add to ~/Applications and the app launcher
+  coppersmith uninstall         Linux: take it out again
 
 Options:
   --gerbers DIR                 write the board's Gerber and drill files and exit
@@ -57,6 +53,9 @@ fn load(path: &Option<PathBuf>) -> Result<model::Board, String> {
 }
 
 fn run() -> Result<(), String> {
+    if std::env::args().len() > 1 {
+        platform::attach_console();
+    }
     let mut launch = Launch::default();
     let mut gerbers: Option<PathBuf> = None;
     let mut check = false;
@@ -69,13 +68,11 @@ fn run() -> Result<(), String> {
                 return Ok(());
             }
             "install" => {
-                setup::install()?;
-                println!("Coppersmith is installed. Find it in your app launcher, or run: coppersmith");
+                println!("{}", platform::install()?);
                 return Ok(());
             }
             "uninstall" => {
-                setup::uninstall()?;
-                println!("Coppersmith has been removed. Your boards weren't touched.");
+                println!("{}", platform::uninstall()?);
                 return Ok(());
             }
             "--gerbers" => gerbers = Some(PathBuf::from(value("--gerbers")?)),
@@ -121,8 +118,8 @@ fn run() -> Result<(), String> {
     if let Some((rgba, side)) = icons::picture_pixels(128) {
         viewport = viewport.with_icon(egui::IconData { rgba, width: side, height: side });
     }
-    if launch.screenshot.is_some() && std::env::var_os("DISPLAY").is_some() {
-        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    if launch.screenshot.is_some() {
+        platform::prefer_drawing_while_hidden();
     }
     let mut options = eframe::NativeOptions { viewport, multisampling: 4, ..Default::default() };
     options.glow_options.vsync = launch.screenshot.is_none();

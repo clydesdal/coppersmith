@@ -1,13 +1,13 @@
 //! The bars and side panels round the board.
 
-use crate::app::{App, Sel, Tool, Unit};
-use crate::drc::Severity;
-use crate::geom::*;
-use crate::icons::{self, Icon};
-use crate::library::FootprintDef;
-use crate::model::*;
-use crate::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
-use crate::view::{self, Tr, fill_blob, layer_color};
+use crate::ui::app::{App, Sel, Tool, Unit};
+use crate::pcb::drc::Severity;
+use crate::pcb::geom::*;
+use crate::ui::icons::{self, Icon};
+use crate::pcb::library::FootprintDef;
+use crate::pcb::model::*;
+use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
+use crate::ui::view::{self, Tr, fill_blob, layer_color};
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Rect, Response, RichText, ScrollArea, Sense,
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
@@ -424,13 +424,13 @@ impl App {
             ui.label(RichText::new("Footprints").size(14.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if small_icon(ui, Icon::Folder, "Open the folder for your own footprint files", true).clicked()
-                    && let Some(dir) = crate::library::user_folder()
+                    && let Some(dir) = crate::pcb::library::user_folder()
                 {
                     let _ = std::fs::create_dir_all(&dir);
-                    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                    let _ = crate::platform::open_folder(&dir);
                 }
                 if small_icon(ui, Icon::Undo, "Read the footprint files again", true).clicked() {
-                    self.lib = crate::library::Library::load();
+                    self.lib = crate::pcb::library::Library::load();
                     self.notice = Some(format!("{} footprints in the library", self.lib.defs.len()));
                 }
             });
@@ -727,7 +727,7 @@ impl App {
             row(ui, "Errors", &errors.to_string());
             row(ui, "Warnings", &warnings.to_string());
             row(ui, "Still to connect", &unrouted.to_string());
-            let listed: Vec<(usize, &crate::drc::Problem)> =
+            let listed: Vec<(usize, &crate::pcb::drc::Problem)> =
                 self.problems.iter().enumerate().filter(|(_, p)| p.title != "Not connected").collect();
             if !listed.is_empty() {
                 ui.add_space(6.0);

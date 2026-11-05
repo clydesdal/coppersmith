@@ -1,6 +1,6 @@
 //! What a board is made of. This is also the saved file, written as JSON.
 
-use crate::geom::*;
+use crate::pcb::geom::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
@@ -507,7 +507,7 @@ impl Footprint {
         let label_layer = Layer::Silk(self.side);
         if layer == label_layer && !self.refdes.is_empty() {
             let h = rules.text_height;
-            let strokes = crate::font::strokes(&self.refdes, self.label_pos(), h, self.label_rot(), mirror);
+            let strokes = crate::pcb::font::strokes(&self.refdes, self.label_pos(), h, self.label_rot(), mirror);
             for s in strokes {
                 if s.len() == 1 || (s.len() == 2 && s[0].same(s[1])) {
                     out.push(Ink::Dot(s[0], rules.silk_width));

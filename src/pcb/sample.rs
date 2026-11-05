@@ -1,9 +1,9 @@
 //! A small made-up board to start with: a 555 timer blinking an LED, with a
 //! few tracks laid and the rest still to route.
 
-use crate::geom::*;
-use crate::library;
-use crate::model::*;
+use crate::pcb::geom::*;
+use crate::pcb::library;
+use crate::pcb::model::*;
 
 fn put(b: &mut Board, name: &str, refdes: &str, value: &str, at: P, rot: f64, nets: &[(&str, &str)]) {
     let defs = library::built_in();
@@ -67,14 +67,14 @@ mod tests {
     #[test]
     fn the_sample_has_no_errors_only_things_to_route() {
         let b = board();
-        let c = crate::copper::analyse(&b);
-        let found = crate::drc::check(&b, &c);
-        let errors: Vec<_> = found.iter().filter(|p| p.severity == crate::drc::Severity::Error).collect();
+        let c = crate::pcb::copper::analyse(&b);
+        let found = crate::pcb::drc::check(&b, &c);
+        let errors: Vec<_> = found.iter().filter(|p| p.severity == crate::pcb::drc::Severity::Error).collect();
         assert!(errors.is_empty(), "{errors:#?}");
         assert!(!c.rats.is_empty());
         // The ground track and via join U1 to J1.
         let u1 = b.footprints.iter().find(|f| f.refdes == "U1").unwrap().id;
         let j1 = b.footprints.iter().find(|f| f.refdes == "J1").unwrap().id;
-        assert!(c.connected(crate::copper::Item::Pad(u1, 0)).contains(&crate::copper::Item::Pad(j1, 1)));
+        assert!(c.connected(crate::pcb::copper::Item::Pad(u1, 0)).contains(&crate::pcb::copper::Item::Pad(j1, 1)));
     }
 }

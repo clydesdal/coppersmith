@@ -2,7 +2,7 @@
 //! apps, with a launcher entry, an icon and a `coppersmith` terminal command.
 //! Nothing here runs unless the person asks, and it stays inside their home.
 
-use crate::icons;
+use crate::ui::icons;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

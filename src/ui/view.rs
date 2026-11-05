@@ -1,13 +1,13 @@
 //! The board view: drawing every layer, and what the mouse does in each tool.
 
-use crate::app::*;
-use crate::copper::Item;
-use crate::drc::Severity;
-use crate::geom::*;
-use crate::icons::Icon;
-use crate::model::*;
-use crate::panels::{icon_button, segmented_tool};
-use crate::theme::{self, ACCENT, DIM, FAINT, FG, LINE, rgb};
+use crate::ui::app::*;
+use crate::pcb::copper::Item;
+use crate::pcb::drc::Severity;
+use crate::pcb::geom::*;
+use crate::ui::icons::Icon;
+use crate::pcb::model::*;
+use crate::ui::panels::{icon_button, segmented_tool};
+use crate::ui::theme::{self, ACCENT, DIM, FAINT, FG, LINE, rgb};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, Painter, PointerButton, Pos2, Rect, RichText, Sense, Shape,
     Stroke, StrokeKind, Ui, pos2, vec2,

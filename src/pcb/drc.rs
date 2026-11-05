@@ -1,8 +1,8 @@
 //! Checking the board against its rules before it goes to the maker.
 
-use crate::copper::{Copper, Item};
-use crate::geom::*;
-use crate::model::*;
+use crate::pcb::copper::{Copper, Item};
+use crate::pcb::geom::*;
+use crate::pcb::model::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
@@ -36,7 +36,7 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
     let items = &copper.items;
 
     // Copper of different nets too close together.
-    for (i, j) in crate::copper::near_pairs(items, r.clearance) {
+    for (i, j) in crate::pcb::copper::near_pairs(items, r.clearance) {
         let (a, b) = (&items[i], &items[j]);
         if !a.on.shares(b.on) || (a.net == b.net && a.net != 0) {
             continue;
@@ -208,7 +208,7 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::copper::analyse;
+    use crate::pcb::copper::analyse;
 
     #[test]
     fn close_tracks_of_two_nets_are_caught() {

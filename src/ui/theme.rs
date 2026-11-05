@@ -4,7 +4,6 @@
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, Visuals,
 };
-use std::process::Command;
 use std::sync::Arc;
 
 pub const BUTTON_RADIUS: u8 = 8;
@@ -72,38 +71,23 @@ pub fn visuals() -> Visuals {
     v
 }
 
-/// A monospaced font from this computer, for the numbers.
-fn monospace_file() -> Option<Vec<u8>> {
-    for name in ["JetBrains Mono", "monospace"] {
-        let out = Command::new("fc-match").args(["-f", "%{file}", name]).output().ok()?;
-        let path = String::from_utf8(out.stdout).ok()?;
-        if (path.ends_with(".ttf") || path.ends_with(".otf"))
-            && let Ok(bytes) = std::fs::read(path)
-        {
-            return Some(bytes);
-        }
-    }
-    None
-}
-
-/// Figtree is built in, so the text looks right on any computer. The numbers
-/// use JetBrains Mono or the computer's own mono font. On a computer with
-/// neither they fall back to Figtree, which keeps the program small.
+/// Figtree for words and JetBrains Mono for numbers, both built in, so the
+/// window looks the same on Linux, macOS and Windows.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert(
         "figtree".into(),
-        Arc::new(FontData::from_static(include_bytes!("../assets/fonts/figtree-400.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/figtree-400.ttf"))),
     );
     fonts.font_data.insert(
         "figtree-semibold".into(),
-        Arc::new(FontData::from_static(include_bytes!("../assets/fonts/figtree-600.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/figtree-600.ttf"))),
     );
-    let mut mono = vec!["figtree".to_string()];
-    if let Some(bytes) = monospace_file() {
-        fonts.font_data.insert("mono".into(), Arc::new(FontData::from_owned(bytes)));
-        mono.insert(0, "mono".to_string());
-    }
+    fonts.font_data.insert(
+        "mono".into(),
+        Arc::new(FontData::from_static(include_bytes!("../../assets/fonts/jetbrains-mono-400.ttf"))),
+    );
+    let mono = vec!["mono".to_string(), "figtree".to_string()];
     fonts.families.insert(FontFamily::Proportional, vec!["figtree".to_string()]);
     fonts.families.insert(FontFamily::Monospace, mono);
     fonts.families.insert(

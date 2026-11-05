@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: target/release/coppersmith
+          - os: macos-latest
+            artifact: target/Coppersmith.app
+          - os: windows-latest
+            artifact: target/release/coppersmith.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - run: cargo test
+      - run: cargo build --release
+      - name: Mac app
+        if: runner.os == 'macOS'
+        run: sh packaging/macos/make-app.sh
+      - name: Gerbers from the sample board
+        shell: bash
+        run: |
+          ./target/release/coppersmith --write-sample sample.cspcb
+          ./target/release/coppersmith sample.cspcb --check
+          ./target/release/coppersmith sample.cspcb --gerbers gerbers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coppersmith-${{ runner.os }}
+          path: ${{ matrix.artifact }}
