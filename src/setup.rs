@@ -107,8 +107,7 @@ pub fn install() -> Result<(), String> {
         "[Desktop Entry]\nType=Application\nName=Coppersmith\n\
          Comment=Lay out printed circuit boards and write Gerbers\n\
          Exec=\"{}\" %F\nIcon={NAME}\nTerminal=false\nCategories=Development;Electronics;Engineering;\n\
-         MimeType=application/vnd.gerber;application/x-gerber;application/x-excellon;\n\
-         Keywords=gerber;pcb;altium;drill;board;\nStartupWMClass={NAME}\n",
+         Keywords=pcb;layout;board;footprint;gerber;routing;\nStartupWMClass={NAME}\n",
         program.display()
     );
     std::fs::write(&desktop, entry).map_err(|e| format!("The launcher entry couldn't be made: {e}"))?;

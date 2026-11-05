@@ -923,7 +923,7 @@ impl App {
             .corner_radius(egui::CornerRadius::same(theme::CARD_RADIUS))
             .inner_margin(egui::Margin::same(20));
         let mut choice = None;
-        let modal = egui::Modal::new(egui::Id::new("save-changes")).frame(frame).show(ctx, |ui| {
+        let modal = egui::Modal::new(egui::Id::unique("save-changes")).frame(frame).show(ctx, |ui| {
             ui.set_width(340.0);
             ui.label(egui::RichText::new(format!("Save the changes to {}?", self.doc.name)).font(theme::semibold(16.0)));
             ui.add_space(4.0);
