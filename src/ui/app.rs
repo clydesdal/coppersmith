@@ -112,6 +112,7 @@ pub struct Launch {
 }
 
 pub enum Asked {
+    AddLibrary(PathBuf),
     Open(PathBuf),
     SaveAs(PathBuf),
     Export(PathBuf),
@@ -808,6 +809,43 @@ impl App {
         });
     }
 
+    pub fn ask_add_library(&self, ctx: &egui::Context) {
+        let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Add an Altium library")
+                .add_filter("Altium footprint library", &["PcbLib", "pcblib", "IntLib", "intlib"]);
+            if let Some(path) = dialog.pick_file() {
+                let _ = tx.send(Asked::AddLibrary(path));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Copies an Altium library into the footprint folder, so it's there
+    /// from now on, and reads the library again.
+    pub fn add_library(&mut self, path: PathBuf) {
+        let got = match crate::pcb::altium::read(&path) {
+            Ok(got) => got,
+            Err(e) => {
+                self.notice = Some(format!("That library couldn't be read: {e}"));
+                return;
+            }
+        };
+        let Some(dir) = crate::pcb::library::user_folder() else { return };
+        let _ = std::fs::create_dir_all(&dir);
+        let to = dir.join(path.file_name().unwrap_or_default());
+        if path != to
+            && let Err(e) = std::fs::copy(&path, &to)
+        {
+            self.notice = Some(format!("{} couldn't be copied: {e}", to.display()));
+            return;
+        }
+        self.lib = crate::pcb::library::Library::load();
+        let left = if got.notes.is_empty() { String::new() } else { format!(" ({} notes on what was left out: see coppersmith --read-altium)", got.notes.len()) };
+        self.notice = Some(format!("Added {} footprints from {}{left}", got.footprints.len(), to.file_name().unwrap_or_default().to_string_lossy()));
+    }
+
     pub fn ask_export(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -916,6 +954,7 @@ impl App {
     fn poll(&mut self) {
         while let Ok(asked) = self.asked_rx.try_recv() {
             match asked {
+                Asked::AddLibrary(path) => self.add_library(path),
                 Asked::Open(path) if self.dirty => self.confirm = Some(Then::Open(path)),
                 Asked::Open(path) => self.open(path),
                 Asked::SaveAs(path) => {

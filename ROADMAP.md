@@ -59,6 +59,12 @@ Next:
 
 ## 2. Library manager
 
+Started in 0.3.13: Altium and Circuit Studio libraries are read — PcbLib
+footprints into the library, SchLib symbols into a symbol model, IntLib
+both. Next: write PcbLib/SchLib that Circuit Studio opens (needs checking in
+Circuit Studio).
+
+
 - Footprint editor: pads (shape, size, drill, turn, numbering), pad arrays, silkscreen, courtyard and assembly drawing, IPC-7351 wizards for the package families already generated.
 - Symbol editor: pins (number, name, type), body graphics, multi-part symbols.
 - Components: symbol + footprint + pin map + parameters (value, manufacturer part number, supplier links) — the thing a schematic places.

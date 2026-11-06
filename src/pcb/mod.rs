@@ -3,6 +3,7 @@
 //! Gerber writer. Nothing here knows about windows or operating systems, so
 //! it builds and tests the same everywhere.
 
+pub mod altium;
 pub mod copper;
 pub mod drc;
 pub mod font;

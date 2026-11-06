@@ -73,6 +73,13 @@ impl FootprintDef {
 pub struct Library {
     pub defs: Vec<FootprintDef>,
     pub problems: Vec<String>,
+    /// What was left out or approximated reading Altium libraries.
+    pub notes: Vec<String>,
+}
+
+/// An Altium library this folder can take footprints from.
+pub fn is_altium(p: &std::path::Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcblib") || e.eq_ignore_ascii_case("intlib"))
 }
 
 pub fn user_folder() -> Option<PathBuf> {
@@ -83,6 +90,7 @@ impl Library {
     pub fn load() -> Library {
         let mut defs = built_in();
         let mut problems = Vec::new();
+        let mut notes = Vec::new();
         if let Some(dir) = user_folder()
             && let Ok(entries) = std::fs::read_dir(&dir)
         {
@@ -110,8 +118,26 @@ impl Library {
                     Err(e) => problems.push(format!("{name}: {e}")),
                 }
             }
+            // Altium and Circuit Studio libraries.
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+                files.sort();
+                for path in files.into_iter().filter(|p| is_altium(p)) {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    match crate::pcb::altium::read(&path) {
+                        Ok(got) => {
+                            for d in got.footprints {
+                                defs.retain(|old| old.name != d.name);
+                                defs.push(d);
+                            }
+                            notes.extend(got.notes.into_iter().map(|n| format!("{name}: {n}")));
+                        }
+                        Err(e) => problems.push(format!("{name}: {e}")),
+                    }
+                }
+            }
         }
-        Library { defs, problems }
+        Library { defs, problems, notes }
     }
 
     #[allow(dead_code)]

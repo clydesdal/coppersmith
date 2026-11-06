@@ -30,6 +30,8 @@ Options:
   --gerbers DIR                 write the board's Gerber and drill files and exit
   --check                       print the rule check for the board and exit
   --write-sample FILE           save the sample board as a file and exit
+  --read-altium FILE            read an Altium PcbLib, SchLib or IntLib and
+                                say what's in it and what was left out
   --zoom X,Y,WIDTH              start looking at this spot, WIDTH mm across
   --select REFDES               start with this part selected
   --screenshot FILE.png         draw a few frames, save the picture, and exit
@@ -77,6 +79,27 @@ fn run() -> Result<(), String> {
             }
             "--gerbers" => gerbers = Some(PathBuf::from(value("--gerbers")?)),
             "--check" => check = true,
+            "--read-altium" => {
+                let path = PathBuf::from(value("--read-altium")?);
+                let got = pcb::altium::read(&path)?;
+                println!("{} footprints", got.footprints.len());
+                for f in &got.footprints {
+                    let holes = f.pads.iter().filter(|p| p.drill > 0.0).count();
+                    println!("  {:<28} {:>3} pads ({holes} through) {}", f.name, f.pads.len(), f.description);
+                }
+                println!("{} symbols", got.symbols.len());
+                for s in &got.symbols {
+                    let fp = s.footprints.first().map(|f| format!(" -> {f}")).unwrap_or_default();
+                    println!("  {:<28} {:>3} pins, {} part(s), {}?{fp}  {}", s.name, s.pins.len(), s.parts, s.prefix, s.description);
+                }
+                if !got.notes.is_empty() {
+                    println!("Left out or approximated:");
+                    for n in &got.notes {
+                        println!("  {n}");
+                    }
+                }
+                return Ok(());
+            }
             "--write-sample" => {
                 let path = PathBuf::from(value("--write-sample")?);
                 return std::fs::write(&path, sample::board().save()).map_err(|e| format!("{}: {e}", path.display()));

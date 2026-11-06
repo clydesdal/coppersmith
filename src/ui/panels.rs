@@ -433,10 +433,19 @@ impl App {
                     self.lib = crate::pcb::library::Library::load();
                     self.notice = Some(format!("{} footprints in the library", self.lib.defs.len()));
                 }
+                if small_icon(ui, Icon::Plus, "Add an Altium or Circuit Studio library (.PcbLib or .IntLib)", true).clicked() {
+                    self.ask_add_library(ui.ctx());
+                }
             });
         });
         ui.add_space(2.0);
         ui.add(egui::TextEdit::singleline(&mut self.lib_filter).hint_text("Search, like 0603 or SOIC").desired_width(f32::INFINITY));
+        if !self.lib.notes.is_empty() {
+            let n = self.lib.notes.len();
+            let text = format!("{n} Altium footprint{} approximated", if n == 1 { "" } else { "s" });
+            let notes = self.lib.notes.join("\n");
+            ui.label(RichText::new(text).size(11.5).color(FAINT)).on_hover_text(notes);
+        }
         ui.add_space(6.0);
         let filter = self.lib_filter.to_lowercase();
         let words: Vec<&str> = filter.split_whitespace().collect();

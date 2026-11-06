@@ -198,6 +198,28 @@ Put one footprint or a list per file, in the
 same shape as a footprint in a board file. A file can replace a built-in
 footprint by using its name.
 
+### Altium and Circuit Studio libraries
+
+Coppersmith reads Altium Designer and Circuit Studio libraries: `.PcbLib`
+footprints, `.SchLib` symbols, and `.IntLib` integrated libraries (which hold
+both). Add one with the **+** button above the footprint list: it's copied
+into your footprint folder and its footprints appear under the library's
+name, ready to place. A footprint takes its name letter (R, C, U…) from the
+symbol that uses it, when the library has symbols.
+
+Pads (round, oval, rectangular and rounded; through-hole, plated or not),
+silkscreen, and courtyard and assembly drawings on mechanical layers come
+across. Octagonal pads become rounded rectangles and slotted holes round
+ones; copper drawn outside pads (copper tracks, fills, custom pad shapes) is
+left out — the library list says how many footprints were approximated,
+with the details on hover.
+
+    coppersmith --read-altium LIBRARY.IntLib
+
+lists what's in a library, symbols included (pins, prefix, linked footprint),
+and what was left out. Symbols are read now and kept for the schematic
+editor still to come. Writing Altium libraries is next.
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,
@@ -229,6 +251,7 @@ What each computer needs besides Rust:
         router.rs      the interactive router: corner styles, walk round, push, arcs, loops
         slide.rs       moving tracks without losing their 45° corners
         gerber.rs      Gerber and Excellon output
+        altium/        reading Altium / Circuit Studio PcbLib, SchLib, IntLib
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board
       ui/            the window
