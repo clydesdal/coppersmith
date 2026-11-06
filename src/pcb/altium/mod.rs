@@ -13,7 +13,10 @@
 //! KiCad's Altium importer is the open reference for these layouts; this
 //! follows it, checked against real Circuit Studio files in testdata/altium.
 
+pub mod pcbdoc;
 pub mod pcblib;
+pub mod prims;
+pub mod schdoc;
 pub mod schlib;
 
 use std::collections::HashMap;
@@ -55,6 +58,88 @@ pub fn read(path: &Path) -> Result<Imported, String> {
         }
     }
     Ok(got)
+}
+
+/// The kinds of Altium file there are readers for.
+pub fn is_board(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc"))
+}
+
+pub fn is_sheet(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("schdoc") || e.eq_ignore_ascii_case("csschdoc"))
+}
+
+pub fn is_project(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("prjpcb") || e.eq_ignore_ascii_case("csprjpcb"))
+}
+
+pub fn read_board(path: &Path) -> Result<pcbdoc::ImportedBoard, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    pcbdoc::read(&bytes, &name).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn read_sheet(path: &Path) -> Result<schdoc::Sheet, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+    schdoc::read(&bytes, &name).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A project file's documents (an INI listing them, paths Windows-style).
+pub fn project_documents(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let text = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = String::from_utf8_lossy(&text);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    let mut in_doc = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_doc = line.starts_with("[Document");
+        } else if in_doc && let Some(p) = line.strip_prefix("DocumentPath=") {
+            let p = dir.join(p.replace('\\', "/"));
+            if is_board(&p) || is_sheet(&p) {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// How a schematic's netlist and a board's nets agree: every schematic net's
+/// pins should sit on one board net, and that net on no other pins. Returns
+/// the nets checked and what disagrees.
+pub fn compare_nets(sch: &[(String, Vec<String>)], board: &crate::pcb::model::Board) -> (usize, Vec<String>) {
+    let mut net_of: HashMap<String, u32> = HashMap::new();
+    for f in &board.footprints {
+        for pad in &f.pads {
+            net_of.insert(format!("{}-{}", f.refdes, pad.num), pad.net);
+        }
+    }
+    let mut problems = Vec::new();
+    let mut checked = 0;
+    let mut used: HashMap<u32, String> = HashMap::new();
+    for (name, pins) in sch {
+        let nets: Vec<Option<u32>> = pins.iter().map(|p| net_of.get(p).copied()).collect();
+        let missing: Vec<&String> = pins.iter().zip(&nets).filter(|(_, n)| n.is_none()).map(|(p, _)| p).collect();
+        if !missing.is_empty() {
+            problems.push(format!("{name}: pins not on the board: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            continue;
+        }
+        let mut found: Vec<u32> = nets.into_iter().flatten().collect();
+        found.sort();
+        found.dedup();
+        checked += 1;
+        if found.len() != 1 || found[0] == 0 {
+            let names: Vec<&str> = found.iter().map(|n| board.net_name(*n)).collect();
+            problems.push(format!("{name}: on the board it's {}", names.join(" + ")));
+            continue;
+        }
+        if let Some(other) = used.insert(found[0], name.clone()) {
+            problems.push(format!("{name} and {other} are one net on the board ({})", board.net_name(found[0])));
+        }
+    }
+    (checked, problems)
 }
 
 /// An integrated library: the PcbLib and SchLib inside, unpacked and read.

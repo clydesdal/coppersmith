@@ -220,6 +220,24 @@ lists what's in a library, symbols included (pins, prefix, linked footprint),
 and what was left out. Symbols are read now and kept for the schematic
 editor still to come. Writing Altium libraries is next.
 
+### Altium and Circuit Studio boards and schematics
+
+**Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in
+unsaved, as a new Coppersmith board: outline, copper layers, parts (with
+their footprints as placed), nets, tracks, arcs and vias, and the design
+rules (clearance from the clearance table, track widths, via sizes, mask
+and edge clearance). Pours, fills, free pads and plane layers aren't brought
+in yet; the status bar says what was left out. Part names sit at
+Coppersmith's usual spot, not where Altium had them.
+
+    coppersmith --read-altium BOARD.CSPcbDoc
+    coppersmith --read-altium SHEET.SchDoc
+    coppersmith --read-altium PROJECT.PrjPcb
+
+summarises a board (with its rules), a schematic sheet (parts, wires,
+labels, ports), or a whole project: every sheet's netlist joined up and
+checked net by net against the board, listing any pin the two disagree on.
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,
@@ -251,7 +269,7 @@ What each computer needs besides Rust:
         router.rs      the interactive router: corner styles, walk round, push, arcs, loops
         slide.rs       moving tracks without losing their 45° corners
         gerber.rs      Gerber and Excellon output
-        altium/        reading Altium / Circuit Studio PcbLib, SchLib, IntLib
+        altium/        reading Altium / Circuit Studio libraries, boards, sheets, projects
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board
       ui/            the window

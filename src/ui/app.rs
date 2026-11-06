@@ -748,6 +748,28 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
+        // An Altium or Circuit Studio board opens as a new, unsaved board.
+        if crate::pcb::altium::is_board(&path) {
+            match crate::pcb::altium::read_board(&path) {
+                Ok(got) => {
+                    let before = std::mem::replace(&mut self.doc, got.board);
+                    self.cancel();
+                    self.remember(before);
+                    self.path = None;
+                    self.sel.clear();
+                    self.highlight = None;
+                    self.fit_pending = true;
+                    let n = got.notes.len();
+                    self.notice = Some(if n == 0 {
+                        format!("Read {}; save it to keep it as a Coppersmith board", path.display())
+                    } else {
+                        format!("Read {} — {n} notes: {}", path.display(), got.notes.join("; "))
+                    });
+                }
+                Err(e) => self.notice = Some(e),
+            }
+            return;
+        }
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Board::load(&t)) {
             Ok(b) => {
                 let before = std::mem::replace(&mut self.doc, b);
@@ -801,7 +823,11 @@ impl App {
     pub fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open a board").add_filter("Coppersmith board", &["cspcb", "json"]);
+            let dialog = rfd::FileDialog::new()
+                .set_title("Open a board")
+                .add_filter("Boards", &["cspcb", "json", "PcbDoc", "pcbdoc", "CSPcbDoc", "cspcbdoc"])
+                .add_filter("Coppersmith board", &["cspcb", "json"])
+                .add_filter("Altium or Circuit Studio board", &["PcbDoc", "pcbdoc", "CSPcbDoc", "cspcbdoc"]);
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Open(path));
                 ctx.request_repaint();

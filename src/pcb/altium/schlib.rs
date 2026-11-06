@@ -46,6 +46,15 @@ pub struct Pin {
     pub hidden: bool,
 }
 
+impl Pin {
+    /// Where wires join it: `at` is where it meets the body, and it reaches
+    /// out from there by its length in the way it points.
+    pub fn tip(&self) -> P {
+        let t = self.angle.to_radians();
+        self.at.add(p(t.cos(), t.sin()).scale(self.length)).rounded()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Drawing {
     Line(P, P),
@@ -203,7 +212,7 @@ fn pin_kind(k: u8) -> PinKind {
 }
 
 /// The binary pin record of newer files.
-fn binary_pin(b: &[u8]) -> Result<Pin, String> {
+pub(super) fn binary_pin(b: &[u8]) -> Result<Pin, String> {
     let mut r = Reader::new(b);
     r.u32()?; // record kind, 2
     r.skip(1)?;
@@ -222,7 +231,7 @@ fn binary_pin(b: &[u8]) -> Result<Pin, String> {
 }
 
 /// The text pin record of older files.
-fn text_pin(p: &HashMap<String, String>, part: u32) -> Pin {
+pub(super) fn text_pin(p: &HashMap<String, String>, part: u32) -> Pin {
     let flags: u32 = p.get("PINCONGLOMERATE").and_then(|v| v.parse().ok()).unwrap_or(0);
     let kind: u8 = p.get("ELECTRICAL").and_then(|v| v.parse().ok()).unwrap_or(4);
     Pin {

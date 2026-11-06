@@ -30,8 +30,10 @@ Options:
   --gerbers DIR                 write the board's Gerber and drill files and exit
   --check                       print the rule check for the board and exit
   --write-sample FILE           save the sample board as a file and exit
-  --read-altium FILE            read an Altium PcbLib, SchLib or IntLib and
-                                say what's in it and what was left out
+  --read-altium FILE            read an Altium or Circuit Studio library,
+                                board, schematic sheet or project and say
+                                what's in it; a project's schematic netlist
+                                is checked against its board
   --zoom X,Y,WIDTH              start looking at this spot, WIDTH mm across
   --select REFDES               start with this part selected
   --screenshot FILE.png         draw a few frames, save the picture, and exit
@@ -46,11 +48,108 @@ fn numbers(text: &str, count: usize, name: &str) -> Result<Vec<f64>, String> {
 
 fn load(path: &Option<PathBuf>) -> Result<model::Board, String> {
     match path {
+        Some(path) if pcb::altium::is_board(path) => Ok(pcb::altium::read_board(path)?.board),
         Some(path) => {
             let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
             model::Board::load(&text)
         }
         None => Ok(sample::board()),
+    }
+}
+
+/// `--read-altium`: says what's in a library, board, sheet or project.
+fn read_altium_design(path: &std::path::Path) -> Result<(), String> {
+    use pcb::altium;
+    if altium::is_board(path) {
+        let got = altium::read_board(path)?;
+        print_board(&got);
+        return Ok(());
+    }
+    if altium::is_sheet(path) {
+        let sheet = altium::read_sheet(path)?;
+        print_sheet(&sheet);
+        let nets = altium::schdoc::netlist(std::slice::from_ref(&sheet));
+        println!("{} nets", nets.len());
+        for (name, pins) in &nets {
+            println!("  {name}: {}", pins.join(" "));
+        }
+        return Ok(());
+    }
+    if altium::is_project(path) {
+        let docs = altium::project_documents(path)?;
+        let mut sheets = Vec::new();
+        let mut board = None;
+        for d in &docs {
+            if altium::is_sheet(d) {
+                let s = altium::read_sheet(d)?;
+                print_sheet(&s);
+                sheets.push(s);
+            } else if altium::is_board(d) && board.is_none() {
+                let b = altium::read_board(d)?;
+                print_board(&b);
+                board = Some(b);
+            }
+        }
+        let nets = altium::schdoc::netlist(&sheets);
+        println!("Schematic netlist: {} nets", nets.len());
+        if let Some(b) = board {
+            let (checked, problems) = altium::compare_nets(&nets, &b.board);
+            println!("Against the board: {checked} nets checked, {} disagree", problems.len());
+            for p in &problems {
+                println!("  {p}");
+            }
+        }
+        return Ok(());
+    }
+    // A library.
+    let got = altium::read(path)?;
+    println!("{} footprints", got.footprints.len());
+    for f in &got.footprints {
+        let holes = f.pads.iter().filter(|p| p.drill > 0.0).count();
+        println!("  {:<28} {:>3} pads ({holes} through) {}", f.name, f.pads.len(), f.description);
+    }
+    println!("{} symbols", got.symbols.len());
+    for s in &got.symbols {
+        let fp = s.footprints.first().map(|f| format!(" -> {f}")).unwrap_or_default();
+        println!("  {:<28} {:>3} pins, {} part(s), {}?{fp}  {}", s.name, s.pins.len(), s.parts, s.prefix, s.description);
+    }
+    if !got.notes.is_empty() {
+        println!("Left out or approximated:");
+        for n in &got.notes {
+            println!("  {n}");
+        }
+    }
+    Ok(())
+}
+
+fn print_board(got: &pcb::altium::pcbdoc::ImportedBoard) {
+    let b = &got.board;
+    let bb = b.outline_bbox();
+    println!(
+        "Board {}: {:.2} × {:.2} mm, {} copper layers, {} parts, {} nets, {} tracks, {} vias",
+        b.name,
+        bb.w(),
+        bb.h(),
+        b.copper,
+        b.footprints.len(),
+        b.nets.len(),
+        b.tracks.len(),
+        b.vias.len()
+    );
+    let r = &b.rules;
+    println!(
+        "  rules: clearance {} mm, track {} mm (least {}), via {}/{} mm, hole least {}, ring least {}",
+        r.clearance, r.track, r.min_track, r.via_dia, r.via_drill, r.min_drill, r.min_ring
+    );
+    for n in &got.notes {
+        println!("  {n}");
+    }
+}
+
+fn print_sheet(s: &pcb::altium::schdoc::Sheet) {
+    println!("Sheet {}: {} parts, {} wires, {} names", s.name, s.parts.len(), s.wires.len(), s.names.len());
+    for p in &s.parts {
+        println!("  {:<8} {:<24} {:<20} {} pins  [{}]", p.designator, p.lib_ref, p.value, p.pins.len(), p.footprint);
     }
 }
 
@@ -81,25 +180,9 @@ fn run() -> Result<(), String> {
             "--check" => check = true,
             "--read-altium" => {
                 let path = PathBuf::from(value("--read-altium")?);
-                let got = pcb::altium::read(&path)?;
-                println!("{} footprints", got.footprints.len());
-                for f in &got.footprints {
-                    let holes = f.pads.iter().filter(|p| p.drill > 0.0).count();
-                    println!("  {:<28} {:>3} pads ({holes} through) {}", f.name, f.pads.len(), f.description);
-                }
-                println!("{} symbols", got.symbols.len());
-                for s in &got.symbols {
-                    let fp = s.footprints.first().map(|f| format!(" -> {f}")).unwrap_or_default();
-                    println!("  {:<28} {:>3} pins, {} part(s), {}?{fp}  {}", s.name, s.pins.len(), s.parts, s.prefix, s.description);
-                }
-                if !got.notes.is_empty() {
-                    println!("Left out or approximated:");
-                    for n in &got.notes {
-                        println!("  {n}");
-                    }
-                }
-                return Ok(());
+                return read_altium_design(&path);
             }
+            "--read-altium-lib" => return read_altium_design(&PathBuf::from(value("--read-altium-lib")?)),
             "--write-sample" => {
                 let path = PathBuf::from(value("--write-sample")?);
                 return std::fs::write(&path, sample::board().save()).map_err(|e| format!("{}: {e}", path.display()));

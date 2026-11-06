@@ -64,6 +64,11 @@ footprints into the library, SchLib symbols into a symbol model, IntLib
 both. Next: write PcbLib/SchLib that Circuit Studio opens (needs checking in
 Circuit Studio).
 
+0.3.14 reads boards (PcbDoc/CSPcbDoc: parts, nets, copper, rules) and
+schematics (SchDoc, PrjPcb netlists checked against the board). Still to
+come from them: pours and fills, plane layers, designator text positions,
+and schematic drawing once there's a schematic editor.
+
 
 - Footprint editor: pads (shape, size, drill, turn, numbering), pad arrays, silkscreen, courtyard and assembly drawing, IPC-7351 wizards for the package families already generated.
 - Symbol editor: pins (number, name, type), body graphics, multi-part symbols.

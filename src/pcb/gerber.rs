@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 fn c(v: f64) -> i64 {
-    (v * 1e6).round() as i64
+    // A coordinate that isn't a sensible number is written as 0 rather than
+    // as nonsense; boards are checked for these on the way in.
+    if v.is_finite() && v.abs() < 1e6 { (v * 1e6).round() as i64 } else { 0 }
 }
 
 struct Gerber {
