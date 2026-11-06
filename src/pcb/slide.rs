@@ -10,7 +10,7 @@
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
 use crate::pcb::copper::{Item, analyse};
-use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, as_steps, clear_pieces, legs, shove};
+use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, legs, shove_from};
 use std::collections::HashSet;
 
 /// Runs at a multiple of 45°.
@@ -139,48 +139,81 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
     true
 }
 
-/// Slides a track as `slide` does, and pushes other nets' tracks (and vias,
-/// if `via_push`) out of the way of the slid track and its neighbours. None
-/// when it can't: the slid tracks would come too close to something that
-/// can't move, or what's in the way can't give way. Then the slide should
-/// stop where it last could.
+/// Slides a track as `slide` does, then pushes what's in the way as any
+/// move does. None when either can't be done.
+#[cfg(test)]
 pub fn slide_push(board: &Board, id: u32, delta: P, via_push: bool) -> Option<Board> {
-    let t = board.track(id)?.clone();
     let mut b = board.clone();
     if !slide(&mut b, id, delta) {
         return None;
     }
-    let (net, layer) = (t.net, t.layer);
-    // The slid net's tracks on this layer push; with no net, just what changed.
-    let ours: Vec<Track> = b
-        .tracks
+    push_after_move(board, b, via_push)
+}
+
+/// After a move (`before` → `after`), pushes other nets' tracks, and vias if
+/// `via_push`, out of the way of everything that moved: the pads of moved
+/// parts on their layers, moved vias on every layer, and tracks that moved or
+/// were re-laid. None when it can't: something that moved would come within
+/// the clearance of what can't be pushed (other parts' pads, holes, the edge,
+/// or a via with via pushing off), or what's in the way can't give way.
+pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<Board> {
+    let changed: HashSet<u32> = after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect();
+    let moved_vias: HashSet<u32> =
+        after.vias.iter().filter(|v| before.via(v.id).is_none_or(|old| !old.at.same(v.at))).map(|v| v.id).collect();
+    let moved_fps: HashSet<u32> = after
+        .footprints
         .iter()
-        .filter(|x| x.layer == layer && if net != 0 { x.net == net } else { board.track(x.id) != Some(*x) })
-        .cloned()
+        .filter(|f| before.fp(f.id).is_none_or(|old| !old.at.same(f.at) || old.rot != f.rot || old.side != f.side))
+        .map(|f| f.id)
         .collect();
-    let our_ids: HashSet<u32> = ours.iter().map(|x| x.id).collect();
-    let mut scene = Scene::new(&b, &analyse(&b), layer, net);
-    scene.via_push = via_push;
-    scene.lines.retain(|l| !l.ids.iter().any(|i| our_ids.contains(i)));
-    // They can't come close to what won't move.
-    let fixed: Vec<Obstacle> = scene
-        .own
-        .iter()
-        .filter(|o| !scene.movable(o) && !matches!(o.item, Some(Item::Track(i)) if our_ids.contains(&i)))
-        .cloned()
-        .collect();
-    let mut steps = Vec::new();
-    let mut width: f64 = 0.0;
-    for x in &ours {
-        let piece = [(x.a, x.b, x.mid)];
-        if !clear_pieces(&fixed, &piece, x.w) {
-            return None;
-        }
-        steps.extend(as_steps(&piece));
-        width = width.max(x.w + if x.mid.is_some() { 2.0 * ARC_ERROR } else { 0.0 });
+    if changed.is_empty() && moved_vias.is_empty() && moved_fps.is_empty() {
+        return Some(after);
     }
-    let (runs, vias) = shove(&scene, &steps, width)?;
-    apply_pushed(&mut b, &runs, &vias);
+    let mover = |item: Option<Item>| match item {
+        Some(Item::Track(id)) => changed.contains(&id),
+        Some(Item::Via(id)) => moved_vias.contains(&id),
+        Some(Item::Pad(f, _)) => moved_fps.contains(&f),
+        None => false,
+    };
+    let mut b = after;
+    for layer in b.copper_layers() {
+        // What moved, on this layer.
+        let mut push: Vec<(Blob, u32)> = Vec::new();
+        for t in b.tracks.iter().filter(|t| t.layer == layer && changed.contains(&t.id)) {
+            push.extend(t.blobs().into_iter().map(|bl| (bl, t.net)));
+        }
+        for v in b.vias.iter().filter(|v| moved_vias.contains(&v.id)) {
+            push.push((v.blob(), v.net));
+        }
+        for f in b.footprints.iter().filter(|f| moved_fps.contains(&f.id)) {
+            for (i, pad) in f.pads.iter().enumerate() {
+                if pad.through() || f.copper() == layer {
+                    let blob = if pad.bare_hole() { Blob::dot(f.pad_center(i), pad.drill) } else { f.pad_blob(i, 0.0) };
+                    push.push((blob, pad.net));
+                }
+            }
+        }
+        if push.is_empty() {
+            continue;
+        }
+        let mut scene = Scene::new(&b, &analyse(&b), layer, 0);
+        scene.via_push = via_push;
+        scene.lines.retain(|l| !l.ids.iter().any(|i| changed.contains(i)));
+        scene.vias.retain(|v| !moved_vias.contains(&v.0));
+        // What moved can't come close to what can't be pushed.
+        let fixed: Vec<&Obstacle> = scene.all.iter().filter(|o| !scene.movable(o) && !mover(o.item)).collect();
+        for (blob, net) in &push {
+            let bb = blob.bbox();
+            for o in &fixed {
+                let other = o.net != *net || *net == 0;
+                if other && o.bbox.grown(o.gap).touches(&bb) && blob.gap(&o.blob).0 < o.gap + 1e-7 {
+                    return None;
+                }
+            }
+        }
+        let (runs, vias) = shove_from(&scene, &push)?;
+        apply_pushed(&mut b, &runs, &vias);
+    }
     Some(b)
 }
 
@@ -457,5 +490,101 @@ mod pushing_while_sliding {
         tp(&mut b, p(7.0, 3.6), w);
         assert!(slide_push(&b, mid, p(0.0, 0.5), true).is_some(), "a little is fine");
         assert!(slide_push(&b, mid, p(0.0, 1.5), true).is_none(), "into the pad isn't");
+    }
+}
+
+#[cfg(test)]
+mod pushing_while_moving {
+    use super::*;
+    use crate::pcb::drc;
+
+    fn tp(b: &mut Board, at: P, net: u32) -> u32 {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+        id
+    }
+
+    fn track(b: &mut Board, s: (f64, f64), e: (f64, f64), net: u32) -> u32 {
+        let id = b.new_id();
+        b.tracks.push(Track { mid: None, id, a: p(s.0, s.1), b: p(e.0, e.1), w: 0.25, layer: TOP, net });
+        id
+    }
+
+    /// Net B runs straight along y = 3 from pad to pad.
+    fn board() -> (Board, u32, u32) {
+        let mut b = Board { outline: rect_outline(p(-5.0, -5.0), p(25.0, 12.0)), ..Board::default() };
+        let (a, n) = (b.net("A"), b.net("B"));
+        tp(&mut b, p(-3.0, 3.0), n);
+        tp(&mut b, p(17.0, 3.0), n);
+        track(&mut b, (-3.0, 3.0), (17.0, 3.0), n);
+        (b, a, n)
+    }
+
+    fn check(after: &Board, n: u32) {
+        let bad: Vec<String> = drc::check(after, &analyse(after))
+            .into_iter()
+            .filter(|p| ["Too close", "Short circuit"].contains(&p.title.as_str()))
+            .map(|p| p.detail)
+            .collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(after.tracks.iter().filter(|t| t.net == n).count() > 1, "B was pushed");
+        assert!(after.tracks.iter().all(|t| octilinear(t.b.sub(t.a))), "and kept 45°");
+    }
+
+    #[test]
+    fn moving_a_part_pushes_tracks() {
+        let (mut b, a, n) = board();
+        let part = tp(&mut b, p(7.0, 0.0), a);
+        let mut after = b.clone();
+        after.fp_mut(part).unwrap().at = p(7.0, 2.4);
+        let after = push_after_move(&b, after, true).expect("B gives way");
+        check(&after, n);
+    }
+
+    #[test]
+    fn moving_a_via_pushes_tracks() {
+        let (mut b, a, n) = board();
+        let id = b.new_id();
+        b.vias.push(Via { id, at: p(7.0, 0.0), dia: 0.6, drill: 0.3, net: a });
+        let mut after = b.clone();
+        after.vias.iter_mut().find(|v| v.id == id).unwrap().at = p(7.0, 2.6);
+        let after = push_after_move(&b, after, true).expect("B gives way");
+        check(&after, n);
+    }
+
+    #[test]
+    fn moving_tracks_and_dragging_corners_pushes_too() {
+        let (mut b, a, n) = board();
+        tp(&mut b, p(2.0, 0.0), a);
+        track(&mut b, (2.0, 0.0), (5.0, 0.0), a);
+        track(&mut b, (5.0, 0.0), (7.0, 2.0), a);
+        // Drag the corner up under B.
+        let mut after = b.clone();
+        drag_joint(&mut after, p(7.0, 2.0), p(9.0, 2.75));
+        let after = push_after_move(&b, after, true).expect("B gives way");
+        check(&after, n);
+    }
+
+    #[test]
+    fn a_part_cant_be_pushed_into_another_parts_pad() {
+        let (mut b, a, _) = board();
+        let part = tp(&mut b, p(7.0, -2.0), a);
+        let w = b.net("W");
+        tp(&mut b, p(7.0, 0.0), w);
+        let mut after = b.clone();
+        after.fp_mut(part).unwrap().at = p(7.0, -0.8);
+        assert!(push_after_move(&b, after, true).is_none());
     }
 }

@@ -253,6 +253,7 @@ pub fn clear_arc(obs: &[Obstacle], a: P, m: P, b: P, w: f64) -> bool {
 }
 
 /// Every piece of a path, straight or arc, is clear.
+#[cfg(test)]
 pub fn clear_pieces(obs: &[Obstacle], pieces: &[(P, P, Option<P>)], w: f64) -> bool {
     pieces.iter().all(|(a, b, m)| match m {
         Some(m) => clear_arc(obs, *a, *m, *b, w),
@@ -1050,8 +1051,15 @@ fn follow(obs: &[Obstacle], run: &[P], from: P, to: P, w: f64) -> Option<Vec<P>>
 /// clear on every layer, and its tracks follow it. Whatever is pushed then
 /// pushes what it runs into. None when something can't give way.
 pub fn shove(scene: &Scene, segs: &[(P, P)], w: f64) -> Option<(Vec<Moved>, Vec<(u32, P)>)> {
+    let push: Vec<(Blob, u32)> = segs.iter().map(|(a, b)| (Blob::line(*a, *b, w), scene.net)).collect();
+    shove_from(scene, &push)
+}
+
+/// Pushes other copper out of the way of `push`: any shapes, each with its
+/// net, such as the pads of a part that's been moved.
+pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Vec<(u32, P)>)> {
     let c = scene.clearance;
-    let mut pushers: Vec<Pusher> = segs.iter().map(|(a, b)| pusher(Blob::line(*a, *b, w), scene.net, Owner::Route)).collect();
+    let mut pushers: Vec<Pusher> = push.iter().map(|(blob, net)| pusher(blob.clone(), *net, Owner::Route)).collect();
     let mut runs: Vec<Vec<P>> = scene.lines.iter().map(|l| l.pts.clone()).collect();
     let mut moved: Vec<bool> = vec![false; runs.len()];
     // Runs on other layers that followed a via: (layer slot, run) -> corners.

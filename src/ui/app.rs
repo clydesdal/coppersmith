@@ -92,6 +92,8 @@ pub struct Drag {
     /// The point that lands on the grid.
     pub reference: P,
     pub moved: bool,
+    /// Ctrl held: moved without pushing.
+    pub free: bool,
 }
 
 #[derive(Default)]
@@ -457,6 +459,23 @@ impl App {
         crate::pcb::slide::drag_joint(board, from, to);
     }
 
+    /// Pushes what's in the way of what an edit just moved; if it can't, the
+    /// edit stands and the rule check shows what's too close.
+    fn push_after_edit(&mut self, before: &Board) {
+        if self.doc == *before {
+            return;
+        }
+        match crate::pcb::slide::push_after_move(before, self.doc.clone(), self.route_mode.via_push) {
+            Some(b) => {
+                if b != self.doc {
+                    self.doc = b;
+                    self.touch();
+                }
+            }
+            None => self.notice = Some("Couldn't push everything out of the way; the checks show what's too close.".into()),
+        }
+    }
+
     pub fn rotate_selection(&mut self, deg: f64) {
         if let Some((f, _)) = &mut self.placing {
             f.rot = (f.rot + deg).rem_euclid(360.0);
@@ -464,6 +483,7 @@ impl App {
         }
         let sel = self.sel.clone();
         let fps: Vec<u32> = sel.iter().filter_map(|s| if let Sel::Fp(id) = s { Some(*id) } else { None }).collect();
+        let before = self.doc.clone();
         self.edit(|b| {
             for id in fps {
                 let Some(f) = b.fp(id) else { continue };
@@ -479,6 +499,7 @@ impl App {
                 crate::pcb::slide::follow_moves(b, &moves, &HashSet::new());
             }
         });
+        self.push_after_edit(&before);
     }
 
     pub fn flip_selection(&mut self) {
@@ -487,6 +508,7 @@ impl App {
             return;
         }
         let sel = self.sel.clone();
+        let before = self.doc.clone();
         self.edit(|b| {
             for s in &sel {
                 if let Sel::Fp(id) = s
@@ -502,6 +524,7 @@ impl App {
                 }
             }
         });
+        self.push_after_edit(&before);
     }
 
     pub fn delete_selection(&mut self) {

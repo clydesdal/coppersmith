@@ -322,7 +322,7 @@ impl App {
                 } else {
                     let hint = match self.tool {
                         Tool::Select if !self.sel.is_empty() => {
-                            "Drag to move · R turn · L other side · Delete removes · Ctrl+D copies · N lights up a net"
+                            "Drag to move, pushing what's in the way (Ctrl: don't push) · R turn · L other side · Delete removes · Ctrl+D copies"
                         }
                         Tool::Select => "Click to pick · Drag to move or box · Right-drag to pan · Scroll to zoom",
                         Tool::Route if self.route.is_some() => {

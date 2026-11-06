@@ -40,6 +40,20 @@ On a board laid at 45°, moving things doesn't leave tracks at odd angles:
   in 45° legs.
 - Pushed tracks keep 45° too.
 
+### Moving pushes
+
+Anything you drag pushes other nets' tracks out of its way, and their vias
+with Push vias too on: a part's pads, a via, a slid track, tracks moved
+together, a dragged corner or track end. Turning (R) and flipping (L) a part
+push too. Pushes cascade, keep 45°, and spring back as you drag back.
+
+Nothing that moves comes within the clearance of what can't be pushed (other
+parts' pads, holes, the board edge): the drag stops as close as it can get
+and the status bar says why. When you let go, the rule check runs, and if it
+finds anything new too close the move is taken back. Hold **Ctrl** while
+dragging to move freely without pushing; the rule check then just shows
+anything that's too close.
+
 Tracks that weren't at a multiple of 45° to begin with just stretch, so
 any-angle work stays as it was drawn. Arcs keep their bulge.
 

@@ -301,7 +301,8 @@ impl App {
                     self.begin_drag(q0, tol, shift, origin);
                 }
                 if response.dragged_by(PointerButton::Primary) {
-                    self.continue_drag(q);
+                    let free = ui.input(|i| i.modifiers.command);
+                    self.continue_drag(q, free);
                 }
                 if response.drag_stopped() {
                     self.end_drag(&tr, at);
@@ -433,6 +434,7 @@ impl App {
                         grab: q0,
                         reference: end,
                         moved: false,
+                        free: false,
                     });
                     return;
                 }
@@ -451,59 +453,72 @@ impl App {
             Sel::Track(id) => self.doc.track(id).map(|t| if t.a.dist(q0) < t.b.dist(q0) { t.a } else { t.b }),
         }
         .unwrap_or(q0);
-        self.drag = Some(Drag { kind: DragKind::Move, before: self.doc.clone(), grab: q0, reference, moved: false });
+        self.drag = Some(Drag { kind: DragKind::Move, before: self.doc.clone(), grab: q0, reference, moved: false, free: false });
     }
 
-    fn continue_drag(&mut self, q: P) {
-        let Some(drag) = &mut self.drag else { return };
-        let target = drag.reference.add(q.sub(drag.grab)).snap(self.grid);
+    /// The board with the drag carried out a fraction `f` of the way, before
+    /// anything is pushed. None when the move itself can't be made, like a
+    /// slid track shrinking to nothing.
+    fn dragged(&self, drag: &Drag, full: P, f: f64) -> Option<Board> {
         let mut doc = drag.before.clone();
         match drag.kind {
             DragKind::Move => {
-                let d = target.sub(drag.reference).rounded();
-                let slid = match self.sel.as_slice() {
-                    [Sel::Track(id)] if drag.before.track(*id).is_some_and(|t| t.mid.is_none()) => Some(*id),
-                    _ => None,
-                };
-                match slid {
-                    // One straight track slides, pushing what it runs into.
-                    // Blocked, it goes as far as it can.
-                    Some(id) => {
-                        let via_push = self.route_mode.via_push;
-                        match crate::pcb::slide::slide_push(&drag.before, id, d, via_push) {
-                            Some(b) => doc = b,
-                            None => {
-                                let (mut lo, mut hi) = (0.0, 1.0);
-                                let mut best = drag.before.clone();
-                                for _ in 0..8 {
-                                    let mid = (lo + hi) / 2.0;
-                                    match crate::pcb::slide::slide_push(&drag.before, id, d.scale(mid).rounded(), via_push) {
-                                        Some(b) => {
-                                            lo = mid;
-                                            best = b;
-                                        }
-                                        None => hi = mid,
-                                    }
-                                }
-                                doc = best;
-                                // Say why: the track itself giving out, or what's in its way.
-                                let mut plain = drag.before.clone();
-                                self.notice = Some(if crate::pcb::slide::slide(&mut plain, id, d) {
-                                    "Can't slide further: something there can't move out of the way.".into()
-                                } else {
-                                    "Can't slide further: the track would shrink to nothing.".into()
-                                });
-                            }
+                let d = full.scale(f).rounded();
+                match self.sel.as_slice() {
+                    // One straight track slides, keeping its corners.
+                    [Sel::Track(id)] if drag.before.track(*id).is_some_and(|t| t.mid.is_none()) => {
+                        if !crate::pcb::slide::slide(&mut doc, *id, d) {
+                            return None;
                         }
                     }
-                    None => App::move_selection(&mut doc, &self.sel, d),
+                    sel => App::move_selection(&mut doc, sel, d),
                 }
-                drag.moved = doc != drag.before;
             }
             DragKind::End(id, far) => {
-                App::move_end(&mut doc, id, far, target);
-                drag.moved = !target.same(drag.reference);
+                let to = drag.reference.add(full.scale(f)).rounded();
+                App::move_end(&mut doc, id, far, to);
             }
+        }
+        Some(doc)
+    }
+
+    fn continue_drag(&mut self, q: P, free: bool) {
+        let Some(drag) = self.drag.clone() else { return };
+        let target = drag.reference.add(q.sub(drag.grab)).snap(self.grid);
+        let full = target.sub(drag.reference).rounded();
+        let via_push = self.route_mode.via_push;
+        // What moves pushes what's in its way, unless Ctrl is held.
+        let attempt = |app: &App, f: f64| -> Option<Board> {
+            let plain = app.dragged(&drag, full, f)?;
+            if free { Some(plain) } else { crate::pcb::slide::push_after_move(&drag.before, plain, via_push) }
+        };
+        let doc = match attempt(self, 1.0) {
+            Some(b) => b,
+            None => {
+                // Blocked: as far as it can go.
+                let (mut lo, mut hi) = (0.0, 1.0);
+                let mut best = drag.before.clone();
+                for _ in 0..8 {
+                    let mid = (lo + hi) / 2.0;
+                    match attempt(self, mid) {
+                        Some(b) => {
+                            lo = mid;
+                            best = b;
+                        }
+                        None => hi = mid,
+                    }
+                }
+                self.notice = Some(if self.dragged(&drag, full, 1.0).is_none() {
+                    "Can't slide further: the track would shrink to nothing.".into()
+                } else {
+                    "Can't go further: something there can't move out of the way. Hold Ctrl to move without pushing.".into()
+                });
+                best
+            }
+        };
+        if let Some(d) = &mut self.drag {
+            d.moved = doc != d.before;
+            d.free = free;
         }
         if doc != self.doc {
             self.doc = doc;
@@ -513,13 +528,13 @@ impl App {
 
     fn end_drag(&mut self, tr: &Tr, at: Pos2) {
         if let Some(drag) = self.drag.take() {
-            // A slide that pushed gets the routing guarantee: if the rule check
-            // finds anything new too close, the whole slide is taken back.
-            let slid = matches!(drag.kind, DragKind::Move) && matches!(self.sel.as_slice(), [Sel::Track(_)]);
-            if drag.moved && slid && let Some(why) = self.new_clearance_problem(&drag.before) {
+            // A move that pushed gets the routing guarantee: if the rule check
+            // finds anything new too close, the whole move is taken back.
+            // With Ctrl held it was a free move, and the rule check just shows it.
+            if drag.moved && !drag.free && let Some(why) = self.new_clearance_problem(&drag.before) {
                 self.doc = drag.before;
                 self.rev += 1;
-                self.notice = Some(format!("Slide taken back: {why}"));
+                self.notice = Some(format!("Move taken back: {why}"));
                 return;
             }
             if drag.moved {
