@@ -117,20 +117,9 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
         // straight track beyond it grows or shrinks along its own line.
         if !fixed
             && neighbours.len() == 1
-            && let Some((ai, t1, mid, t2, ni)) = refit_arc_corner(&work, neighbours[0], end, moved, if k == 1 { u } else { u.scale(-1.0) }, id)
+            && let Some(fit) = refit_arc_corner(&work, neighbours[0], end, moved, if k == 1 { u } else { u.scale(-1.0) }, id)
         {
-            let old_far = arc_far(&work.tracks, ai, end);
-            let arc = &mut work.tracks[ai];
-            if arc.a.same(end) {
-                arc.a = t1;
-                arc.b = t2;
-            } else {
-                arc.a = t2;
-                arc.b = t1;
-            }
-            arc.mid = Some(mid);
-            set_end(&mut work.tracks[ni], old_far, t2);
-            ends[k] = t1;
+            ends[k] = apply_arc_corner(&mut work, end, fit);
             continue;
         }
         if !keep45 {
@@ -318,6 +307,24 @@ pub fn changed_tracks(before: &Board, after: &Board) -> HashSet<u32> {
     after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect()
 }
 
+/// Puts a refitted arc corner on the board: the arc where it now goes, and
+/// the straight track beyond it meeting it. Returns where the track on the
+/// near side (the one that was at `end`) now meets the arc.
+fn apply_arc_corner(board: &mut Board, end: P, (ai, t1, mid, t2, ni): (usize, P, P, P, usize)) -> P {
+    let old_far = arc_far(&board.tracks, ai, end);
+    let arc = &mut board.tracks[ai];
+    if arc.a.same(end) {
+        arc.a = t1;
+        arc.b = t2;
+    } else {
+        arc.a = t2;
+        arc.b = t1;
+    }
+    arc.mid = Some(mid);
+    set_end(&mut board.tracks[ni], old_far, t2);
+    t1
+}
+
 /// The end of the arc track `ai` that isn't `near`, as it was on `tracks`.
 fn arc_far(tracks: &[Track], ai: usize, near: P) -> P {
     let t = &tracks[ai];
@@ -433,10 +440,19 @@ pub fn slide_arc(board: &mut Board, id: u32, delta: P, min_r: f64) -> bool {
 /// Re-lays a track from its far end `from` to `to` as a straight leg and a
 /// 45° leg, starting off the way it used to where it can.
 fn relay(board: &mut Board, i: usize, from: P, to: P) {
+    relay_keeping(board, i, from, to, false);
+}
+
+/// As `relay`; with `last` it's the leg arriving at `to` that keeps the
+/// track's old direction, so it stays tangent to an arc there.
+fn relay_keeping(board: &mut Board, i: usize, from: P, to: P, last: bool) {
     let t = board.tracks[i].clone();
     let was = far_end(&t, from).sub(from);
     let options = [legs(from, to, Corner::D45, false), legs(from, to, Corner::D45, true)];
-    let same_way = |l: &Vec<P>| l.len() > 1 && l[1].sub(l[0]).cross(was).abs() < 1e-6 * was.len().max(1.0) && l[1].sub(l[0]).dot(was) > 0.0;
+    let parallel = |d: P| d.cross(was).abs() < 1e-6 * (d.len() * was.len()).max(1e-9) && d.dot(was) > 0.0;
+    let same_way = |l: &Vec<P>| {
+        l.len() > 1 && if last { parallel(l[l.len() - 1].sub(l[l.len() - 2])) } else { parallel(l[1].sub(l[0])) }
+    };
     let pick = options.iter().find(|l| same_way(l)).unwrap_or(&options[0]).clone();
     board.tracks.remove(i);
     for s in pick.windows(2) {
@@ -448,51 +464,89 @@ fn relay(board: &mut Board, i: usize, from: P, to: P) {
 /// point that moved), brings the ends of the other tracks along without
 /// bending 45° work out of shape. `skip` are tracks that moved bodily.
 pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
-    let moved_to = |q: P| moves.iter().find(|m| m.0.same(q)).map(|m| m.1);
-    let ids: Vec<u32> = board.tracks.iter().filter(|t| !skip.contains(&t.id)).map(|t| t.id).collect();
-    for id in ids {
+    // Points that have moved, and whether a track arriving there has to stay
+    // tangent to an arc that moved with them.
+    let mut moves: Vec<(P, P, bool)> = moves.iter().map(|m| (m.0, m.1, false)).collect();
+    let mut done: HashSet<u32> = skip.clone();
+    loop {
+        let moved_to = |moves: &[(P, P, bool)], q: P| moves.iter().find(|m| m.0.same(q)).map(|m| (m.1, m.2));
+        let Some(id) = board
+            .tracks
+            .iter()
+            .find(|t| !done.contains(&t.id) && (moved_to(&moves, t.a).is_some() || moved_to(&moves, t.b).is_some()))
+            .map(|t| t.id)
+        else {
+            break;
+        };
+        done.insert(id);
         let Some(i) = board.tracks.iter().position(|t| t.id == id) else { continue };
         let t = board.tracks[i].clone();
-        let (na, nb) = (moved_to(t.a), moved_to(t.b));
-        match (na, nb) {
-            (None, None) => {}
-            (Some(a), Some(b)) => {
-                // Both ends moved together: the track goes with them.
-                board.tracks[i].set_ends(a, b);
+        let (na, nb) = (moved_to(&moves, t.a), moved_to(&moves, t.b));
+        if let (Some(a), Some(b)) = (na, nb) {
+            // Both ends moved together: the track goes with them.
+            board.tracks[i].set_ends(a.0, b.0);
+            continue;
+        }
+        let ((new, tangent), old) = match (na, nb) {
+            (Some(a), _) => (a, t.a),
+            (_, Some(b)) => (b, t.b),
+            _ => continue,
+        };
+        let other = far_end(&t, old);
+        // An arc leaving the moved point goes with it, unchanged; what's
+        // beyond it then follows, keeping tangent.
+        if t.mid.is_some() {
+            if pinned(board, other) || moved_to(&moves, other).is_some() {
+                set_end(&mut board.tracks[i], old, new);
+            } else {
+                let d = new.sub(old);
+                let arc = &mut board.tracks[i];
+                arc.a = arc.a.add(d).rounded();
+                arc.b = arc.b.add(d).rounded();
+                arc.mid = arc.mid.map(|m| m.add(d).rounded());
+                moves.push((other, other.add(d).rounded(), true));
             }
-            (Some(_), None) | (None, Some(_)) => {
-                let (old, new) = if let Some(a) = na { (t.a, a) } else { (t.b, nb.unwrap_or(t.b)) };
-                let other = far_end(&t, old);
-                if !straight45(&t) {
-                    set_end(&mut board.tracks[i], old, new);
-                    continue;
-                }
-                let u = other.sub(old);
-                // The joint at the other end slides along the next track.
-                let next = others_at(board, other, t.layer, t.id);
-                let mut done = false;
-                if next.len() == 1 && !pinned(board, other) && moved_to(other).is_none() {
-                    let j = next[0];
-                    let nb_t = board.tracks[j].clone();
-                    if nb_t.mid.is_none() && !skip.contains(&nb_t.id) {
-                        let far = far_end(&nb_t, other);
-                        let v = other.sub(far);
-                        if let Some(q) = meet(new, u, far, v)
-                            && q.sub(far).dot(v) > 1e-6
-                            && q.sub(new).dot(u) > 1e-6
-                        {
-                            set_end(&mut board.tracks[j], other, q);
-                            board.tracks[i].a = new;
-                            board.tracks[i].b = q;
-                            done = true;
-                        }
-                    }
-                }
-                if !done {
-                    relay(board, i, other, new);
-                }
+            continue;
+        }
+        let u = unit(other.sub(old));
+        let next = others_at(board, other, t.layer, t.id);
+        let free = next.len() == 1 && !pinned(board, other) && moved_to(&moves, other).is_none() && !skip.contains(&board.tracks[next[0]].id);
+        // A straight track into an arc corner: the corner moves along the
+        // straight track beyond, and the arc is rebuilt there, tangent.
+        if free
+            && board.tracks[next[0]].mid.is_some()
+            && let Some(fit) = refit_arc_corner(board, next[0], other, new, u, t.id)
+            && fit.1.sub(new).dot(u) > 1e-6
+        {
+            let q = apply_arc_corner(board, other, fit);
+            let s = &mut board.tracks[i];
+            s.a = new;
+            s.b = q;
+            continue;
+        }
+        if !straight45(&t) {
+            set_end(&mut board.tracks[i], old, new);
+            continue;
+        }
+        // The joint at the other end slides along the next track.
+        if free && board.tracks[next[0]].mid.is_none() {
+            let j = next[0];
+            let nb_t = board.tracks[j].clone();
+            let far = far_end(&nb_t, other);
+            let v = other.sub(far);
+            if let Some(q) = meet(new, u, far, v)
+                && q.sub(far).dot(v) > 1e-6
+                && q.sub(new).dot(u) > 1e-6
+            {
+                set_end(&mut board.tracks[j], other, q);
+                board.tracks[i].a = new;
+                board.tracks[i].b = q;
+                continue;
             }
         }
+        // Otherwise re-laid from its far end; next to an arc, the leg that
+        // meets it keeps the old direction.
+        relay_keeping(board, i, other, new, tangent);
     }
     tidy(board);
 }
@@ -925,5 +979,72 @@ mod arcs_stay_tangent {
         assert!(slide_arc(&mut tight, arc, out.scale(to_r(0.6)), 0.5), "0.6 mm is fine");
         let mut tighter = b.clone();
         assert!(!slide_arc(&mut tighter, arc, out.scale(to_r(0.4)), 0.5), "0.4 mm is under the rule");
+    }
+}
+
+#[cfg(test)]
+mod moving_parts_keeps_arcs {
+    use super::*;
+
+    fn add(b: &mut Board, a: P, e: P, mid: Option<P>) -> u32 {
+        let id = b.new_id();
+        b.tracks.push(Track { mid, id, a, b: e, w: 0.25, layer: TOP, net: 1 });
+        id
+    }
+
+    /// Every arc is tangent to the straight tracks it joins, and has radius `r`.
+    fn tangent(b: &Board, r: f64) -> bool {
+        b.tracks.iter().filter(|t| t.mid.is_some()).all(|arc| {
+            let (c, rad) = arc_center(arc.a, arc.mid.unwrap(), arc.b).unwrap();
+            (rad - r).abs() < 1e-4
+                && [arc.a, arc.b].iter().all(|end| {
+                    b.tracks.iter().filter(|t| t.mid.is_none() && (t.a.same(*end) || t.b.same(*end))).all(|s| {
+                        let along = s.b.sub(s.a);
+                        (along.dot(end.sub(c)) / (along.len() * rad)).abs() < 1e-4
+                    })
+                })
+        })
+    }
+
+    #[test]
+    fn a_track_into_an_arc_corner_keeps_it_tangent() {
+        // Pad at (0, 10): down to a 2 mm arc corner, then along to (10, 0).
+        let s = 2f64.sqrt();
+        let mut b = Board::default();
+        add(&mut b, p(0.0, 10.0), p(0.0, 2.0), None);
+        add(&mut b, p(0.0, 2.0), p(2.0, 0.0), Some(p(2.0 - s, 2.0 - s)));
+        add(&mut b, p(2.0, 0.0), p(10.0, 0.0), None);
+        follow_moves(&mut b, &[(p(0.0, 10.0), p(-1.0, 10.0))], &HashSet::new());
+        assert_eq!(b.tracks.len(), 3, "{:?}", b.tracks);
+        assert!(tangent(&b, 2.0), "{:?}", b.tracks);
+        assert!(b.tracks.iter().any(|t| t.a.same(p(-1.0, 10.0)) && t.b.same(p(-1.0, 2.0))), "{:?}", b.tracks);
+        assert!(b.tracks.iter().any(|t| t.mid.is_none() && t.a.same(p(1.0, 0.0)) && t.b.same(p(10.0, 0.0))), "{:?}", b.tracks);
+    }
+
+    #[test]
+    fn an_arc_at_the_pad_moves_with_it_and_stays_tangent() {
+        // Pad at the origin: a 2 mm arc east-then-north up to (2, 2), up to
+        // (2, 10), then east to (8, 10).
+        let s = 2f64.sqrt();
+        let mut b = Board::default();
+        add(&mut b, p(0.0, 0.0), p(2.0, 2.0), Some(p(s, 2.0 - s)));
+        add(&mut b, p(2.0, 2.0), p(2.0, 10.0), None);
+        add(&mut b, p(2.0, 10.0), p(8.0, 10.0), None);
+        follow_moves(&mut b, &[(p(0.0, 0.0), p(1.0, 0.0))], &HashSet::new());
+        assert!(tangent(&b, 2.0), "{:?}", b.tracks);
+        assert!(b.tracks.iter().any(|t| t.a.same(p(3.0, 2.0)) && t.b.same(p(3.0, 10.0))), "{:?}", b.tracks);
+        assert!(b.tracks.iter().any(|t| t.a.same(p(3.0, 10.0)) && t.b.same(p(8.0, 10.0))), "{:?}", b.tracks);
+    }
+
+    #[test]
+    fn with_nowhere_to_slide_the_leg_at_the_arc_keeps_its_direction() {
+        // As above, but the vertical track ends loose at (2, 10).
+        let s = 2f64.sqrt();
+        let mut b = Board::default();
+        add(&mut b, p(0.0, 0.0), p(2.0, 2.0), Some(p(s, 2.0 - s)));
+        add(&mut b, p(2.0, 2.0), p(2.0, 10.0), None);
+        follow_moves(&mut b, &[(p(0.0, 0.0), p(1.0, 0.0))], &HashSet::new());
+        assert!(tangent(&b, 2.0), "{:?}", b.tracks);
+        assert!(b.tracks.iter().all(|t| t.mid.is_some() || octilinear(t.b.sub(t.a))));
     }
 }

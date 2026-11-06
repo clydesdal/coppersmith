@@ -48,7 +48,7 @@ Done in 0.3.6: the Shortest 45° rule — routes, moves and pushes never leave
 square corners on 45° work.
 
 Done in 0.3.7: arc corners stay tangent while sliding, and dragging an arc
-changes its radius.
+changes its radius. 0.3.8: moving parts and vias keeps arc corners tangent.
 
 Next:
 - Push arcs (today an existing arc is fixed when pushing).

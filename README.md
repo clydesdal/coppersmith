@@ -62,7 +62,10 @@ corner and the arc keeps its radius and stays tangent, while the straight
 track beyond it grows or shrinks along its own line. Drag an arc itself and
 its radius changes, staying tangent to the tracks either side: pull it out
 for a bigger radius, in for a smaller one, never tighter than the Shortest
-45° rule.
+45° rule. Moving a part or via does the same for the tracks joined to it: a
+straight track into a rounded corner keeps its direction while the corner
+moves along the track beyond, and an arc starting at a pad moves with the
+pad while what's beyond it follows, still tangent.
 
 ### No square corners
 

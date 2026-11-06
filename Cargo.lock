@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "coppersmith"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "earcut",
  "eframe",
