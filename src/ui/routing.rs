@@ -235,11 +235,20 @@ impl App {
         self.obstacles.scene.via_push = m.via_push;
         self.obstacles.scene.arc_radius = m.arc_radius;
         self.obstacles.scene.lead = App::lead(&r);
-        let mut plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
+        let started = std::time::Instant::now();
+        let scene = &self.obstacles.scene;
+        let held = App::held(&r);
+        let mut plan = router::with_budget(150, || router::plan(scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &held));
+        // Out of time pushing: walk round instead, which is quick.
+        if router::out_of_time_after(started, 150) && !matches!(m.conflict, Conflict::Walkaround | Conflict::Ignore | Conflict::Stop) {
+            plan = router::with_budget(150, || router::plan(scene, r.from, to, r.width, m.corner, r.flip, Conflict::Walkaround, area, &held));
+            plan.note = Some("too much to push here; walking round");
+        }
+        crate::ui::app::note_slow("plan", started);
         let mut settled = None;
         if !plan.vias.is_empty() {
             let pieces: Vec<(P, P, u8, Option<P>)> = plan.pieces().into_iter().map(|(a, b, mid)| (a, b, r.layer, mid)).collect();
-            settled = self.settle(&r, &pieces, &plan.pushed, &plan.vias);
+            settled = router::with_budget(150, || self.settle(&r, &pieces, &plan.pushed, &plan.vias));
             if settled.is_none() {
                 // Another layer can't make room: keep the vias still.
                 self.obstacles.scene.via_push = false;
@@ -600,6 +609,12 @@ impl App {
     /// Puts the route's tracks and vias on the board, and takes out any old
     /// path the new one makes redundant.
     pub fn finish_route(&mut self) {
+        let started = std::time::Instant::now();
+        self.finish_route_inner();
+        crate::ui::app::note_slow("finishing a route", started);
+    }
+
+    fn finish_route_inner(&mut self) {
         self.plan = None;
         let Some(mut r) = self.route.take() else { return };
         let before = r.before.take().unwrap_or_else(|| self.doc.clone());

@@ -170,6 +170,9 @@ pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<B
     // Pushing on one layer can move vias, whose tracks and selves then push
     // on the other layers, and so on: go round the layers until it settles.
     for _ in 0..4 {
+        if crate::pcb::router::out_of_time() {
+            return None;
+        }
         let start = b.clone();
         b = push_layers(before, b, via_push)?;
         if b == start {
@@ -484,7 +487,13 @@ pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
     // tangent to an arc that moved with them.
     let mut moves: Vec<(P, P, bool)> = moves.iter().map(|m| (m.0, m.1, false)).collect();
     let mut done: HashSet<u32> = skip.clone();
+    // Re-laying makes new tracks, so cap the work rather than trust it ends.
+    let mut left = 4 * board.tracks.len() + 64;
     loop {
+        if left == 0 {
+            break;
+        }
+        left -= 1;
         let moved_to = |moves: &[(P, P, bool)], q: P| moves.iter().find(|m| m.0.same(q)).map(|m| (m.1, m.2));
         let Some(id) = board
             .tracks
@@ -1131,5 +1140,90 @@ mod vias_push_on_other_layers {
         assert!(moved_to.y > 0.0, "the via went up, towards C: {moved_to:?}");
         assert!(settled.tracks.iter().filter(|t| t.net == nc).count() > 1, "C was pushed on the bottom");
         assert!(settled.tracks.iter().filter(|t| t.id < first).all(|t| t.mid.is_some() || octilinear(t.b.sub(t.a))));
+    }
+}
+
+#[cfg(test)]
+mod timing {
+    use super::*;
+    use crate::pcb::router::{Conflict, plan};
+    use std::time::Instant;
+
+    /// 30 nets of track side by side across a 70 mm board, each with a dog-leg,
+    /// pads at both ends, a via in each.
+    pub fn dense() -> Board {
+        let mut b = Board { outline: rect_outline(p(-5.0, -5.0), p(75.0, 40.0)), ..Board::default() };
+        for k in 0..30 {
+            let n = b.net(&format!("N{k}"));
+            let y = k as f64 * 1.0;
+            for x in [0.0, 70.0] {
+                let id = b.new_id();
+                b.footprints.push(Footprint {
+                    id,
+                    def: "TP".into(),
+                    refdes: format!("TP{id}"),
+                    value: String::new(),
+                    at: p(x, y),
+                    rot: 0.0,
+                    side: Side::Top,
+                    pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(0.6, 0.6), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
+                    graphics: vec![],
+                    label_at: P::default(),
+                    locked: false,
+                });
+            }
+            let pts = [p(0.0, y), p(20.0, y), p(22.0, y + 2.0), p(45.0, y + 2.0), p(47.0, y), p(70.0, y)];
+            for s in pts.windows(2) {
+                let id = b.new_id();
+                b.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: 0.2, layer: TOP, net: n });
+            }
+        }
+        b
+    }
+
+    #[test]
+    #[ignore]
+    fn how_long_things_take() {
+        let b = dense();
+        let t = Instant::now();
+        let c = analyse(&b);
+        let found = crate::pcb::drc::check(&b, &c);
+        eprintln!("refresh (connectivity + checks): {:?}, {} problems, {} copper items", t.elapsed(), found.len(), c.items.len());
+        let net = b.net_by_name("N3").unwrap();
+        let mut scene = Scene::new(&b, &c, TOP, 0);
+        eprintln!("scene: {:?}", t.elapsed());
+        scene.net = net;
+        for mode in [Conflict::Walkaround, Conflict::Push, Conflict::HugPush] {
+            let mut worst = 0.0f64;
+            for to in [p(33.0, 20.0), p(33.0, 35.0), p(10.0, 33.0), p(60.0, -3.0)] {
+                let s = Instant::now();
+                let _ = plan(&Scene::new(&b, &c, TOP, net), p(0.0, 3.0), to, 0.2, Corner::D45, false, mode, b.outline_bbox(), &[]);
+                worst = worst.max(s.elapsed().as_secs_f64());
+            }
+            eprintln!("plan {mode:?}: worst {:.0} ms", worst * 1e3);
+        }
+        // Drag a long straight piece across the bundle, as a slide would.
+        let id = b.tracks.iter().find(|t| t.net == net && (t.a.y - 5.0).abs() < 1e-9 && t.a.x > 21.0).unwrap().id;
+        let mut worst = 0.0f64;
+        for d in [0.5, 1.0, 3.0, 6.0, 12.0] {
+            let s = Instant::now();
+            let mut moved = b.clone();
+            if slide(&mut moved, id, p(0.0, d)) {
+                let _ = push_after_move(&b, moved, true);
+            }
+            worst = worst.max(s.elapsed().as_secs_f64());
+        }
+        eprintln!("slide + push, worst: {:.0} ms", worst * 1e3);
+        // Loop removal on a net with many tracks.
+        let mut big = b.clone();
+        let n0 = big.net_by_name("N0").unwrap();
+        for k in 0..40 {
+            let id = big.new_id();
+            let x = 0.5 * k as f64;
+            big.tracks.push(Track { mid: None, id, a: p(x, -1.0), b: p(x + 0.5, -1.0), w: 0.2, layer: TOP, net: n0 });
+        }
+        let s = Instant::now();
+        let spare = crate::pcb::router::spare_tracks(&big, n0);
+        eprintln!("spare_tracks on a 45-track net: {:?} ({} spare)", s.elapsed(), spare.len());
     }
 }

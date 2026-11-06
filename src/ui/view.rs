@@ -534,10 +534,23 @@ impl App {
         // What moves pushes what's in its way, unless Ctrl is held.
         let attempt = |app: &App, f: f64| -> Option<Board> {
             let plain = app.dragged(&drag, full, f)?;
-            if free { Some(plain) } else { crate::pcb::slide::push_after_move(&drag.before, plain, via_push) }
+            if free {
+                Some(plain)
+            } else {
+                crate::pcb::router::with_budget(150, || crate::pcb::slide::push_after_move(&drag.before, plain, via_push))
+            }
         };
-        let doc = match attempt(self, 1.0) {
+        let started = std::time::Instant::now();
+        let first = attempt(self, 1.0);
+        let slow = started.elapsed().as_millis() > 120;
+        crate::ui::app::note_slow("drag", started);
+        let doc = match first {
             Some(b) => b,
+            // Too slow to search for how far it can go: stay put this frame.
+            None if slow => {
+                self.notice = Some("That's a lot to push; it's waiting where it was. Hold Ctrl to move without pushing.".into());
+                self.doc.clone()
+            }
             None => {
                 // Blocked: as far as it can go.
                 let (mut lo, mut hi) = (0.0, 1.0);
@@ -1000,6 +1013,9 @@ impl App {
     }
 
     fn draw_scale(&self, painter: &Painter, rect: Rect) {
+        if !(self.scale.is_finite() && self.scale > 0.0) {
+            return;
+        }
         let mut step = 0.1;
         while step * self.scale < 40.0 {
             step *= if (step * 10f64.powf(-step.log10().floor())).round() as i64 == 2 { 2.5 } else { 2.0 };

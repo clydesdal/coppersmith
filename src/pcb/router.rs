@@ -19,6 +19,32 @@ use crate::pcb::model::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+// ---------------------------------------------------------------------------
+// A time budget, so interactive work gives up rather than stall the window.
+
+thread_local! {
+    static DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with a time budget: searches and pushes inside it stop early,
+/// and fail, once `ms` milliseconds have gone.
+pub fn with_budget<R>(ms: u64, f: impl FnOnce() -> R) -> R {
+    let before = DEADLINE.with(|d| d.replace(Some(std::time::Instant::now() + std::time::Duration::from_millis(ms))));
+    let out = f();
+    DEADLINE.with(|d| d.set(before));
+    out
+}
+
+/// More than `ms` milliseconds have gone since `start`.
+pub fn out_of_time_after(start: std::time::Instant, ms: u64) -> bool {
+    start.elapsed().as_millis() as u64 >= ms
+}
+
+/// The budget has run out.
+pub fn out_of_time() -> bool {
+    DEADLINE.with(|d| d.get().is_some_and(|t| std::time::Instant::now() > t))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Corner {
     D45,
@@ -705,7 +731,7 @@ fn lattice(obs: &[Obstacle], a: P, b: P, w: f64, corner: Corner, flip: bool, are
             break;
         }
         expanded += 1;
-        if expanded > 250_000 {
+        if expanded > 250_000 || (expanded % 2048 == 0 && out_of_time()) {
             break;
         }
         let (ci, cj) = ((cell % nx) as i64, (cell / nx) as i64);
@@ -1250,14 +1276,11 @@ fn rebend(obs: &[Obstacle], run: &[P], w: f64, s0: f64, s1: f64, new_end: Option
             Some(to) if a1 >= total - 1e-9 => to,
             _ => *guide.last().unwrap(),
         };
-        let mut area = BBox::of(&guide).grown(2.0 + w);
+        // Room for a bend of a few millimetres round the stretch, no more:
+        // growing it to take in every obstacle it touches made a board of
+        // long tracks into one huge search, and the app stalled.
+        let mut area = BBox::of(&guide).grown(3.0 + w);
         area.add(b);
-        for o in obs {
-            if o.bbox.touches(&area) {
-                area.union(&o.bbox);
-            }
-        }
-        let area = area.grown(1.0);
         let bent = lattice(obs, a, b, w, Corner::D45, false, area, Some(&guide), true);
         if bent.blocked || !bent.end().is_some_and(|e| e.same(b)) || !bent.pts[0].same(a) {
             continue;
@@ -1380,7 +1403,7 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
     let mut rounds = 0;
     loop {
         rounds += 1;
-        if rounds > 60 {
+        if rounds > 60 || out_of_time() {
             return None;
         }
         // A via the route or a pushed run crowds: move it.

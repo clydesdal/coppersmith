@@ -295,9 +295,11 @@ impl App {
     /// Brings the copper groups and the checks up to date with the board.
     pub fn refresh(&mut self) {
         if self.copper_rev != self.rev {
+            let started = std::time::Instant::now();
             self.copper = copper::analyse(&self.doc);
             self.problems = drc::check(&self.doc, &self.copper);
             self.copper_rev = self.rev;
+            note_slow("checks", started);
             if self.focus.is_some_and(|i| i >= self.problems.len()) {
                 self.focus = None;
             }
@@ -1165,6 +1167,24 @@ impl App {
         {
             self.sel = vec![Sel::Fp(f.id)];
         }
+    }
+}
+
+/// Writes a line to `slow.log` in Coppersmith's data folder when something
+/// interactive took longer than a quarter of a second, so a stall can be
+/// traced afterwards.
+pub fn note_slow(what: &str, started: std::time::Instant) {
+    let ms = started.elapsed().as_millis();
+    if ms < 250 {
+        return;
+    }
+    let Some(dir) = crate::platform::data_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let line = format!("{when} {what} took {ms} ms\n");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("slow.log")) {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
