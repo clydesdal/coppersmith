@@ -432,14 +432,12 @@ impl App {
             anchors.push(t.b);
             t.a = t.a.add(d).rounded();
             t.b = t.b.add(d).rounded();
+            t.mid = t.mid.map(|m| m.add(d).rounded());
         }
         for t in board.tracks.iter_mut().filter(|t| !picked.contains(&Sel::Track(t.id))) {
-            if anchors.iter().any(|q| q.same(t.a)) {
-                t.a = t.a.add(d).rounded();
-            }
-            if anchors.iter().any(|q| q.same(t.b)) {
-                t.b = t.b.add(d).rounded();
-            }
+            let a = if anchors.iter().any(|q| q.same(t.a)) { t.a.add(d).rounded() } else { t.a };
+            let b = if anchors.iter().any(|q| q.same(t.b)) { t.b.add(d).rounded() } else { t.b };
+            t.set_ends(a, b);
         }
     }
 
@@ -448,12 +446,9 @@ impl App {
         let Some(t) = board.track(id) else { return };
         let from = if far { t.b } else { t.a };
         for t in &mut board.tracks {
-            if t.a.same(from) {
-                t.a = to;
-            }
-            if t.b.same(from) {
-                t.b = to;
-            }
+            let a = if t.a.same(from) { to } else { t.a };
+            let b = if t.b.same(from) { to } else { t.b };
+            t.set_ends(a, b);
         }
         for v in &mut board.vias {
             if v.at.same(from) {
@@ -481,14 +476,16 @@ impl App {
                 let after: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
                 // Tracks follow their pads round.
                 for t in &mut b.tracks {
+                    let (mut a, mut e) = (t.a, t.b);
                     for (from, to) in before.iter().zip(&after) {
                         if t.a.same(*from) {
-                            t.a = *to;
+                            a = *to;
                         }
                         if t.b.same(*from) {
-                            t.b = *to;
+                            e = *to;
                         }
                     }
+                    t.set_ends(a, e);
                 }
             }
         });
@@ -902,6 +899,13 @@ impl App {
             self.notice = Some(format!("Taking out old paths a new route replaces: {on}"));
         } else if ctrl(Key::W) {
             self.route_mode.show_clearance = !self.route_mode.show_clearance;
+        } else if hit(Key::Comma, false) || hit(Key::Comma, true) || hit(Key::Period, false) || hit(Key::Period, true) {
+            // Altium's arc radius keys: 1 mil a step, 10 with Shift.
+            let step = if hit(Key::Comma, true) || hit(Key::Period, true) { 0.254 } else { 0.0254 };
+            let sign = if hit(Key::Comma, false) || hit(Key::Comma, true) { -1.0 } else { 1.0 };
+            let r = &mut self.route_mode.arc_radius;
+            *r = nm(*r + sign * step).clamp(0.05, 50.0);
+            self.notice = Some(format!("Arc radius {}", self.unit.len(*r)));
         } else if routing && hit(Key::Num1, false) {
             self.route_mode.look_ahead = !self.route_mode.look_ahead;
             let on = if self.route_mode.look_ahead { "on" } else { "off" };
@@ -1114,7 +1118,7 @@ pub(crate) fn merge_straight(b: &mut Board) {
                     continue;
                 }
                 let (t, u) = (&b.tracks[i], &b.tracks[j]);
-                if t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+                if t.mid.is_some() || u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
                     continue;
                 }
                 let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
@@ -1207,7 +1211,7 @@ mod tests {
     fn straight_runs_become_one_track() {
         let mut b = Board::default();
         for (id, a, e) in [(1, p(0.0, 0.0), p(1.0, 0.0)), (2, p(1.0, 0.0), p(3.0, 0.0)), (3, p(3.0, 0.0), p(4.0, 1.0))] {
-            b.tracks.push(Track { id, a, b: e, w: 0.25, layer: TOP, net: 1 });
+            b.tracks.push(Track { mid: None, id, a, b: e, w: 0.25, layer: TOP, net: 1 });
         }
         merge_straight(&mut b);
         assert_eq!(b.tracks.len(), 2);

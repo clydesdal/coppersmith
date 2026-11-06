@@ -225,6 +225,9 @@ impl Footprint {
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Track {
+    /// For an arc: a point on the way from `a` to `b`. None for straight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid: Option<P>,
     pub id: u32,
     pub a: P,
     pub b: P,
@@ -235,8 +238,82 @@ pub struct Track {
 }
 
 impl Track {
+    /// The straight track's copper, or the chord of an arc's.
     pub fn blob(&self) -> Blob {
         Blob::line(self.a, self.b, self.w)
+    }
+
+    /// The copper, as pieces: one for a straight track, many for an arc.
+    pub fn blobs(&self) -> Vec<Blob> {
+        match self.mid {
+            Some(m) => arc_blobs(self.a, m, self.b, self.w),
+            None => vec![self.blob()],
+        }
+    }
+
+    pub fn bbox(&self) -> BBox {
+        let mut b = BBox::default();
+        for bl in self.blobs() {
+            b.union(&bl.bbox());
+        }
+        b
+    }
+
+    pub fn dist_to(&self, q: P) -> f64 {
+        self.blobs().iter().map(|b| b.dist_to(q)).fold(f64::MAX, f64::min)
+    }
+
+    /// The centre line, as points.
+    pub fn path(&self) -> Vec<P> {
+        match self.mid {
+            Some(m) => arc_points(self.a, m, self.b),
+            None => vec![self.a, self.b],
+        }
+    }
+
+    pub fn length(&self) -> f64 {
+        match self.mid {
+            Some(m) => arc_length(self.a, m, self.b),
+            None => self.a.dist(self.b),
+        }
+    }
+
+    /// Moves the ends; an arc keeps its bulge.
+    pub fn set_ends(&mut self, a: P, b: P) {
+        if let Some(m) = self.mid {
+            self.mid = Some(refit_mid(self.a, m, self.b, a, b));
+        }
+        self.a = a;
+        self.b = b;
+    }
+
+    /// The outline, for drawing round a picked track.
+    pub fn ring(&self) -> Vec<P> {
+        let Some(m) = self.mid else { return self.blob().ring() };
+        let Some((c, r, a0, sweep)) = arc_sweep(self.a, m, self.b) else { return self.blob().ring() };
+        let h = self.w / 2.0;
+        let n = 48usize;
+        let at = |rad: f64, t: f64| c.add(p(t.cos(), t.sin()).scale(rad));
+        let mut ring: Vec<P> = (0..=n).map(|i| at(r + h, a0 + sweep * i as f64 / n as f64)).collect();
+        // Round the far end, back along the inside, round the near end.
+        let end = a0 + sweep;
+        let dir = sweep.signum();
+        for k in 1..12 {
+            let t = k as f64 / 12.0 * std::f64::consts::PI;
+            let e = at(r, end);
+            let out = p(end.cos(), end.sin());
+            let along = p(-end.sin(), end.cos()).scale(dir);
+            ring.push(e.add(out.scale(h * t.cos())).add(along.scale(h * t.sin())));
+        }
+        ring.extend((0..=n).rev().map(|i| at(r - h, a0 + sweep * i as f64 / n as f64)));
+        for k in 1..12 {
+            let t = k as f64 / 12.0 * std::f64::consts::PI;
+            let s = at(r, a0);
+            let out = p(a0.cos(), a0.sin());
+            let back = p(a0.sin(), -a0.cos()).scale(dir);
+            ring.push(s.sub(out.scale(h * t.cos())).add(back.scale(h * t.sin())));
+        }
+        ring
     }
 }
 
@@ -393,7 +470,7 @@ impl Board {
             b.union(&f.bbox());
         }
         for t in &self.tracks {
-            b.union(&t.blob().bbox());
+            b.union(&t.bbox());
         }
         if b.is_empty() {
             b = BBox::of(&[p(0.0, 0.0), p(50.0, 40.0)]);
@@ -463,7 +540,7 @@ mod tests {
     fn saves_and_loads() {
         let mut b = Board::default();
         let n = b.net("GND");
-        b.tracks.push(Track { id: 7, a: p(0.0, 0.0), b: p(1.0, 0.0), w: 0.25, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: 7, a: p(0.0, 0.0), b: p(1.0, 0.0), w: 0.25, layer: TOP, net: n });
         let again = Board::load(&b.save()).unwrap();
         assert_eq!(again.tracks, b.tracks);
         assert!(again.next_id > 7);

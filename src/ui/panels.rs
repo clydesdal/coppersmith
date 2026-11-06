@@ -661,7 +661,11 @@ impl App {
                 });
             });
             field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("track-net", id), &mut t.net));
-            row(ui, "Length", &u.len(t.a.dist(t.b)));
+            row(ui, "Length", &u.len(t.length()));
+            if t.mid.is_some() {
+                let r = arc_center(t.a, t.mid.unwrap_or_default(), t.b).map(|c| c.1).unwrap_or(0.0);
+                row(ui, "Arc radius", &u.len(r));
+            }
             row(ui, "From", &format!("{}, {}", u.num(t.a.x), u.num(t.a.y)));
             row(ui, "To", &format!("{}, {}", u.num(t.b.x), u.num(t.b.y)));
             ui.add_space(4.0);

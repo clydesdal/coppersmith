@@ -26,7 +26,7 @@ impl Gerber {
         let _ = writeln!(head, "%TF.GenerationSoftware,Coppersmith,Coppersmith,{}*%", env!("CARGO_PKG_VERSION"));
         let _ = writeln!(head, "%TF.FileFunction,{function}*%");
         let _ = writeln!(head, "%TF.FilePolarity,{}*%", if polarity_negative { "Negative" } else { "Positive" });
-        head.push_str("%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\nG01*\n");
+        head.push_str("%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\nG75*\nG01*\n");
         Gerber { head, body: String::new(), apertures: HashMap::new(), current: 0, next: 10 }
     }
 
@@ -55,6 +55,16 @@ impl Gerber {
         self.round(w);
         let _ = writeln!(self.body, "X{}Y{}D02*", c(a.x), c(a.y));
         let _ = writeln!(self.body, "X{}Y{}D01*", c(b.x), c(b.y));
+    }
+
+    /// A true circular arc, drawn with a round aperture.
+    fn arc(&mut self, a: P, m: P, b: P, w: f64) {
+        let Some((centre, _, _, sweep)) = arc_sweep(a, m, b) else { return self.line(a, b, w) };
+        self.round(w);
+        let _ = writeln!(self.body, "X{}Y{}D02*", c(a.x), c(a.y));
+        let mode = if sweep > 0.0 { "G03" } else { "G02" };
+        let _ = writeln!(self.body, "{mode}X{}Y{}I{}J{}D01*", c(b.x), c(b.y), c(centre.x - a.x), c(centre.y - a.y));
+        self.body.push_str("G01*\n");
     }
 
     fn flash(&mut self, at: P) {
@@ -155,7 +165,10 @@ pub fn files(board: &Board) -> Vec<(String, String)> {
             }
         }
         for t in board.tracks.iter().filter(|t| t.layer == layer) {
-            g.line(t.a, t.b, t.w);
+            match t.mid {
+                Some(m) => g.arc(t.a, m, t.b, t.w),
+                None => g.line(t.a, t.b, t.w),
+            }
         }
         for v in &board.vias {
             g.round(v.dia);

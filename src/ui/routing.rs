@@ -12,6 +12,8 @@
 use crate::pcb::copper::{self, Item};
 use crate::pcb::drc;
 use crate::pcb::geom::*;
+#[allow(unused_imports)]
+use crate::pcb::geom::ARC_ERROR;
 use crate::pcb::model::*;
 use crate::pcb::router::{self, Conflict, Corner, Plan, Scene};
 use crate::ui::app::App;
@@ -22,7 +24,8 @@ const CLEARANCE: [&str; 4] = ["Too close", "Short circuit", "Too close to the ed
 /// A route being laid: the segments and vias placed so far.
 #[derive(Clone, Debug)]
 pub struct Route {
-    pub segs: Vec<(P, P, u8)>,
+    /// Placed pieces: from, to, layer, and the middle of an arc.
+    pub segs: Vec<(P, P, u8, Option<P>)>,
     pub vias: Vec<P>,
     pub from: P,
     pub layer: u8,
@@ -78,6 +81,8 @@ pub struct RouteMode {
     pub width_from: WidthFrom,
     /// Push may move other nets' vias too.
     pub via_push: bool,
+    /// The radius corners are rounded to in the arc corner styles.
+    pub arc_radius: f64,
 }
 
 impl Default for RouteMode {
@@ -90,6 +95,7 @@ impl Default for RouteMode {
             show_clearance: false,
             width_from: WidthFrom::User,
             via_push: true,
+            arc_radius: 1.0,
         }
     }
 }
@@ -144,7 +150,7 @@ impl App {
                     Item::Track(_) => {
                         let (a, b) = (cu.anchors[0], cu.anchors[1]);
                         for end in [a, b] {
-                            if end.dist(q) < tol.max(cu.blob.r * 1.5) {
+                            if end.dist(q) < tol.max(cu.blob.r * 1.5) && cu.parts.len() == 1 {
                                 return (end, Some(cu.item));
                             }
                         }
@@ -192,7 +198,8 @@ impl App {
 
     /// The route already placed on this layer, which pushed tracks keep clear of.
     fn held(r: &Route) -> Vec<(P, P)> {
-        r.segs.iter().filter(|s| s.2 == r.layer).map(|s| (s.0, s.1)).collect()
+        let pieces: Vec<(P, P, Option<P>)> = r.segs.iter().filter(|s| s.2 == r.layer).map(|s| (s.0, s.1, s.3)).collect();
+        router::as_steps(&pieces)
     }
 
     /// Asks the router what it would lay to `to`, unless it already knows.
@@ -205,13 +212,14 @@ impl App {
         let key = format!(
             "{} {:?} {:?} {} {} {:?} {:?} {} {} {}",
             self.rev, r.from, to, r.layer, r.net, m.corner, m.conflict, r.flip, r.width, r.segs.len()
-        ) + if m.via_push { " v" } else { "" };
+        ) + &format!(" r{}", m.arc_radius) + if m.via_push { " v" } else { "" };
         if self.plan.as_ref().is_some_and(|c| c.key == key) {
             return;
         }
         let area = self.doc.outline_bbox();
         self.route_scene();
         self.obstacles.scene.via_push = m.via_push;
+        self.obstacles.scene.arc_radius = m.arc_radius;
         let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
         self.plan = Some(PlanCache { key, plan, to, item });
     }
@@ -243,14 +251,14 @@ impl App {
     /// The rule check on the route so far plus `segs` and `vias`, with
     /// pushes made, all as `net`.
     #[allow(clippy::too_many_arguments)]
-    fn route_clash(&self, r: &Route, net: u32, segs: &[(P, P, u8)], vias: &[P], pushed: &[router::Moved], moved: &[(u32, P)]) -> Option<String> {
+    fn route_clash(&self, r: &Route, net: u32, segs: &[(P, P, u8, Option<P>)], vias: &[P], pushed: &[router::Moved], moved: &[(u32, P)]) -> Option<String> {
         let rules = self.doc.rules.clone();
         self.clash_with(|b| {
             let mut fresh: Vec<Item> = router::apply_pushed(b, pushed, moved).into_iter().map(Item::Track).collect();
             fresh.extend(moved.iter().map(|(id, _)| Item::Via(*id)));
-            for (a, e, layer) in r.segs.iter().chain(segs) {
+            for (a, e, layer, mid) in r.segs.iter().chain(segs) {
                 let id = b.new_id();
-                b.tracks.push(Track { id, a: *a, b: *e, w: r.width, layer: *layer, net });
+                b.tracks.push(Track { mid: *mid, id, a: *a, b: *e, w: r.width, layer: *layer, net });
                 fresh.push(Item::Track(id));
             }
             for at in r.vias.iter().chain(vias) {
@@ -272,6 +280,7 @@ impl App {
         let Some(c) = self.plan.clone() else { return };
         let Some(r) = self.route.clone() else { return };
         let mut pts = c.plan.pts.clone();
+        let mut mids: Vec<Option<P>> = (0..pts.len().saturating_sub(1)).map(|i| c.plan.mid(i)).collect();
         if pts.len() < 2 {
             return;
         }
@@ -279,10 +288,11 @@ impl App {
         let mut cut = false;
         if self.route_mode.conflict == Conflict::Ignore {
             self.route_scene();
-            let (clear, clashed) = router::stop_short(&self.obstacles.scene.own, &pts, r.width);
+            let (clear, clear_mids, clashed) = router::cut_at_clash(&self.obstacles.scene.own, &c.plan.pieces(), r.width);
             if clashed {
                 cut = true;
                 pts = clear;
+                mids = clear_mids;
                 self.notice = Some("Placed up to the first clash: the clearance always holds.".into());
             }
             if pts.len() < 2 {
@@ -310,8 +320,10 @@ impl App {
             self.route_scene();
             self.obstacles.scene.via_push = self.route_mode.via_push;
             let mut segs = App::held(&r);
-            segs.extend(pts[..upto].windows(2).map(|s| (s[0], s[1])));
-            match router::shove(&self.obstacles.scene, &segs, r.width) {
+            let part: Vec<(P, P, Option<P>)> = pts[..upto].windows(2).enumerate().map(|(i, s)| (s[0], s[1], mids[i])).collect();
+            segs.extend(router::as_steps(&part));
+            let width = if mids.iter().any(|m| m.is_some()) { r.width + 2.0 * ARC_ERROR } else { r.width };
+            match router::shove(&self.obstacles.scene, &segs, width) {
                 Some(done) => done,
                 None => {
                     self.notice = Some("Not placed: what's in the way can't be pushed aside.".into());
@@ -319,8 +331,12 @@ impl App {
                 }
             }
         };
-        let segs: Vec<(P, P, u8)> =
-            pts[..upto].windows(2).filter(|s| !s[0].same(s[1])).map(|s| (s[0], s[1], r.layer)).collect();
+        let segs: Vec<(P, P, u8, Option<P>)> = pts[..upto]
+            .windows(2)
+            .enumerate()
+            .filter(|(_, s)| !s[0].same(s[1]))
+            .map(|(i, s)| (s[0], s[1], r.layer, mids[i]))
+            .collect();
         if let Some(why) = self.route_clash(&r, net, &segs, &[], &pushed, &moved) {
             self.notice = Some(format!("Not placed: {why}"));
             return;
@@ -449,9 +465,9 @@ impl App {
         let b = &mut board;
         {
             let mut new = Vec::new();
-            for (a, e, layer) in &r.segs {
+            for (a, e, layer, mid) in &r.segs {
                 let id = b.new_id();
-                b.tracks.push(Track { id, a: *a, b: *e, w: r.width, layer: *layer, net: r.net });
+                b.tracks.push(Track { mid: *mid, id, a: *a, b: *e, w: r.width, layer: *layer, net: r.net });
                 new.push(id);
             }
             for v in &r.vias {

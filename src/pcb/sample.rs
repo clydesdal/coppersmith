@@ -25,7 +25,7 @@ fn track(b: &mut Board, pts: &[(f64, f64)], layer: u8, net: &str) {
     let n = b.net(net);
     for w in pts.windows(2) {
         let id = b.new_id();
-        b.tracks.push(Track { id, a: p(w[0].0, w[0].1), b: p(w[1].0, w[1].1), w: 0.3, layer, net: n });
+        b.tracks.push(Track { mid: None, id, a: p(w[0].0, w[0].1), b: p(w[1].0, w[1].1), w: 0.3, layer, net: n });
     }
 }
 

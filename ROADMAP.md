@@ -30,11 +30,14 @@ Done in 0.3.1: via pushing (moves the least it can, clear on every layer,
 its tracks on every layer follow), hug and push, pushed tracks re-bent only
 where crowded, and a rule-check gate on everything the router places.
 
+Done in 0.3.2: arc corners (45° and 90° with arc, radius keys), arcs as a
+track shape through the board model, rule check, picking, editing and
+Gerbers.
+
 Next:
+- Push arcs (today an existing arc is fixed when pushing).
 - Pushing on other layers when a moved via's tracks there run into things
   (today they bend round, but don't push).
-- Arc corner modes (45° and 90° with arcs, arc radius keys), which need arcs
-  as a track shape in the board model, the rule check and the Gerber writer.
 - Gloss: re-smooth the routed and neighbouring tracks after each click.
 - Interactive sliding of existing tracks, and dragging vias with the router.
 - Follow mode, the length gauge, differential pairs, length tuning.

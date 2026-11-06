@@ -170,7 +170,7 @@ impl App {
             if !self.shows(Layer::Cu(t.layer)) {
                 continue;
             }
-            let d = t.blob().dist_to(q);
+            let d = t.dist_to(q);
             if d <= tol {
                 hits.push((if t.layer == self.layer { 1 } else { 4 }, d, Sel::Track(t.id)));
             }
@@ -207,7 +207,7 @@ impl App {
                     self.unit.len(t.w),
                     Layer::Cu(t.layer).name().to_lowercase(),
                     net(t.net),
-                    self.unit.len(t.a.dist(t.b))
+                    self.unit.len(t.length())
                 ))
             }
             Sel::Fp(id) => {
@@ -425,7 +425,7 @@ impl App {
         {
             let reach = (t.w / 2.0).max(tol * 2.0);
             for (end, far) in [(t.a, false), (t.b, true)] {
-                if end.dist(q0) <= reach && t.a.dist(t.b) > reach * 2.0 {
+                if end.dist(q0) <= reach && t.length() > reach * 2.0 {
                     self.sel = vec![hit];
                     self.drag = Some(Drag {
                         kind: DragKind::End(id, far),
@@ -498,7 +498,7 @@ impl App {
                 }
             }
             for t in self.doc.tracks.iter().filter(|t| self.shows(Layer::Cu(t.layer))) {
-                if take(t.blob().bbox()) {
+                if take(t.bbox()) {
                     sel.push(Sel::Track(t.id));
                 }
             }
@@ -578,7 +578,9 @@ impl App {
             match layer {
                 Layer::Cu(l) => {
                     for t in doc.tracks.iter().filter(|t| t.layer == l && !pushed.contains(&t.id)) {
-                        fill_blob(painter, tr, &t.blob(), fade(base, strength * keep(t.net)));
+                        for part in t.blobs() {
+                            fill_blob(painter, tr, &part, fade(base, strength * keep(t.net)));
+                        }
                     }
                     for f in doc.footprints.iter().filter(|f| f.copper() == l) {
                         for (i, pad) in f.pads.iter().enumerate() {
@@ -694,7 +696,11 @@ impl App {
             }
             Sel::Track(id) => {
                 if let Some(t) = doc.track(id) {
-                    stroke_blob(painter, tr, &t.blob(), stroke);
+                    let mut ring: Vec<Pos2> = t.ring().iter().map(|q| tr.pt(*q)).collect();
+                    if let Some(first) = ring.first().copied() {
+                        ring.push(first);
+                    }
+                    painter.add(Shape::line(ring, stroke));
                 }
             }
             Sel::Via(id) => {
@@ -820,8 +826,11 @@ impl App {
                 }
             }
         }
-        for (a, b, layer) in &r.segs {
-            fill_blob(painter, tr, &Blob::line(*a, *b, r.width), colour(*layer, 235));
+        for (a, b, layer, mid) in &r.segs {
+            let t = Track { mid: *mid, id: 0, a: *a, b: *b, w: r.width, layer: *layer, net: 0 };
+            for part in t.blobs() {
+                fill_blob(painter, tr, &part, colour(*layer, 235));
+            }
         }
         for v in &r.vias {
             fill_blob(painter, tr, &Blob::dot(*v, doc.rules.via_dia), VIA);
@@ -832,17 +841,26 @@ impl App {
             let n = pts.len().saturating_sub(1);
             let hollow_last = self.route_mode.look_ahead && n >= 2;
             for (i, s) in pts.windows(2).enumerate() {
-                let seg = Blob::line(s[0], s[1], r.width);
+                let t = Track { mid: c.plan.mid(i), id: 0, a: s[0], b: s[1], w: r.width, layer: r.layer, net: 0 };
+                let mut outline: Vec<Pos2> = t.ring().iter().map(|q| tr.pt(*q)).collect();
+                if let Some(first) = outline.first().copied() {
+                    outline.push(first);
+                }
                 if hollow_last && i == n - 1 {
-                    stroke_blob(painter, tr, &seg, Stroke::new(1.4, colour(r.layer, 230)));
+                    painter.add(Shape::line(outline, Stroke::new(1.4, colour(r.layer, 230))));
                 } else {
-                    fill_blob(painter, tr, &seg, colour(r.layer, 120));
-                    stroke_blob(painter, tr, &seg, Stroke::new(1.0, colour(r.layer, 220)));
+                    // One stroke along the centre, so the shading doesn't double up.
+                    let centre: Vec<Pos2> = t.path().iter().map(|q| tr.pt(*q)).collect();
+                    let wide = tr.len(r.width).max(1.0);
+                    painter.add(Shape::line(centre.clone(), Stroke::new(wide, colour(r.layer, 120))));
+                    painter.add(Shape::line(outline, Stroke::new(1.0, colour(r.layer, 220))));
                 }
             }
             for item in &c.plan.hits {
                 if let Some(&k) = self.copper.index.get(item) {
-                    stroke_blob(painter, tr, &self.copper.items[k].blob, Stroke::new(2.0, theme::RED));
+                    for part in &self.copper.items[k].parts {
+                        stroke_blob(painter, tr, part, Stroke::new(2.0, theme::RED));
+                    }
                 }
             }
             if c.plan.blocked
@@ -916,11 +934,12 @@ impl App {
                 }
                 _ => String::new(),
             };
+            let corner = if m.corner.arcs() { format!("{} {}", m.corner.name(), self.unit.len(m.arc_radius)) } else { m.corner.name().to_string() };
             let text = format!(
                 "Routing {} · {} · {} · {}{blocked}",
                 self.doc.net_name(r.net),
                 self.unit.len(r.width),
-                m.corner.name(),
+                corner,
                 m.conflict.name()
             );
             chip(ui, &text, layer_color(Layer::Cu(r.layer)), "route-chip");
@@ -1041,10 +1060,21 @@ impl App {
             ui.label(RichText::new(text).size(12.5).color(DIM));
         };
         label(ui, "Corners  ·  Shift+Space");
-        for c in [Corner::D45, Corner::D90, Corner::Any] {
+        for c in [Corner::D45, Corner::Arc45, Corner::D90, Corner::Arc90, Corner::Any] {
             if ui.selectable_label(m.corner == c, c.name()).clicked() {
                 m.corner = c;
             }
+        }
+        if m.corner.arcs() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Arc radius").color(DIM));
+                let mut v = self.unit.from_mm(m.arc_radius);
+                let r = ui.add(egui::DragValue::new(&mut v).speed(0.01).max_decimals(3).suffix(format!(" {}", self.unit.name())));
+                if r.changed() {
+                    m.arc_radius = nm(self.unit.to_mm(v)).clamp(0.05, 50.0);
+                }
+                ui.label(RichText::new(",  .  (Shift: ×10)").size(11.5).color(FAINT));
+            });
         }
         ui.separator();
         label(ui, "When something's in the way  ·  Shift+R");

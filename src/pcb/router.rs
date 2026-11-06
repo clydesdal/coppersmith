@@ -22,7 +22,11 @@ use std::collections::BinaryHeap;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Corner {
     D45,
+    /// 45° routing with each corner rounded into a tangent arc.
+    Arc45,
     D90,
+    /// 90° routing with each corner rounded into a tangent arc.
+    Arc90,
     Any,
 }
 
@@ -30,16 +34,32 @@ impl Corner {
     pub fn name(self) -> &'static str {
         match self {
             Corner::D45 => "45°",
+            Corner::Arc45 => "45° with arc",
             Corner::D90 => "90°",
+            Corner::Arc90 => "90° with arc",
             Corner::Any => "Any angle",
         }
     }
+    /// Altium's order for Shift+Space.
     pub fn next(self) -> Corner {
         match self {
-            Corner::D45 => Corner::D90,
-            Corner::D90 => Corner::Any,
+            Corner::D45 => Corner::Arc45,
+            Corner::Arc45 => Corner::D90,
+            Corner::D90 => Corner::Arc90,
+            Corner::Arc90 => Corner::Any,
             Corner::Any => Corner::D45,
         }
+    }
+    /// The straight style the path is planned in before corners are rounded.
+    pub fn base(self) -> Corner {
+        match self {
+            Corner::Arc45 => Corner::D45,
+            Corner::Arc90 => Corner::D90,
+            c => c,
+        }
+    }
+    pub fn arcs(self) -> bool {
+        matches!(self, Corner::Arc45 | Corner::Arc90)
     }
 }
 
@@ -93,6 +113,9 @@ pub const EDGE: u32 = u32::MAX;
 pub struct Plan {
     /// The corners, starting where the route is now.
     pub pts: Vec<P>,
+    /// For each piece between corners, the middle of its arc if it's one.
+    /// Empty when every piece is straight.
+    pub mids: Vec<Option<P>>,
     /// It couldn't get all the way to the pointer.
     pub blocked: bool,
     /// What it runs into, for Ignore mode to show.
@@ -109,6 +132,14 @@ impl Plan {
     pub fn end(&self) -> Option<P> {
         self.pts.last().copied()
     }
+    /// The middle of piece `i`'s arc, if it's an arc.
+    pub fn mid(&self, i: usize) -> Option<P> {
+        self.mids.get(i).copied().flatten()
+    }
+    /// The pieces, as (from, to, arc middle).
+    pub fn pieces(&self) -> Vec<(P, P, Option<P>)> {
+        self.pts.windows(2).enumerate().map(|(i, s)| (s[0], s[1], self.mid(i))).collect()
+    }
 }
 
 /// Everything on a layer a track must keep clear of, whatever its net:
@@ -119,13 +150,17 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
         .items
         .iter()
         .filter(|c| c.on.has(layer))
-        .map(|c| Obstacle {
-            blob: c.blob.clone(),
-            bbox: c.bbox,
-            gap: r.clearance,
-            item: Some(c.item),
-            net: c.net,
-            movable: matches!(c.item, Item::Track(_)),
+        .flat_map(|c| {
+            // An arc is several pieces; arcs aren't pushed (yet), only straight tracks.
+            let movable = matches!(c.item, Item::Track(_)) && c.parts.len() == 1;
+            c.parts.iter().map(move |part| Obstacle {
+                blob: part.clone(),
+                bbox: part.bbox(),
+                gap: r.clearance,
+                item: Some(c.item),
+                net: c.net,
+                movable,
+            })
         })
         .collect();
     // Plain holes have no copper but still can't be routed over.
@@ -166,6 +201,7 @@ pub fn obstacles(board: &Board, copper: &Copper, layer: u8, net: u32) -> Vec<Obs
 
 /// The legs from `a` to `b` in a corner style. `flip` swaps which comes first.
 pub fn legs(a: P, b: P, corner: Corner, flip: bool) -> Vec<P> {
+    let corner = corner.base();
     let d = b.sub(a);
     let (ax, ay) = (d.x.abs(), d.y.abs());
     if a.same(b) {
@@ -175,6 +211,7 @@ pub fn legs(a: P, b: P, corner: Corner, flip: bool) -> Vec<P> {
     match corner {
         Corner::Any => vec![a, b],
         _ if straight => vec![a, b],
+        Corner::Arc45 | Corner::Arc90 => unreachable!(),
         Corner::D90 => {
             let corner = if flip { p(a.x, b.y) } else { p(b.x, a.y) };
             vec![a, corner, b]
@@ -208,6 +245,123 @@ pub fn clash(obs: &[Obstacle], a: P, b: P, w: f64) -> Option<&Obstacle> {
 
 pub fn clear(obs: &[Obstacle], pts: &[P], w: f64) -> bool {
     pts.windows(2).all(|s| clash(obs, s[0], s[1], w).is_none())
+}
+
+/// An arc piece from `a` through `m` to `b`, `w` wide, is clear.
+pub fn clear_arc(obs: &[Obstacle], a: P, m: P, b: P, w: f64) -> bool {
+    arc_blobs(a, m, b, w).iter().all(|part| near(obs, part.bbox()).all(|o| part.gap(&o.blob).0 >= o.gap + SURE))
+}
+
+/// Every piece of a path, straight or arc, is clear.
+#[cfg(test)]
+pub fn clear_pieces(obs: &[Obstacle], pieces: &[(P, P, Option<P>)], w: f64) -> bool {
+    pieces.iter().all(|(a, b, m)| match m {
+        Some(m) => clear_arc(obs, *a, *m, *b, w),
+        None => clash(obs, *a, *b, w).is_none(),
+    })
+}
+
+/// A path's pieces as short straight steps, for pushing with: arcs are cut
+/// up finely enough that `ARC_ERROR` more width covers them.
+pub fn as_steps(pieces: &[(P, P, Option<P>)]) -> Vec<(P, P)> {
+    let mut out = Vec::new();
+    for (a, b, m) in pieces {
+        match m {
+            Some(m) => out.extend(arc_points(*a, *m, *b).windows(2).map(|s| (s[0], s[1]))),
+            None => out.push((*a, *b)),
+        }
+    }
+    out
+}
+
+/// Rounds a path's corners into tangent arcs of `radius`. Each corner may
+/// use up to half of a segment it shares with another corner, or all of an
+/// end segment. An arc that would come too close to `obs` tries half the
+/// radius, and so on; below 0.05 mm the corner stays sharp.
+pub fn fillet(obs: &[Obstacle], pts: &[P], w: f64, radius: f64) -> (Vec<P>, Vec<Option<P>>) {
+    let n = pts.len();
+    if n < 3 || radius <= 0.0 {
+        return (pts.to_vec(), vec![None; n.saturating_sub(1)]);
+    }
+    let mut out = vec![pts[0]];
+    let mut mids: Vec<Option<P>> = Vec::new();
+    for i in 1..n - 1 {
+        let (p0, c, p1) = (pts[i - 1], pts[i], pts[i + 1]);
+        let (din, dout) = (c.sub(p0), p1.sub(c));
+        let (lin, lout) = (din.len(), dout.len());
+        let mut rounded = false;
+        if lin > 1e-9 && lout > 1e-9 {
+            let (u, v) = (din.scale(1.0 / lin), dout.scale(1.0 / lout));
+            let theta = u.dot(v).clamp(-1.0, 1.0).acos();
+            if theta > 1e-6 && theta < std::f64::consts::PI - 1e-3 {
+                let half = (theta / 2.0).tan();
+                let avail_in = if i == 1 { lin } else { lin / 2.0 };
+                let avail_out = if i + 1 == n - 1 { lout } else { lout / 2.0 };
+                let mut r = radius.min(avail_in.min(avail_out) / half);
+                let turn = u.cross(v).signum();
+                while r >= 0.05 {
+                    let t = r * half;
+                    let (t1, t2) = (c.sub(u.scale(t)).rounded(), c.add(v.scale(t)).rounded());
+                    let centre = c.sub(u.scale(t)).add(p(-u.y, u.x).scale(turn * r));
+                    let towards = c.sub(centre);
+                    let mid = centre.add(towards.scale(r / towards.len())).rounded();
+                    if clear_arc(obs, t1, mid, t2, w) {
+                        out.push(t1);
+                        mids.push(None);
+                        out.push(t2);
+                        mids.push(Some(mid));
+                        rounded = true;
+                        break;
+                    }
+                    r /= 2.0;
+                }
+            }
+        }
+        if !rounded {
+            out.push(c);
+            mids.push(None);
+        }
+    }
+    out.push(pts[n - 1]);
+    mids.push(None);
+    // Drop straight pieces with no length, where an arc fills a whole segment.
+    let mut i = 0;
+    while i + 1 < out.len() {
+        if mids[i].is_none() && out[i].same(out[i + 1]) && out.len() > 2 {
+            out.remove(i + 1);
+            mids.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+    (out, mids)
+}
+
+/// Cuts a path at its first clash: straight pieces as far as they're clear,
+/// arcs not at all. True when it was cut.
+pub fn cut_at_clash(obs: &[Obstacle], pieces: &[(P, P, Option<P>)], w: f64) -> (Vec<P>, Vec<Option<P>>, bool) {
+    let mut pts = vec![pieces.first().map(|p| p.0).unwrap_or_default()];
+    let mut mids = Vec::new();
+    for (a, b, m) in pieces {
+        match m {
+            Some(m) if clear_arc(obs, *a, *m, *b, w) => {
+                pts.push(*b);
+                mids.push(Some(*m));
+            }
+            Some(_) => return (pts, mids, true),
+            None => {
+                let (part, cut) = stop_short(obs, &[*a, *b], w);
+                if part.len() == 2 {
+                    pts.push(part[1]);
+                    mids.push(None);
+                }
+                if cut {
+                    return (pts, mids, true);
+                }
+            }
+        }
+    }
+    (pts, mids, false)
 }
 
 /// How far along a path it can go before coming too close to something.
@@ -519,6 +673,8 @@ pub struct Scene {
     pub vias: Vec<(u32, P, f64, u32)>,
     /// Whether Push may move vias too (Altium's "Allow via pushing").
     pub via_push: bool,
+    /// The radius corners are rounded to in the arc corner styles.
+    pub arc_radius: f64,
 }
 
 impl Scene {
@@ -540,6 +696,7 @@ impl Scene {
             others,
             vias: board.vias.iter().filter(|v| v.net != net || net == 0).map(|v| (v.id, v.at, v.dia, v.net)).collect(),
             via_push: true,
+            arc_radius: 1.0,
         }
     }
 
@@ -553,6 +710,21 @@ impl Scene {
 /// already placed but not yet on the board, which pushed tracks keep clear of.
 #[allow(clippy::too_many_arguments)]
 pub fn plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode: Conflict, board: BBox, held: &[(P, P)]) -> Plan {
+    let mut plan = plan_straight(scene, a, b, w, corner, flip, mode, board, held);
+    // Pushing modes round their corners before pushing (see push_plan).
+    if corner.arcs() && plan.mids.is_empty() {
+        let obs: &[Obstacle] = if mode == Conflict::Ignore { &[] } else { &scene.own };
+        let (pts, mids) = fillet(obs, &plan.pts, w, scene.arc_radius);
+        plan.pts = pts;
+        plan.mids = mids;
+    }
+    plan
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_straight(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode: Conflict, board: BBox, held: &[(P, P)]) -> Plan {
+    let arcs = corner.arcs();
+    let corner = corner.base();
     let obs = &scene.own;
     let span = a.dist(b);
     let mut area = BBox::of(&[a, b]).grown((span * 0.6).clamp(3.0, 25.0));
@@ -587,7 +759,7 @@ pub fn plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode:
             Plan { pts, blocked, ..Default::default() }
         }
         Conflict::Walkaround => walkaround(obs, a, b, w, corner, flip, area),
-        Conflict::Push => push_plan(scene, a, b, w, corner, flip, area, held),
+        Conflict::Push => push_plan(scene, a, b, w, corner, flip, area, held, arcs),
         Conflict::HugPush => {
             // Keep close round what's in the way while that's a fair path;
             // push only when going round would be the long way or no way.
@@ -596,7 +768,7 @@ pub fn plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode:
             if !round.blocked && length(&round.pts) <= direct * 1.3 + 1.0 {
                 return round;
             }
-            let pushed = push_plan(scene, a, b, w, corner, flip, area, held);
+            let pushed = push_plan(scene, a, b, w, corner, flip, area, held, arcs);
             if pushed.note.is_some() && !round.blocked { round } else { pushed }
         }
     }
@@ -608,15 +780,28 @@ fn length(pts: &[P]) -> f64 {
 
 /// Round what can't move; through what can, pushing it aside.
 #[allow(clippy::too_many_arguments)]
-fn push_plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, area: BBox, held: &[(P, P)]) -> Plan {
+fn push_plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, area: BBox, held: &[(P, P)], arcs: bool) -> Plan {
     let fixed: Vec<Obstacle> = scene.own.iter().filter(|o| !scene.movable(o)).cloned().collect();
-    let head = walkaround(&fixed, a, b, w, corner, flip, area);
+    let mut head = walkaround(&fixed, a, b, w, corner, flip, area);
+    // Round the corners first, so what's pushed keeps clear of the arcs.
+    let mut width = w;
+    if arcs {
+        let (pts, mids) = fillet(&fixed, &head.pts, w, scene.arc_radius);
+        head.pts = pts;
+        head.mids = mids;
+        width += 2.0 * ARC_ERROR;
+    }
     let mut segs: Vec<(P, P)> = held.to_vec();
-    segs.extend(head.pts.windows(2).map(|s| (s[0], s[1])));
-    match shove(scene, &segs, w) {
+    segs.extend(as_steps(&head.pieces()));
+    match shove(scene, &segs, width) {
         Some((pushed, vias)) => Plan { pushed, vias, ..head },
         None => {
             let mut round = walkaround(&scene.own, a, b, w, corner, flip, area);
+            if arcs {
+                let (pts, mids) = fillet(&scene.own, &round.pts, w, scene.arc_radius);
+                round.pts = pts;
+                round.mids = mids;
+            }
             round.note = Some("can't push that aside");
             round
         }
@@ -653,7 +838,9 @@ fn key(q: P) -> (i64, i64) {
 /// Other nets' tracks on a layer, joined into runs.
 pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Line> {
     use std::collections::{HashMap, HashSet};
-    let tracks: Vec<&Track> = board.tracks.iter().filter(|t| t.layer == layer && (t.net != skip_net || skip_net == 0)).collect();
+    // Arcs aren't pushed (yet); where one meets a straight track it pins it.
+    let tracks: Vec<&Track> =
+        board.tracks.iter().filter(|t| t.layer == layer && t.mid.is_none() && (t.net != skip_net || skip_net == 0)).collect();
     let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         ends.entry(key(t.a)).or_default().push(i);
@@ -1062,7 +1249,7 @@ pub fn apply_pushed(board: &mut Board, pushed: &[Moved], vias: &[(u32, P)]) -> V
         for s in m.pts.windows(2) {
             if !s[0].same(s[1]) {
                 let id = board.new_id();
-                board.tracks.push(Track { id, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net });
+                board.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net });
                 made.push(id);
             }
         }
@@ -1192,7 +1379,7 @@ mod tests {
         let mut new = Vec::new();
         for (a, e) in [((16.9125, 22.0), (18.5, 22.0)), ((18.5, 22.0), (18.5, 27.0)), ((18.5, 27.0), (16.9125, 27.0))] {
             let id = b.new_id();
-            b.tracks.push(Track { id, a: p(a.0, a.1), b: p(e.0, e.1), w: 0.25, layer: TOP, net });
+            b.tracks.push(Track { mid: None, id, a: p(a.0, a.1), b: p(e.0, e.1), w: 0.25, layer: TOP, net });
             new.push(id);
         }
         let old_led: Vec<u32> = b.tracks.iter().filter(|t| t.net == net && !new.contains(&t.id)).map(|t| t.id).collect();
@@ -1252,7 +1439,7 @@ mod pushing {
         pad(b, p(0.0, y), net);
         pad(b, p(20.0, y), net);
         let id = b.new_id();
-        b.tracks.push(Track { id, a: p(0.0, y), b: p(20.0, y), w: 0.25, layer: TOP, net });
+        b.tracks.push(Track { mid: None, id, a: p(0.0, y), b: p(20.0, y), w: 0.25, layer: TOP, net });
     }
 
     fn board() -> (Board, u32) {
@@ -1349,10 +1536,10 @@ mod clearance_always_holds {
         let mut b = b.clone();
         let mut fresh: Vec<Item> = apply_pushed(&mut b, &plan.pushed, &plan.vias).into_iter().map(Item::Track).collect();
         fresh.extend(plan.vias.iter().map(|v| Item::Via(v.0)));
-        for s in plan.pts.windows(2) {
-            if !s[0].same(s[1]) {
+        for (a, e, mid) in plan.pieces() {
+            if !a.same(e) {
                 let id = b.new_id();
-                b.tracks.push(Track { id, a: s[0], b: s[1], w, layer: TOP, net });
+                b.tracks.push(Track { mid, id, a, b: e, w, layer: TOP, net });
                 fresh.push(Item::Track(id));
             }
         }
@@ -1383,19 +1570,32 @@ mod clearance_always_holds {
             targets.push(p(x, y).snap(0.25));
         }
         let mut checked = 0;
-        for mode in [Conflict::Walkaround, Conflict::Push, Conflict::HugPush, Conflict::Stop] {
+        let mut arcs = 0;
+        for (mode, corner) in [
+            (Conflict::Walkaround, Corner::D45),
+            (Conflict::Push, Corner::D45),
+            (Conflict::HugPush, Corner::D45),
+            (Conflict::Stop, Corner::D45),
+            (Conflict::Walkaround, Corner::Arc45),
+            (Conflict::Walkaround, Corner::Arc90),
+            (Conflict::Push, Corner::Arc45),
+            (Conflict::Stop, Corner::Arc90),
+        ] {
             for (k, (a, net)) in starts.iter().enumerate() {
                 let mut scene = Scene::new(&b, &c, TOP, *net);
                 scene.via_push = true;
+                scene.arc_radius = [0.5, 1.0, 3.0][k % 3];
                 for to in targets.iter().skip(k % 3).step_by(3) {
-                    let plan = plan(&scene, *a, *to, 0.25, Corner::D45, k % 2 == 0, mode, b.outline_bbox(), &[]);
+                    let plan = plan(&scene, *a, *to, 0.25, corner, k % 2 == 0, mode, b.outline_bbox(), &[]);
+                    arcs += plan.mids.iter().filter(|m| m.is_some()).count();
                     let found = problems(&b, *net, &plan, 0.25);
-                    assert!(found.is_empty(), "{mode:?} from {a:?} to {to:?}: {found:?}\n{plan:?}");
+                    assert!(found.is_empty(), "{mode:?} {corner:?} from {a:?} to {to:?}: {found:?}\n{plan:?}");
                     checked += 1;
                 }
             }
         }
-        assert!(checked > 300, "only {checked} routes tried");
+        assert!(checked > 600, "only {checked} routes tried");
+        assert!(arcs > 100, "only {arcs} arcs made");
     }
 }
 
@@ -1432,9 +1632,9 @@ mod via_pushing {
         let v = b.new_id();
         b.vias.push(Via { id: v, at: p(10.0, 0.0), dia: 0.6, drill: 0.3, net: n });
         let t1 = b.new_id();
-        b.tracks.push(Track { id: t1, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.25, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: t1, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.25, layer: TOP, net: n });
         let t2 = b.new_id();
-        b.tracks.push(Track { id: t2, a: p(10.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: BOTTOM, net: n });
+        b.tracks.push(Track { mid: None, id: t2, a: p(10.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: BOTTOM, net: n });
         (b, a, n)
     }
 
@@ -1473,7 +1673,7 @@ mod via_pushing {
         let n = b.net("B");
         tp(&mut b, p(10.0, 0.0), n);
         let t = b.new_id();
-        b.tracks.push(Track { id: t, a: p(10.0, 0.0), b: p(11.0, 0.0), w: 0.25, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: t, a: p(10.0, 0.0), b: p(11.0, 0.0), w: 0.25, layer: TOP, net: n });
         let scene = Scene::new(&b, &analyse(&b), TOP, a);
         let plan = plan(&scene, p(5.0, 0.0), p(15.0, 0.0), 0.25, Corner::D45, false, Conflict::HugPush, b.outline_bbox(), &[]);
         assert!(plan.pushed.is_empty() && !plan.blocked, "{plan:?}");
@@ -1508,7 +1708,63 @@ fn pushing_board() -> (Board, u32, u32) {
         });
     }
     let id = b.new_id();
-    b.tracks.push(Track { id, a: p(0.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: TOP, net: n });
+    b.tracks.push(Track { mid: None, id, a: p(0.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: TOP, net: n });
     (b, a, n)
 }
 
+
+#[cfg(test)]
+mod arcs {
+    use super::*;
+
+    #[test]
+    fn a_square_corner_becomes_a_tangent_arc() {
+        let pts = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)];
+        let (out, mids) = fillet(&[], &pts, 0.25, 2.0);
+        assert_eq!(out, vec![p(0.0, 0.0), p(8.0, 0.0), p(10.0, 2.0), p(10.0, 10.0)]);
+        let m = mids[1].expect("the corner is an arc");
+        let (c, r) = arc_center(out[1], m, out[2]).unwrap();
+        // The middle is kept to the nanometre, so the centre is within a few.
+        assert!(c.dist(p(8.0, 2.0)) < 1e-5 && (r - 2.0).abs() < 1e-5, "{c:?} {r}");
+        assert!(mids[0].is_none() && mids[2].is_none());
+    }
+
+    #[test]
+    fn a_45_degree_corner_uses_a_shorter_tangent() {
+        let pts = [p(0.0, 0.0), p(10.0, 0.0), p(20.0, 10.0)];
+        let (out, mids) = fillet(&[], &pts, 0.25, 2.0);
+        let t = 2.0 * (std::f64::consts::FRAC_PI_8).tan();
+        assert!(out[1].dist(p(10.0 - t, 0.0)) < 1e-6, "{out:?}");
+        assert!(mids[1].is_some());
+    }
+
+    #[test]
+    fn an_arc_shrinks_rather_than_come_too_close() {
+        // A pad tucked inside the corner, where a big arc would cut across it.
+        // Clear of the sharp corner, but right where a 3 mm arc would pass.
+        let blob = Blob::dot(p(9.0, 1.0), 0.6);
+        let obs = vec![Obstacle { bbox: blob.bbox(), blob, gap: 0.2, item: None, net: 9, movable: false }];
+        let pts = [p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)];
+        assert!(clear(&obs, &pts, 0.25), "the sharp path is clear");
+        let (out, mids) = fillet(&obs, &pts, 0.25, 3.0);
+        let pieces: Vec<(P, P, Option<P>)> = out.windows(2).enumerate().map(|(i, s)| (s[0], s[1], mids[i])).collect();
+        assert!(clear_pieces(&obs, &pieces, 0.25), "{pieces:?}");
+        let m = mids.iter().flatten().next().expect("a smaller arc still fits");
+        let (_, r) = arc_center(out[1], *m, out[2]).unwrap();
+        assert!(r < 2.9, "it should have shrunk: {r}");
+    }
+
+    #[test]
+    fn arcs_go_to_the_gerber_as_arcs() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        b.tracks.push(Track { mid: Some(p(8.0 + 2.0f64.sqrt(), 2.0 - 2.0f64.sqrt()).rounded()), id: 1, a: p(8.0, 0.0), b: p(10.0, 2.0), w: 0.25, layer: TOP, net: n });
+        let files = crate::pcb::gerber::files(&b);
+        let top = &files.iter().find(|f| f.0.ends_with(".GTL")).unwrap().1;
+        assert!(top.contains("G75*"));
+        // Anticlockwise to (10, 2), centre (8, 2) to within a couple of nanometres.
+        let line = top.lines().find(|l| l.starts_with("G03X10000000Y2000000I")).expect("an anticlockwise arc");
+        let ij: Vec<i64> = line.trim_start_matches("G03X10000000Y2000000I").trim_end_matches("D01*").split('J').map(|v| v.parse().unwrap()).collect();
+        assert!(ij[0].abs() <= 2 && (ij[1] - 2_000_000).abs() <= 2, "{line}");
+    }
+}

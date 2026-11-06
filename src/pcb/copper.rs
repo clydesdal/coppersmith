@@ -37,12 +37,35 @@ impl On {
 #[derive(Clone, Debug)]
 pub struct Cu {
     pub item: Item,
+    /// The main piece: the whole thing, or for an arc its chord.
     pub blob: Blob,
+    /// All of it, as pieces: just `blob`, or the many pieces of an arc.
+    pub parts: Vec<Blob>,
     pub bbox: BBox,
     pub on: On,
     pub net: u32,
     /// Where a "still to connect" line can end.
     pub anchors: Vec<P>,
+}
+
+impl Cu {
+    /// The gap to another piece of copper, and the nearest points.
+    pub fn gap(&self, o: &Cu) -> (f64, P, P) {
+        let mut best = (f64::MAX, P::default(), P::default());
+        for a in &self.parts {
+            for b in &o.parts {
+                let g = a.gap(b);
+                if g.0 < best.0 {
+                    best = g;
+                }
+            }
+        }
+        best
+    }
+
+    pub fn dist_to(&self, q: P) -> f64 {
+        self.parts.iter().map(|b| b.dist_to(q)).fold(f64::MAX, f64::min)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +96,7 @@ pub fn collect(board: &Board) -> Vec<Cu> {
             items.push(Cu {
                 item: Item::Pad(f.id, i as u16),
                 bbox: blob.bbox(),
+                parts: vec![blob.clone()],
                 blob,
                 on,
                 net: pad.net,
@@ -81,12 +105,20 @@ pub fn collect(board: &Board) -> Vec<Cu> {
         }
     }
     for t in &board.tracks {
-        let blob = t.blob();
-        items.push(Cu { item: Item::Track(t.id), bbox: blob.bbox(), blob, on: On::One(t.layer), net: t.net, anchors: vec![t.a, t.b] });
+        let parts = t.blobs();
+        items.push(Cu {
+            item: Item::Track(t.id),
+            bbox: t.bbox(),
+            blob: t.blob(),
+            parts,
+            on: On::One(t.layer),
+            net: t.net,
+            anchors: vec![t.a, t.b],
+        });
     }
     for v in &board.vias {
         let blob = v.blob();
-        items.push(Cu { item: Item::Via(v.id), bbox: blob.bbox(), blob, on: On::All, net: v.net, anchors: vec![v.at] });
+        items.push(Cu { item: Item::Via(v.id), bbox: blob.bbox(), parts: vec![blob.clone()], blob, on: On::All, net: v.net, anchors: vec![v.at] });
     }
     items
 }
@@ -126,7 +158,7 @@ pub fn analyse(board: &Board) -> Copper {
         if a.net == 0 || a.net != b.net || !a.on.shares(b.on) {
             continue;
         }
-        if a.blob.gap(&b.blob).0 <= 1e-6 {
+        if a.gap(b).0 <= 1e-6 {
             let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
             parent[ri] = rj;
         }
@@ -200,7 +232,7 @@ impl Copper {
             .items
             .iter()
             .filter(|c| c.on.has(layer) && c.bbox.grown(tol).contains(q))
-            .map(|c| (c.blob.dist_to(q), c))
+            .map(|c| (c.dist_to(q), c))
             .filter(|(d, _)| *d <= tol)
             .collect();
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -238,7 +270,7 @@ mod tests {
         dot(&mut b, p(10.0, 0.0), n);
         dot(&mut b, p(5.0, 8.0), n);
         assert_eq!(analyse(&b).rats.len(), 2);
-        b.tracks.push(Track { id: 99, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.25, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: 99, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.25, layer: TOP, net: n });
         let c = analyse(&b);
         assert_eq!(c.rats.len(), 1);
         // A track on the bottom doesn't reach surface pads on top.

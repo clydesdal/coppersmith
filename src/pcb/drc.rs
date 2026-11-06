@@ -49,7 +49,7 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
         {
             continue;
         }
-        let (gap, pa, pb) = a.blob.gap(&b.blob);
+        let (gap, pa, pb) = a.gap(b);
         if gap < r.clearance - 1e-6 {
             let (what, sev) = if gap <= 1e-6 { ("Short circuit", Severity::Error) } else { ("Too close", Severity::Error) };
             out.push(Problem {
@@ -133,13 +133,15 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
             let mut worst: Option<(f64, P)> = None;
             for k in 0..n {
                 let (a, b) = (edge[k], edge[(k + 1) % n]);
-                let (d, pa, _) = core_dist(&cu.blob.core, &[a, b]);
-                let gap = d - cu.blob.r;
-                if worst.is_none_or(|w| gap < w.0) {
-                    worst = Some((gap, pa));
+                for part in &cu.parts {
+                    let (d, pa, _) = core_dist(&part.core, &[a, b]);
+                    let gap = d - part.r;
+                    if worst.is_none_or(|w| gap < w.0) {
+                        worst = Some((gap, pa));
+                    }
                 }
             }
-            let inside = point_in_ring(cu.blob.center(), edge);
+            let inside = cu.parts.iter().all(|part| point_in_ring(part.center(), edge));
             if let Some((gap, at)) = worst
                 && (!inside || gap < r.edge_clearance - 1e-6)
             {
@@ -214,8 +216,8 @@ mod tests {
     fn close_tracks_of_two_nets_are_caught() {
         let mut b = Board::default();
         let (n1, n2) = (b.net("A"), b.net("B"));
-        b.tracks.push(Track { id: 1, a: p(5.0, 10.0), b: p(20.0, 10.0), w: 0.25, layer: TOP, net: n1 });
-        b.tracks.push(Track { id: 2, a: p(5.0, 10.4), b: p(20.0, 10.4), w: 0.25, layer: TOP, net: n2 });
+        b.tracks.push(Track { mid: None, id: 1, a: p(5.0, 10.0), b: p(20.0, 10.0), w: 0.25, layer: TOP, net: n1 });
+        b.tracks.push(Track { mid: None, id: 2, a: p(5.0, 10.4), b: p(20.0, 10.4), w: 0.25, layer: TOP, net: n2 });
         let found = check(&b, &analyse(&b));
         assert!(found.iter().any(|p| p.title == "Too close"), "{found:?}");
         b.tracks[1].b = p(20.0, 10.0);

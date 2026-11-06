@@ -31,7 +31,8 @@ and ends the route.
 
 | Key | While routing |
 |---|---|
-| Shift+Space | Corners: 45°, 90°, any angle |
+| Shift+Space | Corners: 45°, 45° with arc, 90°, 90° with arc, any angle |
+| , and . | Arc radius down and up a mil (0.0254 mm); with Shift, ten mils |
 | Space (or /) | Flip which way the corner goes |
 | Shift+R | When something's in the way: walk around it, push it aside, hug and push, stop at it, or ignore it (shows what it would run over, outlined red, but still only places what's clear) |
 | Ctrl+click | Finish the connection by itself, round whatever is in the way |
@@ -68,6 +69,14 @@ where it was.
 **Hug and push** keeps close round what's in the way while that's a fair
 path, and pushes only when going round would be the long way or no way.
 
+**Arc corners** plan the route with sharp corners, then round each into a
+tangent arc of the arc radius (shown in the routing chip). A corner's arc can
+use up to half of each segment it shares with another corner. An arc that
+would come too close to something tries half the radius, and so on, or the
+corner stays sharp. Arcs are real arcs on the board and in the Gerbers
+(G02/G03); moving their ends keeps their shape. Arcs aren't pushed yet: a
+push treats an existing arc as fixed.
+
 **The clearance always holds.** Every mode plans clear paths, and before
 anything is placed (a route, a pushed track, a moved via, a dropped via)
 the rule check is run on the result: if it would call anything too close,
@@ -85,7 +94,8 @@ on the right; click one to go to it.
 
 ## Files
 
-Boards are saved as `.cspcb`, which is plain JSON (millimetres, Y up). Parts on
+Boards are saved as `.cspcb`, which is plain JSON (millimetres, Y up). An
+arc track has a `mid` point on the way from `a` to `b`, as KiCad does. Parts on
 a board carry a copy of their footprint, so a board file stands on its own.
 
 Gerbers are RS-274X with X2 attributes and Altium's file endings (GTL, GBL,

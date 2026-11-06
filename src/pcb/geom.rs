@@ -297,6 +297,81 @@ pub fn core_dist(a: &[P], b: &[P]) -> (f64, P, P) {
     best
 }
 
+// ---------------------------------------------------------------------------
+// Arcs, given as start, a point on the way, and end.
+
+/// How far the straight pieces an arc is cut into may stray from the arc.
+/// The pieces are grown by this much, so they always cover the true arc.
+pub const ARC_ERROR: f64 = 0.0005;
+
+/// The centre and radius of the circle through three points.
+pub fn arc_center(a: P, m: P, b: P) -> Option<(P, f64)> {
+    let d = 2.0 * (a.x * (m.y - b.y) + m.x * (b.y - a.y) + b.x * (a.y - m.y));
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let (a2, m2, b2) = (a.dot(a), m.dot(m), b.dot(b));
+    let c = p(
+        (a2 * (m.y - b.y) + m2 * (b.y - a.y) + b2 * (a.y - m.y)) / d,
+        (a2 * (b.x - m.x) + m2 * (a.x - b.x) + b2 * (m.x - a.x)) / d,
+    );
+    Some((c, c.dist(a)))
+}
+
+/// The start angle and the signed sweep (positive is anticlockwise).
+pub fn arc_sweep(a: P, m: P, b: P) -> Option<(P, f64, f64, f64)> {
+    let (c, r) = arc_center(a, m, b)?;
+    let ang = |q: P| (q.y - c.y).atan2(q.x - c.x);
+    let tau = std::f64::consts::TAU;
+    let (a0, am, a1) = (ang(a), ang(m), ang(b));
+    let ccw = m.sub(a).cross(b.sub(a)) > 0.0;
+    let norm = |x: f64| x.rem_euclid(tau);
+    let sweep = if ccw { norm(a1 - a0) } else { -norm(a0 - a1) };
+    let _ = am;
+    Some((c, r, a0, sweep))
+}
+
+/// The arc as a run of points, close enough that the gap is under `ARC_ERROR`.
+pub fn arc_points(a: P, m: P, b: P) -> Vec<P> {
+    let Some((c, r, a0, sweep)) = arc_sweep(a, m, b) else { return vec![a, b] };
+    let step = 2.0 * (1.0 - (ARC_ERROR / r).min(1.0)).acos();
+    let n = ((sweep.abs() / step.max(1e-3)).ceil() as usize).clamp(2, 720);
+    let mut pts: Vec<P> = (0..=n)
+        .map(|i| {
+            let t = a0 + sweep * i as f64 / n as f64;
+            c.add(p(t.cos(), t.sin()).scale(r))
+        })
+        .collect();
+    pts[0] = a;
+    pts[n] = b;
+    pts
+}
+
+pub fn arc_length(a: P, m: P, b: P) -> f64 {
+    match arc_sweep(a, m, b) {
+        Some((_, r, _, sweep)) => r * sweep.abs(),
+        None => a.dist(b),
+    }
+}
+
+/// The copper of an arc `w` wide, as overlapping straight pieces that cover it.
+pub fn arc_blobs(a: P, m: P, b: P, w: f64) -> Vec<Blob> {
+    arc_points(a, m, b).windows(2).map(|s| Blob::line(s[0], s[1], w + 2.0 * ARC_ERROR)).collect()
+}
+
+/// Where the middle of an arc goes when its ends move: the same bulge,
+/// measured across the new chord.
+pub fn refit_mid(a: P, m: P, b: P, na: P, nb: P) -> P {
+    let chord = b.sub(a);
+    let l2 = chord.dot(chord).max(1e-18);
+    let rel = m.sub(a);
+    let along = rel.dot(chord) / l2;
+    let across = rel.cross(chord) / l2;
+    let nchord = nb.sub(na);
+    let perp = p(nchord.y, -nchord.x);
+    na.add(nchord.scale(along)).add(perp.scale(across)).rounded()
+}
+
 /// A rectangle's corners, counter-clockwise, turned and moved.
 pub fn rect_core(c: P, w: f64, h: f64, rot: f64) -> Vec<P> {
     [p(-w / 2.0, -h / 2.0), p(w / 2.0, -h / 2.0), p(w / 2.0, h / 2.0), p(-w / 2.0, h / 2.0)]
@@ -365,6 +440,22 @@ mod tests {
         let bb = BBox::of(&ring);
         assert!((bb.w() - 2.5).abs() < 1e-9 && (bb.h() - 1.5).abs() < 1e-9);
         assert!(ring_area(&ring) > 0.0);
+    }
+
+    #[test]
+    fn a_quarter_arc() {
+        let (a, m, b) = (p(1.0, 0.0), p(0.5f64.sqrt(), 0.5f64.sqrt()), p(0.0, 1.0));
+        let (c, r) = arc_center(a, m, b).unwrap();
+        assert!(c.dist(p(0.0, 0.0)) < 1e-9 && (r - 1.0).abs() < 1e-9);
+        assert!((arc_length(a, m, b) - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        let pts = arc_points(a, m, b);
+        assert!(pts.iter().all(|q| (q.len() - 1.0).abs() < 1e-9));
+        // Clockwise the other way round.
+        let back = arc_points(b, m, a);
+        assert!(back[1].x > 0.0 && back[1].y > 0.0 && back.len() == pts.len());
+        // Moving an end keeps the bulge.
+        let m2 = refit_mid(a, m, b, p(2.0, 0.0), p(0.0, 2.0));
+        assert!(m2.dist(p(2.0f64.sqrt(), 2.0f64.sqrt())) < 1e-6);
     }
 
     #[test]
