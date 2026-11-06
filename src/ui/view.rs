@@ -471,6 +471,19 @@ impl App {
                             return None;
                         }
                     }
+                    // One arc changes its radius, staying tangent to the tracks
+                    // either side; with none there to stay tangent to, it moves.
+                    [Sel::Track(id)] => {
+                        let mut tried = doc.clone();
+                        let min_r = drag.before.rules.min_diag;
+                        if crate::pcb::slide::slide_arc(&mut tried, *id, d, min_r) {
+                            doc = tried;
+                        } else if crate::pcb::slide::arc_corner(&doc, *id) {
+                            return None;
+                        } else {
+                            App::move_selection(&mut doc, &self.sel, d);
+                        }
+                    }
                     sel => App::move_selection(&mut doc, sel, d),
                 }
             }
@@ -515,7 +528,7 @@ impl App {
                     }
                 }
                 self.notice = Some(if self.dragged(&drag, full, 1.0).is_none() {
-                    "Can't go further: a 45° step would get shorter than the rule allows (or a track would vanish).".into()
+                    "Can't go further: a corner would get tighter than the Shortest 45° rule allows, or a track would vanish.".into()
                 } else {
                     "Can't go further: something there can't move out of the way. Hold Ctrl to move without pushing.".into()
                 });

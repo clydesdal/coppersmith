@@ -113,6 +113,26 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
                 continue;
             }
         }
+        // An arc corner: the arc keeps its radius and stays tangent, and the
+        // straight track beyond it grows or shrinks along its own line.
+        if !fixed
+            && neighbours.len() == 1
+            && let Some((ai, t1, mid, t2, ni)) = refit_arc_corner(&work, neighbours[0], end, moved, if k == 1 { u } else { u.scale(-1.0) }, id)
+        {
+            let old_far = arc_far(&work.tracks, ai, end);
+            let arc = &mut work.tracks[ai];
+            if arc.a.same(end) {
+                arc.a = t1;
+                arc.b = t2;
+            } else {
+                arc.a = t2;
+                arc.b = t1;
+            }
+            arc.mid = Some(mid);
+            set_end(&mut work.tracks[ni], old_far, t2);
+            ends[k] = t1;
+            continue;
+        }
         if !keep45 {
             // Not a 45° track: the end stays and the track leans.
             continue;
@@ -296,6 +316,118 @@ pub fn fix_corners(board: &mut Board, changed: &HashSet<u32>, min: f64) -> bool 
 /// The tracks that differ between two boards.
 pub fn changed_tracks(before: &Board, after: &Board) -> HashSet<u32> {
     after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect()
+}
+
+/// The end of the arc track `ai` that isn't `near`, as it was on `tracks`.
+fn arc_far(tracks: &[Track], ai: usize, near: P) -> P {
+    let t = &tracks[ai];
+    if t.a.same(near) { t.b } else { t.a }
+}
+
+/// A tangent arc of radius `r` rounding the corner `x`, coming in along
+/// `din` and leaving along `dout` (unit lengths): where it starts, a point on
+/// the way, and where it ends.
+pub fn tangent_arc(x: P, din: P, dout: P, r: f64) -> Option<(P, P, P)> {
+    let theta = din.dot(dout).clamp(-1.0, 1.0).acos();
+    if theta < 1e-6 || theta > std::f64::consts::PI - 1e-3 || r <= 0.0 {
+        return None;
+    }
+    let t = r * (theta / 2.0).tan();
+    let turn = din.cross(dout).signum();
+    let t1 = x.sub(din.scale(t));
+    let t2 = x.add(dout.scale(t));
+    let centre = t1.add(p(-din.y, din.x).scale(turn * r));
+    let towards = x.sub(centre);
+    let mid = centre.add(towards.scale(r / towards.len()));
+    Some((t1.rounded(), mid.rounded(), t2.rounded()))
+}
+
+/// When the track `slid` slides and its end at `end` (which goes to
+/// `moved`, travelling `din` towards the corner) is joined to arc track
+/// `ai`: the arc's corner moves along the straight track beyond it, and the
+/// arc is rebuilt there, same radius, tangent to both. Returns the arc's
+/// index, its new start (on the slid track), middle and end, and the index
+/// of the straight track beyond.
+fn refit_arc_corner(board: &Board, ai: usize, end: P, moved: P, din: P, slid: u32) -> Option<(usize, P, P, P, usize)> {
+    let arc = &board.tracks[ai];
+    let mid = arc.mid?;
+    let (_, r) = arc_center(arc.a, mid, arc.b)?;
+    let far = far_end(arc, end);
+    if pinned(board, far) {
+        return None;
+    }
+    let beyond = others_at(board, far, arc.layer, arc.id);
+    if beyond.len() != 1 || board.tracks[beyond[0]].id == slid {
+        return None;
+    }
+    let n = &board.tracks[beyond[0]];
+    if n.mid.is_some() {
+        return None;
+    }
+    let f = far_end(n, far);
+    let dout = unit(f.sub(far));
+    let x = meet(moved, din, f, dout.scale(-1.0))?;
+    let (t1, m, t2) = tangent_arc(x, din, dout, r)?;
+    // The track beyond keeps some length, and stays the same way round.
+    if f.sub(t2).dot(dout) <= 1e-6 {
+        return None;
+    }
+    Some((ai, t1, m, t2, beyond[0]))
+}
+
+/// The arc is a corner between two straight tracks, so dragging it should
+/// change its radius rather than move it.
+pub fn arc_corner(board: &Board, id: u32) -> bool {
+    let Some(arc) = board.track(id) else { return false };
+    let one_straight = |q: P| {
+        let n = others_at(board, q, arc.layer, id);
+        n.len() == 1 && board.tracks[n[0]].mid.is_none() && !pinned(board, q)
+    };
+    arc.mid.is_some() && one_straight(arc.a) && one_straight(arc.b)
+}
+
+/// Drags an arc corner: its radius changes so that its middle follows the
+/// drag along the line out from the corner, staying tangent to the straight
+/// tracks either side, which grow or shrink to meet it. The radius never goes
+/// under `min_r`, so a corner can't be tightened into what looks square.
+/// False when it can't.
+pub fn slide_arc(board: &mut Board, id: u32, delta: P, min_r: f64) -> bool {
+    let Some(arc) = board.track(id).cloned() else { return false };
+    let Some(mid) = arc.mid else { return false };
+    let n1 = others_at(board, arc.a, arc.layer, id);
+    let n2 = others_at(board, arc.b, arc.layer, id);
+    if n1.len() != 1 || n2.len() != 1 || pinned(board, arc.a) || pinned(board, arc.b) {
+        return false;
+    }
+    let (s1, s2) = (board.tracks[n1[0]].clone(), board.tracks[n2[0]].clone());
+    if s1.mid.is_some() || s2.mid.is_some() {
+        return false;
+    }
+    let (f1, f2) = (far_end(&s1, arc.a), far_end(&s2, arc.b));
+    let (din, dout) = (unit(arc.a.sub(f1)), unit(f2.sub(arc.b)));
+    let Some(x) = meet(f1, din, f2, dout.scale(-1.0)) else { return false };
+    // How far the middle sits from the corner sets the radius.
+    let out = unit(mid.sub(x));
+    let dist = mid.dist(x) + delta.dot(out);
+    let theta = din.dot(dout).clamp(-1.0, 1.0).acos();
+    let half_inside = (std::f64::consts::PI - theta) / 2.0;
+    let r = dist / (1.0 / half_inside.sin() - 1.0);
+    if r < min_r.max(0.05) || r > 100.0 {
+        return false;
+    }
+    let Some((t1, m, t2)) = tangent_arc(x, din, dout, r) else { return false };
+    // The straight tracks keep some length, the same way round.
+    if t1.sub(f1).dot(din) <= 1e-6 || f2.sub(t2).dot(dout) <= 1e-6 {
+        return false;
+    }
+    set_end(&mut board.tracks[n1[0]], arc.a, t1);
+    set_end(&mut board.tracks[n2[0]], arc.b, t2);
+    if let Some(a) = board.tracks.iter_mut().find(|t| t.id == id) {
+        a.a = t1;
+        a.b = t2;
+        a.mid = Some(m);
+    }
+    true
 }
 
 /// Re-lays a track from its far end `from` to `to` as a straight leg and a
@@ -715,5 +847,83 @@ mod min_45 {
         };
         assert!(ok(4.7), "leaves 0.6 mm");
         assert!(!ok(4.8), "would leave 0.4 mm");
+    }
+}
+
+#[cfg(test)]
+mod arcs_stay_tangent {
+    use super::*;
+
+    /// A U-turn-free run with rounded corners: down a vertical, round a
+    /// 2 mm arc, along the bottom, round another, up the other side.
+    fn board() -> (Board, u32, u32) {
+        let mut b = Board::default();
+        let s = 2f64.sqrt();
+        let add = |b: &mut Board, a: P, e: P, mid: Option<P>| {
+            let id = b.new_id();
+            b.tracks.push(Track { mid, id, a, b: e, w: 0.25, layer: TOP, net: 1 });
+            id
+        };
+        add(&mut b, p(0.0, 10.0), p(0.0, 2.0), None);
+        let arc = add(&mut b, p(0.0, 2.0), p(2.0, 0.0), Some(p(2.0 - s, 2.0 - s)));
+        let bottom = add(&mut b, p(2.0, 0.0), p(10.0, 0.0), None);
+        add(&mut b, p(10.0, 0.0), p(12.0, 2.0), Some(p(10.0 + s, 2.0 - s)));
+        add(&mut b, p(12.0, 2.0), p(12.0, 10.0), None);
+        (b, bottom, arc)
+    }
+
+    /// Every arc is tangent to the straight tracks it joins.
+    fn tangent(b: &Board) -> bool {
+        b.tracks.iter().filter(|t| t.mid.is_some()).all(|arc| {
+            let (c, r) = arc_center(arc.a, arc.mid.unwrap(), arc.b).unwrap();
+            [arc.a, arc.b].iter().all(|end| {
+                b.tracks.iter().filter(|t| t.mid.is_none() && (t.a.same(*end) || t.b.same(*end))).all(|s| {
+                    // The radius at the joint is square to the straight track.
+                    let along = s.b.sub(s.a);
+                    let radius = end.sub(c);
+                    (along.dot(radius) / (along.len() * r)).abs() < 1e-4
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn sliding_between_arcs_keeps_them_tangent() {
+        let (mut b, bottom, _) = board();
+        assert!(tangent(&b));
+        assert!(slide(&mut b, bottom, p(0.0, -1.0)));
+        assert_eq!(b.tracks.len(), 5, "no links added: {:?}", b.tracks);
+        let t = b.track(bottom).unwrap();
+        assert!(t.a.same(p(2.0, -1.0)) && t.b.same(p(10.0, -1.0)), "{t:?}");
+        assert!(tangent(&b), "{:?}", b.tracks);
+        // The arcs keep their 2 mm radius.
+        for arc in b.tracks.iter().filter(|t| t.mid.is_some()) {
+            let (_, r) = arc_center(arc.a, arc.mid.unwrap(), arc.b).unwrap();
+            assert!((r - 2.0).abs() < 1e-4, "{r}");
+        }
+    }
+
+    #[test]
+    fn dragging_an_arc_changes_its_radius() {
+        let (mut b, _, arc) = board();
+        // The arc's middle is 0.83 mm out from the corner at the origin;
+        // pulling it 0.83 mm further out doubles the radius.
+        let out = p(1.0, 1.0).scale(1.0 / 2f64.sqrt());
+        let dist = (2.0 - 2f64.sqrt()) * 2f64.sqrt();
+        assert!(slide_arc(&mut b, arc, out.scale(dist), 0.5));
+        let a = b.track(arc).unwrap().clone();
+        let (_, r) = arc_center(a.a, a.mid.unwrap(), a.b).unwrap();
+        assert!((r - 4.0).abs() < 1e-3, "{r}");
+        assert!(a.a.same(p(0.0, 4.0)) && a.b.same(p(4.0, 0.0)), "{a:?}");
+        assert!(tangent(&b));
+        // Too far in and there's nothing left of the arc.
+        assert!(!slide_arc(&mut b, arc, out.scale(-10.0), 0.5));
+        // Never tighter than the smallest radius allowed.
+        let mut tight = b.clone();
+        // From 4 mm, the middle moves (√2 − 1) mm per millimetre of radius.
+        let to_r = |r: f64| (r * (2f64.sqrt() - 1.0)) - (4.0 * (2f64.sqrt() - 1.0));
+        assert!(slide_arc(&mut tight, arc, out.scale(to_r(0.6)), 0.5), "0.6 mm is fine");
+        let mut tighter = b.clone();
+        assert!(!slide_arc(&mut tighter, arc, out.scale(to_r(0.4)), 0.5), "0.4 mm is under the rule");
     }
 }

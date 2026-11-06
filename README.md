@@ -55,7 +55,14 @@ dragging to move freely without pushing; the rule check then just shows
 anything that's too close.
 
 Tracks that weren't at a multiple of 45° to begin with just stretch, so
-any-angle work stays as it was drawn. Arcs keep their bulge.
+any-angle work stays as it was drawn.
+
+Arc corners stay arcs. Slide a straight track that runs into a rounded
+corner and the arc keeps its radius and stays tangent, while the straight
+track beyond it grows or shrinks along its own line. Drag an arc itself and
+its radius changes, staying tangent to the tracks either side: pull it out
+for a bigger radius, in for a smaller one, never tighter than the Shortest
+45° rule.
 
 ### No square corners
 

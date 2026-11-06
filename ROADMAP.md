@@ -47,8 +47,10 @@ turns and flips — with Ctrl to move freely.
 Done in 0.3.6: the Shortest 45° rule — routes, moves and pushes never leave
 square corners on 45° work.
 
+Done in 0.3.7: arc corners stay tangent while sliding, and dragging an arc
+changes its radius.
+
 Next:
-- Keep arc corners tangent while sliding.
 - Push arcs (today an existing arc is fixed when pushing).
 - Pushing on other layers when a moved via's tracks there run into things
   (today they bend round, but don't push).
