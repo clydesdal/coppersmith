@@ -440,6 +440,9 @@ impl App {
                         reference: end,
                         moved: false,
                         free: false,
+                        turns: 0.0,
+                        flipped: false,
+                        last: q0,
                     });
                     return;
                 }
@@ -458,7 +461,17 @@ impl App {
             Sel::Track(id) => self.doc.track(id).map(|t| if t.a.dist(q0) < t.b.dist(q0) { t.a } else { t.b }),
         }
         .unwrap_or(q0);
-        self.drag = Some(Drag { kind: DragKind::Move, before: self.doc.clone(), grab: q0, reference, moved: false, free: false });
+        self.drag = Some(Drag {
+            kind: DragKind::Move,
+            before: self.doc.clone(),
+            grab: q0,
+            reference,
+            moved: false,
+            free: false,
+            turns: 0.0,
+            flipped: false,
+            last: q0,
+        });
     }
 
     /// The board with the drag carried out a fraction `f` of the way, before
@@ -466,6 +479,10 @@ impl App {
     /// slid track shrinking to nothing.
     fn dragged(&self, drag: &Drag, full: P, f: f64) -> Option<Board> {
         let mut doc = drag.before.clone();
+        // Parts turned or flipped mid-drag, round their own origins first.
+        if drag.turns != 0.0 || drag.flipped {
+            App::turn_parts(&mut doc, &self.picked_parts(), drag.turns, drag.flipped);
+        }
         match drag.kind {
             DragKind::Move => {
                 let d = full.scale(f).rounded();
@@ -506,7 +523,10 @@ impl App {
         Some(doc)
     }
 
-    fn continue_drag(&mut self, q: P, free: bool) {
+    pub(crate) fn continue_drag(&mut self, q: P, free: bool) {
+        if let Some(d) = &mut self.drag {
+            d.last = q;
+        }
         let Some(drag) = self.drag.clone() else { return };
         let target = drag.reference.add(q.sub(drag.grab)).snap(self.grid);
         let full = target.sub(drag.reference).rounded();
@@ -555,7 +575,7 @@ impl App {
             // A move that pushed gets the routing guarantee: if the rule check
             // finds anything new too close, the whole move is taken back.
             // With Ctrl held it was a free move, and the rule check just shows it.
-            if drag.moved && !drag.free && let Some(why) = self.new_clearance_problem(&drag.before) {
+            if drag.moved && !drag.free && let Some(why) = self.new_clearance_problem_from_moves(&drag.before) {
                 self.doc = drag.before;
                 self.rev += 1;
                 self.notice = Some(format!("Move taken back: {why}"));

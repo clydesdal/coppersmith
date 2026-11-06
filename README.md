@@ -50,7 +50,9 @@ push too. Pushes cascade, keep 45°, and spring back as you drag back.
 Nothing that moves comes within the clearance of what can't be pushed (other
 parts' pads, holes, the board edge): the drag stops as close as it can get
 and the status bar says why. When you let go, the rule check runs, and if it
-finds anything new too close the move is taken back. Hold **Ctrl** while
+finds anything new too close to something you didn't move, the move is taken
+back. A part's own tracks tangling with its pads after a turn is left for you
+to tidy, and the checks show where. Hold **Ctrl** while
 dragging to move freely without pushing; the rule check then just shows
 anything that's too close.
 
@@ -150,6 +152,10 @@ radii, new ones at the run's, each shrinking if it would come too close.
 anything is placed (a route, a pushed track, a moved via, a dropped via)
 the rule check is run on the result: if it would call anything too close,
 shorted or too near the edge, nothing is placed and the status bar says why.
+
+While dragging a part, **Space** turns it 90° (Shift+Space the other way),
+as do R and Shift+R, and L puts it on the other side; the drag carries on
+with it turned. Space and R turn a part you're placing from the library too.
 
 Anywhere: R turn 90° (Shift+R the other way), L other side, Delete remove,
 Ctrl+D copy, Ctrl+A everything, N light up the net under the pointer, 1–6 or

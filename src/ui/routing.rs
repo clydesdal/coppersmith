@@ -304,8 +304,19 @@ impl App {
             .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
     }
 
-    /// A clearance problem on the board now that wasn't there in `before`.
-    pub fn new_clearance_problem(&self, before: &Board) -> Option<String> {
+    /// A clearance problem on the board now that wasn't there in `before`,
+    /// leaving out ones only between things that were moved (a dragged part
+    /// and its own tracks tangling is the drag's business, and the checks
+    /// show it).
+    pub fn new_clearance_problem_from_moves(&self, before: &Board) -> Option<String> {
+        let changed = crate::pcb::slide::changed_tracks(before, &self.doc);
+        let moved = |item: &Item| match *item {
+            Item::Track(id) => changed.contains(&id),
+            Item::Via(id) => before.via(id).is_none_or(|v| self.doc.via(id).is_some_and(|n| !n.at.same(v.at))),
+            Item::Pad(f, _) => before.fp(f).is_none_or(|o| {
+                self.doc.fp(f).is_some_and(|n| !n.at.same(o.at) || n.rot != o.rot || n.side != o.side)
+            }),
+        };
         let key = |p: &drc::Problem| {
             let mut items = p.items.clone();
             items.sort();
@@ -319,6 +330,7 @@ impl App {
         drc::check(&self.doc, &copper::analyse(&self.doc))
             .into_iter()
             .filter(|p| CLEARANCE.contains(&p.title.as_str()))
+            .filter(|p| !(p.items.len() == 2 && p.items.iter().all(moved)))
             .find(|p| !was.contains(&key(p)))
             .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
     }

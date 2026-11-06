@@ -50,12 +50,15 @@ pub fn parse(text: &str) -> Vec<Step> {
             steps.extend([Step::Move(x, y), Step::Wait, Step::Down(x, y, b), Step::Wait, Step::Up(x, y, b), Step::Wait]);
         };
         let (word, board) = match words.first().copied() {
-            Some(w) if w.starts_with('b') && ["bmove", "bclick", "brclick", "bdclick", "bdrag"].contains(&w) => (Some(&w[1..]), true),
+            Some(w) if w.starts_with('b') && ["bmove", "bclick", "brclick", "bdclick", "bdrag", "bdown", "bup"].contains(&w) => (Some(&w[1..]), true),
             other => (other, false),
         };
         let first = steps.len();
         match word {
             Some("move") => steps.extend([Step::Move(x, y), Step::Wait]),
+            // A press and a let-go on their own, for keys in the middle of a drag.
+            Some("down") => steps.extend([Step::Move(x, y), Step::Wait, Step::Down(x, y, PointerButton::Primary), Step::Wait]),
+            Some("up") => steps.extend([Step::Move(x, y), Step::Wait, Step::Up(x, y, PointerButton::Primary), Step::Wait]),
             Some("click") => press(&mut steps, PointerButton::Primary),
             Some("rclick") => press(&mut steps, PointerButton::Secondary),
             Some("dclick") => {

@@ -94,6 +94,12 @@ pub struct Drag {
     pub moved: bool,
     /// Ctrl held: moved without pushing.
     pub free: bool,
+    /// Quarter turns (in degrees) given to the dragged parts with Space or R.
+    pub turns: f64,
+    /// The dragged parts were put on the other side with L.
+    pub flipped: bool,
+    /// Where the pointer last was, to redo the drag after a turn.
+    pub last: P,
 }
 
 #[derive(Default)]
@@ -484,30 +490,63 @@ impl App {
             f.rot = (f.rot + deg).rem_euclid(360.0);
             return;
         }
-        let sel = self.sel.clone();
-        let fps: Vec<u32> = sel.iter().filter_map(|s| if let Sel::Fp(id) = s { Some(*id) } else { None }).collect();
+        // In the middle of dragging, the turn goes with the drag.
+        if self.turn_while_dragging(deg, false) {
+            return;
+        }
+        let fps = self.picked_parts();
         let before = self.doc.clone();
-        self.edit(|b| {
-            for id in fps {
-                let Some(f) = b.fp(id) else { continue };
-                if f.locked {
-                    continue;
-                }
-                let before: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
-                let f = b.fp_mut(id).unwrap();
-                f.rot = (f.rot + deg).rem_euclid(360.0);
-                let after: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
-                // Tracks follow their pads round, keeping their corners.
-                let moves: Vec<(P, P)> = before.into_iter().zip(after).collect();
-                crate::pcb::slide::follow_moves(b, &moves, &HashSet::new());
-            }
-        });
+        self.edit(|b| App::turn_parts(b, &fps, deg, false));
         self.push_after_edit(&before);
+    }
+
+    pub fn picked_parts(&self) -> Vec<u32> {
+        self.sel.iter().filter_map(|s| if let Sel::Fp(id) = s { Some(*id) } else { None }).collect()
+    }
+
+    /// Turns parts round their own origins by `deg`, and puts them on the
+    /// other side if `flip`; the tracks on their pads follow, keeping their
+    /// corners. Locked parts stay as they are.
+    pub fn turn_parts(b: &mut Board, ids: &[u32], deg: f64, flip: bool) {
+        for id in ids {
+            let Some(f) = b.fp(*id) else { continue };
+            if f.locked {
+                continue;
+            }
+            let before: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
+            let f = b.fp_mut(*id).unwrap();
+            f.rot = (f.rot + deg).rem_euclid(360.0);
+            if flip {
+                f.side = f.side.other();
+            }
+            let after: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
+            let moves: Vec<(P, P)> = before.into_iter().zip(after).filter(|(a, b)| !a.same(*b)).collect();
+            crate::pcb::slide::follow_moves(b, &moves, &HashSet::new());
+        }
+    }
+
+    /// Space, R or L while a part is being dragged: turns (or flips) it
+    /// there and then, and the drag carries on with it turned. False when
+    /// no part is being dragged.
+    pub fn turn_while_dragging(&mut self, deg: f64, flip: bool) -> bool {
+        let parts = !self.picked_parts().is_empty();
+        let Some(drag) = &mut self.drag else { return false };
+        if !matches!(drag.kind, DragKind::Move) || !parts {
+            return false;
+        }
+        drag.turns = (drag.turns + deg).rem_euclid(360.0);
+        drag.flipped ^= flip;
+        let (q, free) = (drag.last, drag.free);
+        self.continue_drag(q, free);
+        true
     }
 
     pub fn flip_selection(&mut self) {
         if let Some((f, _)) = &mut self.placing {
             f.side = f.side.other();
+            return;
+        }
+        if self.turn_while_dragging(0.0, true) {
             return;
         }
         let sel = self.sel.clone();
@@ -1044,6 +1083,12 @@ impl App {
         if pressed(Key::O) {
             self.set_tool(Tool::Outline);
         }
+        // Space turns a part being dragged or placed, as R does.
+        if hit(Key::Space, false) || hit(Key::Space, true) {
+            if self.drag.is_some() || self.placing.is_some() {
+                self.rotate_selection(if m.shift { -90.0 } else { 90.0 });
+            }
+        }
         if hit(Key::R, false) || hit(Key::R, true) {
             self.rotate_selection(if m.shift { -90.0 } else { 90.0 });
         }
@@ -1224,6 +1269,20 @@ mod tests {
         assert_eq!(led.len(), 1);
         let ends = [led[0].a, led[0].b];
         assert!(ends.iter().any(|q| q.same(p(16.9125, 27.0))) && ends.iter().any(|q| q.same(p(16.9125, 21.0))), "{led:?}");
+    }
+
+    #[test]
+    fn turning_a_part_brings_its_tracks_round() {
+        let mut b = crate::pcb::sample::board();
+        let r3 = b.footprints.iter().find(|f| f.refdes == "R3").unwrap().id;
+        let led = b.net_by_name("LED").unwrap();
+        App::turn_parts(&mut b, &[r3], 90.0, false);
+        let f = b.fp(r3).unwrap();
+        assert_eq!(f.rot, 90.0);
+        // The LED track still ends on R3's pad 2, wherever that's gone.
+        let pad2 = f.pad_center(1);
+        assert!(b.tracks.iter().any(|t| t.net == led && (t.a.same(pad2) || t.b.same(pad2))), "{pad2:?}");
+        assert!(b.tracks.iter().filter(|t| t.net == led).all(|t| crate::pcb::slide::octilinear(t.b.sub(t.a))));
     }
 
     #[test]
