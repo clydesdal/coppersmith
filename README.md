@@ -33,7 +33,7 @@ and ends the route.
 |---|---|
 | Shift+Space | Corners: 45°, 90°, any angle |
 | Space (or /) | Flip which way the corner goes |
-| Shift+R | When something's in the way: walk around it, push it aside, stop at it, or ignore it (the rule check then shows the clash; what it runs over is outlined red) |
+| Shift+R | When something's in the way: walk around it, push it aside, hug and push, stop at it, or ignore it (shows what it would run over, outlined red, but still only places what's clear) |
 | Ctrl+click | Finish the connection by itself, round whatever is in the way |
 | Ctrl | Hold to stop the pointer snapping to pad centres |
 | V | Via, and carry on on the other side |
@@ -58,6 +58,20 @@ whatever it then runs into. Move the pointer away and they spring back; a
 click keeps them. If a track can't give way (pinned between pads, or it
 would have to go the long way round) the route walks round instead and the
 routing chip says so. Backspace and Ctrl+Z put pushed tracks back too.
+
+With **Push vias too** on (it is by default), a via in the way moves the
+least it can to a spot that's clear on every layer, and its tracks on every
+layer follow it with a short jog; a moved via pushes in turn. Only the
+stretch of a pushed track near the trouble changes; the rest stays exactly
+where it was.
+
+**Hug and push** keeps close round what's in the way while that's a fair
+path, and pushes only when going round would be the long way or no way.
+
+**The clearance always holds.** Every mode plans clear paths, and before
+anything is placed (a route, a pushed track, a moved via, a dropped via)
+the rule check is run on the result: if it would call anything too close,
+shorted or too near the edge, nothing is placed and the status bar says why.
 
 Anywhere: R turn 90° (Shift+R the other way), L other side, Delete remove,
 Ctrl+D copy, Ctrl+A everything, N light up the net under the pointer, 1–6 or

@@ -625,9 +625,15 @@ impl App {
                 }
             }
         }
+        // A via a push would move is drawn where it would go.
+        let moved = |id: u32| self.plan.as_ref().and_then(|c| c.plan.vias.iter().find(|m| m.0 == id).map(|m| m.1));
         for v in &doc.vias {
-            fill_blob(painter, tr, &v.blob(), fade(VIA, keep(v.net)));
-            painter.circle_filled(tr.pt(v.at), tr.len(v.drill / 2.0), theme::WELL);
+            let at = moved(v.id).unwrap_or(v.at);
+            fill_blob(painter, tr, &Blob::dot(at, v.dia), fade(VIA, keep(v.net)));
+            painter.circle_filled(tr.pt(at), tr.len(v.drill / 2.0), theme::WELL);
+            if !at.same(v.at) {
+                painter.circle_stroke(tr.pt(at), tr.len(v.dia / 2.0) + 1.0, Stroke::new(1.0, Color32::from_white_alpha(90)));
+            }
         }
     }
 
@@ -897,9 +903,16 @@ impl App {
             let blocked = match &self.plan {
                 Some(c) if c.plan.blocked => " · blocked".to_string(),
                 Some(c) if c.plan.note.is_some() => format!(" · {}", c.plan.note.unwrap_or_default()),
-                Some(c) if !c.plan.pushed.is_empty() => {
-                    let n = c.plan.pushed.len();
-                    format!(" · pushing {n} track{}", if n == 1 { "" } else { "s" })
+                Some(c) if !c.plan.pushed.is_empty() || !c.plan.vias.is_empty() => {
+                    let (n, v) = (c.plan.pushed.len(), c.plan.vias.len());
+                    let mut t = String::from(" · pushing");
+                    if n > 0 {
+                        t += &format!(" {n} track{}", if n == 1 { "" } else { "s" });
+                    }
+                    if v > 0 {
+                        t += &format!("{} {v} via{}", if n > 0 { " and" } else { "" }, if v == 1 { "" } else { "s" });
+                    }
+                    t
                 }
                 _ => String::new(),
             };
@@ -1035,11 +1048,14 @@ impl App {
         }
         ui.separator();
         label(ui, "When something's in the way  ·  Shift+R");
-        for c in [Conflict::Walkaround, Conflict::Push, Conflict::Stop, Conflict::Ignore] {
+        for c in [Conflict::Walkaround, Conflict::Push, Conflict::HugPush, Conflict::Stop, Conflict::Ignore] {
             if ui.selectable_label(m.conflict == c, c.name()).clicked() {
                 m.conflict = c;
             }
         }
+        ui.separator();
+        ui.checkbox(&mut m.via_push, "Push vias too");
+        ui.label(RichText::new("Nothing is ever placed closer than the clearance rule.").size(11.5).color(FAINT));
         ui.separator();
         ui.checkbox(&mut m.look_ahead, "Look-ahead segment  (1)");
         ui.checkbox(&mut m.remove_loops, "Take out old paths a new route replaces  (Shift+D)");

@@ -9,11 +9,15 @@
 //! The thinking about where a track can go is in `pcb::router`; this is the
 //! editor's side: what's been clicked, what's on show, and the keys.
 
-use crate::pcb::copper::Item;
+use crate::pcb::copper::{self, Item};
+use crate::pcb::drc;
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
 use crate::pcb::router::{self, Conflict, Corner, Plan, Scene};
 use crate::ui::app::App;
+
+/// The rule check's names for copper too close to something.
+const CLEARANCE: [&str; 4] = ["Too close", "Short circuit", "Too close to the edge", "Off the board"];
 
 /// A route being laid: the segments and vias placed so far.
 #[derive(Clone, Debug)]
@@ -72,6 +76,8 @@ pub struct RouteMode {
     pub remove_loops: bool,
     pub show_clearance: bool,
     pub width_from: WidthFrom,
+    /// Push may move other nets' vias too.
+    pub via_push: bool,
 }
 
 impl Default for RouteMode {
@@ -83,6 +89,7 @@ impl Default for RouteMode {
             remove_loops: true,
             show_clearance: false,
             width_from: WidthFrom::User,
+            via_push: true,
         }
     }
 }
@@ -198,12 +205,13 @@ impl App {
         let key = format!(
             "{} {:?} {:?} {} {} {:?} {:?} {} {} {}",
             self.rev, r.from, to, r.layer, r.net, m.corner, m.conflict, r.flip, r.width, r.segs.len()
-        );
+        ) + if m.via_push { " v" } else { "" };
         if self.plan.as_ref().is_some_and(|c| c.key == key) {
             return;
         }
         let area = self.doc.outline_bbox();
         self.route_scene();
+        self.obstacles.scene.via_push = m.via_push;
         let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
         self.plan = Some(PlanCache { key, plan, to, item });
     }
@@ -216,55 +224,117 @@ impl App {
         end.same(to) && Some(item) != r.start && net != 0 && (net == r.net || r.net == 0)
     }
 
+    /// What the rule check would say if this went on the board: `change`
+    /// makes the change on a copy and returns what it added or moved. The
+    /// answer is the first clearance problem touching any of that, if any.
+    pub fn clash_with(&self, change: impl FnOnce(&mut Board) -> Vec<Item>) -> Option<String> {
+        let mut b = self.doc.clone();
+        let fresh = change(&mut b);
+        if fresh.is_empty() {
+            return None;
+        }
+        let found = drc::check(&b, &copper::analyse(&b));
+        found
+            .into_iter()
+            .find(|p| CLEARANCE.contains(&p.title.as_str()) && p.items.iter().any(|i| fresh.contains(i)))
+            .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
+    }
+
+    /// The rule check on the route so far plus `segs` and `vias`, with
+    /// pushes made, all as `net`.
+    #[allow(clippy::too_many_arguments)]
+    fn route_clash(&self, r: &Route, net: u32, segs: &[(P, P, u8)], vias: &[P], pushed: &[router::Moved], moved: &[(u32, P)]) -> Option<String> {
+        let rules = self.doc.rules.clone();
+        self.clash_with(|b| {
+            let mut fresh: Vec<Item> = router::apply_pushed(b, pushed, moved).into_iter().map(Item::Track).collect();
+            fresh.extend(moved.iter().map(|(id, _)| Item::Via(*id)));
+            for (a, e, layer) in r.segs.iter().chain(segs) {
+                let id = b.new_id();
+                b.tracks.push(Track { id, a: *a, b: *e, w: r.width, layer: *layer, net });
+                fresh.push(Item::Track(id));
+            }
+            for at in r.vias.iter().chain(vias) {
+                if b.vias.iter().any(|v| v.at.same(*at)) {
+                    continue;
+                }
+                let id = b.new_id();
+                b.vias.push(Via { id, at: *at, dia: rules.via_dia, drill: rules.via_drill, net });
+                fresh.push(Item::Via(id));
+            }
+            fresh
+        })
+    }
+
     /// A click (or Enter) while routing: places what the router planned,
-    /// all but the look-ahead segment unless it finishes the route.
+    /// all but the look-ahead segment unless it finishes the route. Nothing
+    /// is placed that the rule check would call too close.
     pub fn route_click(&mut self) {
         let Some(c) = self.plan.clone() else { return };
         let Some(r) = self.route.clone() else { return };
-        let pts = &c.plan.pts;
+        let mut pts = c.plan.pts.clone();
         if pts.len() < 2 {
             return;
         }
+        // Ignore shows what it would run over; it only places what's clear.
+        let mut cut = false;
+        if self.route_mode.conflict == Conflict::Ignore {
+            self.route_scene();
+            let (clear, clashed) = router::stop_short(&self.obstacles.scene.own, &pts, r.width);
+            if clashed {
+                cut = true;
+                pts = clear;
+                self.notice = Some("Placed up to the first clash: the clearance always holds.".into());
+            }
+            if pts.len() < 2 {
+                return;
+            }
+        }
         let end = *pts.last().unwrap();
-        let arrived = !c.plan.blocked && self.arrives(&r, end, c.to, c.item);
+        let arrived = !cut && !c.plan.blocked && self.arrives(&r, end, c.to, c.item);
         let upto = if arrived || !self.route_mode.look_ahead || pts.len() <= 2 { pts.len() } else { pts.len() - 1 };
-        let net = if arrived && r.net == 0 { c.item.map(|i| self.net_of(i)).unwrap_or(0) } else { r.net };
+        let mut net = if arrived && r.net == 0 { c.item.map(|i| self.net_of(i)).unwrap_or(0) } else { r.net };
+        if net == 0
+            && let Some(item) = c.item
+            && pts[upto - 1].same(c.to)
+        {
+            // Started in the open and landed on copper: take its net.
+            net = self.net_of(item);
+        }
         // What this click pushes aside: all of the plan's pushes when it
         // places the whole plan, else just enough for the part it places.
-        let pushed = if c.plan.pushed.is_empty() {
-            Vec::new()
-        } else if upto == pts.len() {
-            c.plan.pushed.clone()
+        let (pushed, moved) = if c.plan.pushed.is_empty() && c.plan.vias.is_empty() {
+            (Vec::new(), Vec::new())
+        } else if upto == pts.len() && !cut {
+            (c.plan.pushed.clone(), c.plan.vias.clone())
         } else {
             self.route_scene();
+            self.obstacles.scene.via_push = self.route_mode.via_push;
             let mut segs = App::held(&r);
             segs.extend(pts[..upto].windows(2).map(|s| (s[0], s[1])));
-            router::shove(&self.obstacles.scene, &segs, r.width).unwrap_or_default()
+            match router::shove(&self.obstacles.scene, &segs, r.width) {
+                Some(done) => done,
+                None => {
+                    self.notice = Some("Not placed: what's in the way can't be pushed aside.".into());
+                    return;
+                }
+            }
         };
-        let doc_before = (!pushed.is_empty()).then(|| self.doc.clone());
-        if !pushed.is_empty() {
-            router::apply_pushed(&mut self.doc, &pushed);
+        let segs: Vec<(P, P, u8)> =
+            pts[..upto].windows(2).filter(|s| !s[0].same(s[1])).map(|s| (s[0], s[1], r.layer)).collect();
+        if let Some(why) = self.route_clash(&r, net, &segs, &[], &pushed, &moved) {
+            self.notice = Some(format!("Not placed: {why}"));
+            return;
+        }
+        let doc_before = (!pushed.is_empty() || !moved.is_empty()).then(|| self.doc.clone());
+        if doc_before.is_some() {
+            router::apply_pushed(&mut self.doc, &pushed, &moved);
             self.touch();
         }
         let Some(route) = &mut self.route else { return };
         route.marks.push(Mark { segs: route.segs.len(), vias: route.vias.len(), from: route.from, layer: route.layer, doc: doc_before });
-        for s in pts[..upto].windows(2) {
-            if !s[0].same(s[1]) {
-                route.segs.push((s[0], s[1], route.layer));
-            }
-        }
+        route.segs.extend(segs);
         route.from = pts[upto - 1];
         route.net = net;
-        if route.net == 0
-            && let Some(item) = c.item
-            && route.from.same(c.to)
-        {
-            // Started in the open and landed on copper: take its net.
-            let n = self.net_of(item);
-            if let Some(route) = &mut self.route {
-                route.net = n;
-            }
-        }
         self.plan = None;
         if arrived {
             self.finish_route();
@@ -308,8 +378,14 @@ impl App {
 
     /// Drops a via where the route has got to; with a layer, carries on there.
     pub fn route_via(&mut self, to_layer: Option<u8>) {
-        let Some(r) = &mut self.route else { return };
+        let Some(r) = self.route.clone() else { return };
         let fresh = !r.vias.last().is_some_and(|v| v.same(r.from));
+        // A via is wider than the track: it has to fit here on every layer.
+        if fresh && let Some(why) = self.route_clash(&r, r.net, &[], &[r.from], &[], &[]) {
+            self.notice = Some(format!("No room for a via here: {why}"));
+            return;
+        }
+        let Some(r) = &mut self.route else { return };
         if fresh || to_layer.is_some() {
             r.marks.push(Mark { segs: r.segs.len(), vias: r.vias.len(), from: r.from, layer: r.layer, doc: None });
         }

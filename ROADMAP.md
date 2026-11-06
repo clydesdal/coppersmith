@@ -26,10 +26,13 @@ pill.
 Done in 0.3: Push. Other nets' tracks bend aside as runs between their fixed
 ends, cascading, springing back until clicked, with undo and Backspace.
 
+Done in 0.3.1: via pushing (moves the least it can, clear on every layer,
+its tracks on every layer follow), hug and push, pushed tracks re-bent only
+where crowded, and a rule-check gate on everything the router places.
+
 Next:
-- Push vias too (Altium's "Allow via pushing"), and hug-and-push (follow
-  obstacles closely, pushing only when there's no room).
-- Push on the layers a via passes through, not just the routing layer.
+- Pushing on other layers when a moved via's tracks there run into things
+  (today they bend round, but don't push).
 - Arc corner modes (45° and 90° with arcs, arc radius keys), which need arcs
   as a track shape in the board model, the rule check and the Gerber writer.
 - Gloss: re-smooth the routed and neighbouring tracks after each click.

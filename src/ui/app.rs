@@ -592,11 +592,21 @@ impl App {
             }
         }
         let rules = self.doc.rules.clone();
+        if self.doc.vias.iter().any(|v| v.at.same(at)) {
+            return;
+        }
+        let add = move |b: &mut Board| {
+            let id = b.new_id();
+            b.vias.push(Via { id, at, dia: rules.via_dia, drill: rules.via_drill, net });
+            vec![Item::Via(id)]
+        };
+        // Only where it keeps its clearance on every layer.
+        if let Some(why) = self.clash_with(add.clone()) {
+            self.notice = Some(format!("No room for a via here: {why}"));
+            return;
+        }
         self.edit(|b| {
-            if !b.vias.iter().any(|v| v.at.same(at)) {
-                let id = b.new_id();
-                b.vias.push(Via { id, at, dia: rules.via_dia, drill: rules.via_drill, net });
-            }
+            add(b);
         });
     }
 

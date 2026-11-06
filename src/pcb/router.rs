@@ -48,6 +48,7 @@ pub enum Conflict {
     Ignore,
     Walkaround,
     Push,
+    HugPush,
     Stop,
 }
 
@@ -57,6 +58,7 @@ impl Conflict {
             Conflict::Ignore => "Ignore obstacles",
             Conflict::Walkaround => "Walk around",
             Conflict::Push => "Push",
+            Conflict::HugPush => "Hug and push",
             Conflict::Stop => "Stop at first obstacle",
         }
     }
@@ -64,7 +66,8 @@ impl Conflict {
         match self {
             Conflict::Ignore => Conflict::Walkaround,
             Conflict::Walkaround => Conflict::Push,
-            Conflict::Push => Conflict::Stop,
+            Conflict::Push => Conflict::HugPush,
+            Conflict::HugPush => Conflict::Stop,
             Conflict::Stop => Conflict::Ignore,
         }
     }
@@ -96,6 +99,8 @@ pub struct Plan {
     pub hits: Vec<Item>,
     /// Other nets' tracks pushed aside to make room.
     pub pushed: Vec<Moved>,
+    /// Other nets' vias pushed aside: which, and where to.
+    pub vias: Vec<(u32, P)>,
     /// Something worth saying, like a push that couldn't be done.
     pub note: Option<&'static str>,
 }
@@ -190,10 +195,15 @@ fn near<'a>(obs: &'a [Obstacle], area: BBox) -> impl Iterator<Item = &'a Obstacl
     obs.iter().filter(move |o| o.bbox.grown(o.gap).touches(&area))
 }
 
+/// How much tighter the router is than the rule check, so that rounding a
+/// corner to the nanometre can never tip a clear track into a violation.
+/// The rule check allows 1e-6 mm under the clearance; the router allows none.
+const SURE: f64 = 1e-7;
+
 /// The first obstacle a track from `a` to `b` comes too close to.
 pub fn clash(obs: &[Obstacle], a: P, b: P, w: f64) -> Option<&Obstacle> {
     let track = Blob::line(a, b, w);
-    near(obs, track.bbox()).find(|o| track.gap(&o.blob).0 < o.gap - 1e-6)
+    near(obs, track.bbox()).find(|o| track.gap(&o.blob).0 < o.gap + SURE)
 }
 
 pub fn clear(obs: &[Obstacle], pts: &[P], w: f64) -> bool {
@@ -218,7 +228,9 @@ pub fn stop_short(obs: &[Obstacle], pts: &[P], w: f64) -> (Vec<P>, bool) {
                 hi = mid;
             }
         }
-        let end = s[0].lerp(s[1], lo).rounded();
+        // A micron short of the limit, so rounding can't cross it.
+        let len = s[0].dist(s[1]).max(1e-9);
+        let end = s[0].lerp(s[1], (lo - 0.001 / len).max(0.0)).rounded();
         if !end.same(s[0]) {
             out.push(end);
         }
@@ -500,11 +512,24 @@ pub struct Scene {
     pub net: u32,
     pub layer: u8,
     pub clearance: f64,
+    /// The other copper layers, for vias that are pushed: everything on
+    /// each, and its tracks as runs (which follow a via that moves).
+    pub others: Vec<(u8, Vec<Obstacle>, Vec<Line>)>,
+    /// Other nets' vias: id, centre, pad size, net.
+    pub vias: Vec<(u32, P, f64, u32)>,
+    /// Whether Push may move vias too (Altium's "Allow via pushing").
+    pub via_push: bool,
 }
 
 impl Scene {
     pub fn new(board: &Board, copper: &Copper, layer: u8, net: u32) -> Scene {
         let all = obstacles_all(board, copper, layer);
+        let others = board
+            .copper_layers()
+            .into_iter()
+            .filter(|l| *l != layer)
+            .map(|l| (l, obstacles_all(board, copper, l), lines(board, copper, l, 0)))
+            .collect();
         Scene {
             own: for_net(&all, net),
             lines: lines(board, copper, layer, net),
@@ -512,7 +537,15 @@ impl Scene {
             net,
             layer,
             clearance: board.rules.clearance,
+            others,
+            vias: board.vias.iter().filter(|v| v.net != net || net == 0).map(|v| (v.id, v.at, v.dia, v.net)).collect(),
+            via_push: true,
         }
+    }
+
+    /// Can this be moved by a push?
+    fn movable(&self, o: &Obstacle) -> bool {
+        o.movable || (self.via_push && matches!(o.item, Some(Item::Via(_))))
     }
 }
 
@@ -554,20 +587,38 @@ pub fn plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode:
             Plan { pts, blocked, ..Default::default() }
         }
         Conflict::Walkaround => walkaround(obs, a, b, w, corner, flip, area),
-        Conflict::Push => {
-            // Round what can't move; through what can, pushing it aside.
-            let fixed: Vec<Obstacle> = obs.iter().filter(|o| !o.movable).cloned().collect();
-            let head = walkaround(&fixed, a, b, w, corner, flip, area);
-            let mut segs: Vec<(P, P)> = held.to_vec();
-            segs.extend(head.pts.windows(2).map(|s| (s[0], s[1])));
-            match shove(scene, &segs, w) {
-                Some(pushed) => Plan { pushed, ..head },
-                None => {
-                    let mut round = walkaround(obs, a, b, w, corner, flip, area);
-                    round.note = Some("can't push that aside");
-                    round
-                }
+        Conflict::Push => push_plan(scene, a, b, w, corner, flip, area, held),
+        Conflict::HugPush => {
+            // Keep close round what's in the way while that's a fair path;
+            // push only when going round would be the long way or no way.
+            let round = walkaround(obs, a, b, w, corner, flip, area);
+            let direct = length(&legs(a, b, corner, flip));
+            if !round.blocked && length(&round.pts) <= direct * 1.3 + 1.0 {
+                return round;
             }
+            let pushed = push_plan(scene, a, b, w, corner, flip, area, held);
+            if pushed.note.is_some() && !round.blocked { round } else { pushed }
+        }
+    }
+}
+
+fn length(pts: &[P]) -> f64 {
+    pts.windows(2).map(|s| s[0].dist(s[1])).sum()
+}
+
+/// Round what can't move; through what can, pushing it aside.
+#[allow(clippy::too_many_arguments)]
+fn push_plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, area: BBox, held: &[(P, P)]) -> Plan {
+    let fixed: Vec<Obstacle> = scene.own.iter().filter(|o| !scene.movable(o)).cloned().collect();
+    let head = walkaround(&fixed, a, b, w, corner, flip, area);
+    let mut segs: Vec<(P, P)> = held.to_vec();
+    segs.extend(head.pts.windows(2).map(|s| (s[0], s[1])));
+    match shove(scene, &segs, w) {
+        Some((pushed, vias)) => Plan { pushed, vias, ..head },
+        None => {
+            let mut round = walkaround(&scene.own, a, b, w, corner, flip, area);
+            round.note = Some("can't push that aside");
+            round
         }
     }
 }
@@ -654,104 +705,374 @@ pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Li
     out
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Owner {
+    Route,
+    Run(usize),
+    Via(usize),
+}
+
 struct Pusher {
     blob: Blob,
     bbox: BBox,
     net: u32,
-    /// The run this came from, once a pushed run starts pushing others.
-    owner: Option<usize>,
+    owner: Owner,
 }
 
-fn crowds(pts: &[P], w: f64, net: u32, who: Option<usize>, pushers: &[Pusher], clearance: f64) -> bool {
-    pts.windows(2).any(|s| {
-        let seg = Blob::line(s[0], s[1], w);
-        let bb = seg.bbox().grown(clearance);
-        pushers.iter().any(|p| {
-            p.owner != who && (p.net != net || net == 0) && p.bbox.touches(&bb) && seg.gap(&p.blob).0 < clearance - 1e-6
-        })
-    })
+fn pusher(blob: Blob, net: u32, owner: Owner) -> Pusher {
+    Pusher { bbox: blob.bbox(), blob, net, owner }
 }
 
-/// Pushes other nets' runs out of the way of `segs` (the route, `w` wide).
-/// Each pushed run is bent as little as it can be, keeping its ends, and then
-/// pushes whatever it runs into in turn. None when something can't give way.
-pub fn shove(scene: &Scene, segs: &[(P, P)], w: f64) -> Option<Vec<Moved>> {
-    let c = scene.clearance;
-    let mut pushers: Vec<Pusher> = segs
+fn crowded(blob: &Blob, net: u32, who: Owner, pushers: &[Pusher], clearance: f64) -> bool {
+    let bb = blob.bbox().grown(clearance);
+    pushers
         .iter()
-        .map(|(a, b)| {
-            let blob = Blob::line(*a, *b, w);
-            Pusher { bbox: blob.bbox(), blob, net: scene.net, owner: None }
-        })
-        .collect();
+        .any(|p| p.owner != who && (p.net != net || net == 0) && p.bbox.touches(&bb) && blob.gap(&p.blob).0 < clearance + SURE)
+}
+
+fn crowds(pts: &[P], w: f64, net: u32, who: Owner, pushers: &[Pusher], clearance: f64) -> bool {
+    pts.windows(2).any(|s| crowded(&Blob::line(s[0], s[1], w), net, who, pushers, clearance))
+}
+
+fn as_obstacle(p: &Pusher, gap: f64) -> Obstacle {
+    Obstacle { blob: p.blob.clone(), bbox: p.bbox, gap, item: None, net: p.net, movable: false }
+}
+
+/// Distance along a path to each corner.
+fn along(pts: &[P]) -> Vec<f64> {
+    let mut d = vec![0.0];
+    for s in pts.windows(2) {
+        d.push(d.last().unwrap() + s[0].dist(s[1]));
+    }
+    d
+}
+
+/// The point at distance `s` along a path.
+fn point_at(pts: &[P], s: f64) -> P {
+    let d = along(pts);
+    for i in 0..pts.len() - 1 {
+        if s <= d[i + 1] + 1e-12 {
+            let span = (d[i + 1] - d[i]).max(1e-12);
+            return pts[i].lerp(pts[i + 1], ((s - d[i]) / span).clamp(0.0, 1.0)).rounded();
+        }
+    }
+    *pts.last().unwrap()
+}
+
+/// The piece of a path from `s0` to `s1` along it.
+fn piece(pts: &[P], s0: f64, s1: f64) -> Vec<P> {
+    let d = along(pts);
+    let mut out = vec![point_at(pts, s0)];
+    for i in 0..pts.len() {
+        if d[i] > s0 + 1e-9 && d[i] < s1 - 1e-9 {
+            out.push(pts[i]);
+        }
+    }
+    out.push(point_at(pts, s1));
+    out
+}
+
+/// The path with the piece from `s0` to `s1` swapped for `mid`.
+fn splice(pts: &[P], s0: f64, s1: f64, mid: &[P]) -> Vec<P> {
+    let d = along(pts);
+    let mut out: Vec<P> = (0..pts.len()).filter(|&i| d[i] < s0 - 1e-9).map(|i| pts[i]).collect();
+    out.extend_from_slice(mid);
+    out.extend((0..pts.len()).filter(|&i| d[i] > s1 + 1e-9).map(|i| pts[i]));
+    merge_collinear(out)
+}
+
+/// Re-bends the stretch of `run` from `s0` to `s1` along it to keep clear of
+/// `obs`, leaving the rest exactly where it was. Widens the stretch if it has
+/// to. None when it can't be done, or only the long way round.
+fn rebend(obs: &[Obstacle], run: &[P], w: f64, s0: f64, s1: f64, new_end: Option<P>) -> Option<Vec<P>> {
+    let total = *along(run).last().unwrap();
+    for pad in [1.0, 2.5, f64::INFINITY] {
+        let (a0, a1) = ((s0 - pad).max(0.0), (s1 + pad).min(total));
+        let guide = piece(run, a0, a1);
+        let a = guide[0];
+        let b = match new_end {
+            Some(to) if a1 >= total - 1e-9 => to,
+            _ => *guide.last().unwrap(),
+        };
+        let mut area = BBox::of(&guide).grown(2.0 + w);
+        area.add(b);
+        for o in obs {
+            if o.bbox.touches(&area) {
+                area.union(&o.bbox);
+            }
+        }
+        let area = area.grown(1.0);
+        let bent = lattice(obs, a, b, w, Corner::D45, false, area, Some(&guide), true);
+        if bent.blocked || !bent.end().is_some_and(|e| e.same(b)) || !bent.pts[0].same(a) {
+            continue;
+        }
+        let mut whole = splice(run, a0, a1, &bent.pts);
+        if new_end.is_some() && a1 >= total - 1e-9 {
+            *whole.last_mut().unwrap() = b;
+        }
+        if !clear(obs, &whole, w) {
+            continue;
+        }
+        // A push bends a track; it doesn't send it the long way round.
+        if length(&whole) > total.max(run[0].dist(b)) * 1.5 + 3.0 {
+            return None;
+        }
+        return Some(whole);
+    }
+    None
+}
+
+/// Where along a run the pushers crowd it: the first and last distance.
+fn crowded_stretch(run: &[P], w: f64, net: u32, who: Owner, pushers: &[Pusher], clearance: f64) -> Option<(f64, f64)> {
+    let d = along(run);
+    let reach = clearance + w / 2.0 + 0.05;
+    let mut span: Option<(f64, f64)> = None;
+    for i in 0..run.len() - 1 {
+        let n = ((d[i + 1] - d[i]) / 0.05).ceil().max(1.0) as usize;
+        for k in 0..=n {
+            let s = d[i] + (d[i + 1] - d[i]) * k as f64 / n as f64;
+            let q = run[i].lerp(run[i + 1], k as f64 / n as f64);
+            let hit = pushers.iter().any(|p| p.owner != who && (p.net != net || net == 0) && p.blob.dist_to(q) < reach);
+            if hit {
+                span = Some(span.map_or((s, s), |(a, b)| (a.min(s), b.max(s))));
+            }
+        }
+    }
+    span
+}
+
+/// Re-bends a run so the end that was at `from` finishes at `to`, changing
+/// only the stretch near that end.
+fn follow(obs: &[Obstacle], run: &[P], from: P, to: P, w: f64) -> Option<Vec<P>> {
+    let at_start = run[0].same(from);
+    let mut path: Vec<P> = run.to_vec();
+    if at_start {
+        path.reverse();
+    }
+    let total = *along(&path).last().unwrap();
+    let near = (to.dist(from) + 0.5).min(total);
+    let mut pts = rebend(obs, &path, w, total - near, total, Some(to))?;
+    if at_start {
+        pts.reverse();
+    }
+    Some(pts)
+}
+
+/// Pushes other nets' runs, and their vias if allowed, out of the way of
+/// `segs` (the route, `w` wide). Each pushed run is bent as little as it can
+/// be, keeping its ends; a pushed via moves the least it can to somewhere
+/// clear on every layer, and its tracks follow it. Whatever is pushed then
+/// pushes what it runs into. None when something can't give way.
+pub fn shove(scene: &Scene, segs: &[(P, P)], w: f64) -> Option<(Vec<Moved>, Vec<(u32, P)>)> {
+    let c = scene.clearance;
+    let mut pushers: Vec<Pusher> = segs.iter().map(|(a, b)| pusher(Blob::line(*a, *b, w), scene.net, Owner::Route)).collect();
     let mut runs: Vec<Vec<P>> = scene.lines.iter().map(|l| l.pts.clone()).collect();
     let mut moved: Vec<bool> = vec![false; runs.len()];
+    // Runs on other layers that followed a via: (layer slot, run) -> corners.
+    let mut followed: Vec<((usize, usize), Vec<P>)> = Vec::new();
+    let vias: Vec<(u32, P, f64, u32)> = if scene.via_push { scene.vias.clone() } else { Vec::new() };
+    let mut via_at: Vec<P> = vias.iter().map(|v| v.1).collect();
+    let mut via_moved = vec![false; vias.len()];
+    let fixed_here = |net: u32| -> Vec<Obstacle> {
+        scene.all.iter().filter(|o| !scene.movable(o) && (o.net != net || net == 0)).cloned().collect()
+    };
     let mut rounds = 0;
     loop {
-        let Some(i) = (0..runs.len()).find(|&i| crowds(&runs[i], scene.lines[i].w, scene.lines[i].net, Some(i), &pushers, c))
+        rounds += 1;
+        if rounds > 60 {
+            return None;
+        }
+        // A via the route or a pushed run crowds: move it.
+        if let Some(k) = (0..vias.len()).find(|&k| crowded(&Blob::dot(via_at[k], vias[k].2), vias[k].3, Owner::Via(k), &pushers, c)) {
+            let (id, _, dia, net) = vias[k];
+            let from = via_at[k];
+            let found = move_via(scene, &pushers, k, id, from, dia, net, &runs, &followed)?;
+            let (to, here, there) = found;
+            via_at[k] = to;
+            via_moved[k] = true;
+            pushers.retain(|p| p.owner != Owner::Via(k));
+            pushers.push(pusher(Blob::dot(to, dia), net, Owner::Via(k)));
+            for (i, pts) in here {
+                pushers.retain(|p| p.owner != Owner::Run(i));
+                for s in pts.windows(2) {
+                    pushers.push(pusher(Blob::line(s[0], s[1], scene.lines[i].w), net, Owner::Run(i)));
+                }
+                runs[i] = pts;
+                moved[i] = true;
+            }
+            for (key, pts) in there {
+                followed.retain(|f| f.0 != key);
+                followed.push((key, pts));
+            }
+            continue;
+        }
+        // A run something crowds: bend it out of the way.
+        let Some(i) = (0..runs.len()).find(|&i| crowds(&runs[i], scene.lines[i].w, scene.lines[i].net, Owner::Run(i), &pushers, c))
         else {
             break;
         };
-        rounds += 1;
-        if rounds > 40 {
-            return None;
-        }
         let l = &scene.lines[i];
-        // Keeps clear of what can't move, and of everything pushing it.
-        let mut obs: Vec<Obstacle> = scene.all.iter().filter(|o| !o.movable && (o.net != l.net || l.net == 0)).cloned().collect();
-        for p in pushers.iter().filter(|p| p.owner != Some(i) && (p.net != l.net || l.net == 0)) {
-            obs.push(Obstacle { blob: p.blob.clone(), bbox: p.bbox, gap: c, item: None, net: p.net, movable: false });
-        }
-        let mut area = BBox::of(&runs[i]);
-        for p in &pushers {
-            if p.owner != Some(i) {
-                area.union(&p.bbox);
+        // Keeps clear of what can't move, and of everything pushing it. Vias
+        // are kept clear of as they stand: only the route pushes vias.
+        let mut obs = fixed_here(l.net);
+        for (k, v) in vias.iter().enumerate() {
+            if v.3 != l.net || l.net == 0 {
+                let blob = Blob::dot(via_at[k], v.2);
+                obs.push(Obstacle { bbox: blob.bbox(), blob, gap: c, item: None, net: v.3, movable: false });
             }
         }
-        let area = area.grown(2.0 + l.w + c);
-        let (a, b) = (runs[i][0], *runs[i].last().unwrap());
-        let bent = lattice(&obs, a, b, l.w, Corner::D45, false, area, Some(&scene.lines[i].pts), true);
-        if bent.blocked || !bent.end().is_some_and(|e| e.same(b)) || !clear(&obs, &bent.pts, l.w) {
-            return None;
+        for p in pushers.iter().filter(|p| p.owner != Owner::Run(i) && (p.net != l.net || l.net == 0)) {
+            if !matches!(p.owner, Owner::Via(_)) {
+                obs.push(as_obstacle(p, c));
+            }
         }
-        // A push bends a track; it doesn't send it the long way round.
-        let length = |pts: &[P]| pts.windows(2).map(|s| s[0].dist(s[1])).sum::<f64>();
-        if length(&bent.pts) > length(&scene.lines[i].pts) * 1.5 + 3.0 {
-            return None;
+        let Some((s0, s1)) = crowded_stretch(&runs[i], l.w, l.net, Owner::Run(i), &pushers, c) else { continue };
+        let pts = rebend(&obs, &runs[i], l.w, s0, s1, None)?;
+        pushers.retain(|p| p.owner != Owner::Run(i));
+        for s in pts.windows(2) {
+            pushers.push(pusher(Blob::line(s[0], s[1], l.w), l.net, Owner::Run(i)));
         }
-        pushers.retain(|p| p.owner != Some(i));
-        for s in bent.pts.windows(2) {
-            let blob = Blob::line(s[0], s[1], l.w);
-            pushers.push(Pusher { bbox: blob.bbox(), blob, net: l.net, owner: Some(i) });
-        }
-        runs[i] = bent.pts;
+        runs[i] = pts;
         moved[i] = true;
     }
-    Some(
-        (0..runs.len())
-            .filter(|&i| moved[i])
-            .map(|i| Moved {
-                ids: scene.lines[i].ids.clone(),
-                pts: runs[i].clone(),
-                w: scene.lines[i].w,
-                net: scene.lines[i].net,
-                layer: scene.layer,
-            })
-            .collect(),
-    )
+    let mut out: Vec<Moved> = (0..runs.len())
+        .filter(|&i| moved[i])
+        .map(|i| Moved {
+            ids: scene.lines[i].ids.clone(),
+            pts: runs[i].clone(),
+            w: scene.lines[i].w,
+            net: scene.lines[i].net,
+            layer: scene.layer,
+        })
+        .collect();
+    for ((slot, j), pts) in followed {
+        let (layer, _, lines) = &scene.others[slot];
+        let l = &lines[j];
+        out.push(Moved { ids: l.ids.clone(), pts, w: l.w, net: l.net, layer: *layer });
+    }
+    let moved_vias = (0..vias.len()).filter(|&k| via_moved[k]).map(|k| (vias[k].0, via_at[k])).collect();
+    Some((out, moved_vias))
 }
 
-/// Puts pushed runs on the board in place of their old tracks.
-pub fn apply_pushed(board: &mut Board, pushed: &[Moved]) {
+type ViaMove = (P, Vec<(usize, Vec<P>)>, Vec<((usize, usize), Vec<P>)>);
+
+/// Finds the nearest spot a via can move to: clear of the route and every
+/// pusher on this layer, clear of everything on the other layers, with each
+/// track on it able to follow. Returns the spot and the re-bent tracks.
+#[allow(clippy::too_many_arguments)]
+fn move_via(
+    scene: &Scene,
+    pushers: &[Pusher],
+    k: usize,
+    id: u32,
+    from: P,
+    dia: f64,
+    net: u32,
+    runs: &[Vec<P>],
+    followed: &[((usize, usize), Vec<P>)],
+) -> Option<ViaMove> {
+    let c = scene.clearance;
+    let me = Some(Item::Via(id));
+    let other_net = |o_net: u32| o_net != net || net == 0;
+    // What the via itself must keep clear of, on every layer.
+    let mut walls: Vec<Obstacle> = scene.all.iter().filter(|o| o.item != me && other_net(o.net) && !o.movable).cloned().collect();
+    walls.extend(pushers.iter().filter(|p| p.owner != Owner::Via(k) && other_net(p.net)).map(|p| as_obstacle(p, c)));
+    for (_, all, _) in &scene.others {
+        walls.extend(all.iter().filter(|o| o.item != me && other_net(o.net)).cloned());
+    }
+    let ok = |q: P| {
+        let blob = Blob::dot(q, dia);
+        let bb = blob.bbox();
+        walls.iter().all(|o| !o.bbox.grown(o.gap).touches(&bb) || blob.gap(&o.blob).0 >= o.gap + SURE)
+    };
+    // Spots nearest first, out to a few millimetres.
+    let step = 0.05;
+    let reach = 60i64;
+    let mut spots: Vec<(f64, P)> = Vec::new();
+    for j in -reach..=reach {
+        for i in -reach..=reach {
+            let d = ((i * i + j * j) as f64).sqrt() * step;
+            if d > 0.0 && d <= reach as f64 * step {
+                spots.push((d, from.add(p(i as f64 * step, j as f64 * step)).rounded()));
+            }
+        }
+    }
+    spots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut tries = 0;
+    for (_, to) in spots {
+        if !ok(to) {
+            continue;
+        }
+        tries += 1;
+        if tries > 8 {
+            return None;
+        }
+        // Its tracks on this layer follow it, bending round what pushes them.
+        let mut here = Vec::new();
+        let mut fine = true;
+        for (i, l) in scene.lines.iter().enumerate() {
+            let run = &runs[i];
+            if l.net != net || !(run[0].same(from) || run.last().unwrap().same(from)) {
+                continue;
+            }
+            let mut obs: Vec<Obstacle> = scene.all.iter().filter(|o| !scene.movable(o) && other_net(o.net)).cloned().collect();
+            obs.extend(pushers.iter().filter(|p| p.owner != Owner::Run(i) && p.owner != Owner::Via(k) && other_net(p.net)).map(|p| as_obstacle(p, c)));
+            match follow(&obs, run, from, to, l.w) {
+                Some(pts) => here.push((i, pts)),
+                None => {
+                    fine = false;
+                    break;
+                }
+            }
+        }
+        // And on the other layers, bending round what's there.
+        let mut there = Vec::new();
+        for (slot, (_, all, lines)) in scene.others.iter().enumerate() {
+            if !fine {
+                break;
+            }
+            for (j, l) in lines.iter().enumerate() {
+                let run = followed.iter().find(|f| f.0 == (slot, j)).map(|f| f.1.clone()).unwrap_or_else(|| l.pts.clone());
+                if l.net != net || !(run[0].same(from) || run.last().unwrap().same(from)) {
+                    continue;
+                }
+                let obs: Vec<Obstacle> = all.iter().filter(|o| other_net(o.net)).cloned().collect();
+                match follow(&obs, &run, from, to, l.w) {
+                    Some(pts) => there.push(((slot, j), pts)),
+                    None => {
+                        fine = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if fine {
+            return Some((to, here, there));
+        }
+    }
+    None
+}
+
+/// Puts pushed runs and vias on the board in place of the old ones. Returns
+/// the new tracks' ids.
+pub fn apply_pushed(board: &mut Board, pushed: &[Moved], vias: &[(u32, P)]) -> Vec<u32> {
+    let mut made = Vec::new();
     for m in pushed {
         board.tracks.retain(|t| !m.ids.contains(&t.id));
         for s in m.pts.windows(2) {
             if !s[0].same(s[1]) {
                 let id = board.new_id();
                 board.tracks.push(Track { id, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net });
+                made.push(id);
             }
         }
     }
+    for (id, at) in vias {
+        if let Some(v) = board.vias.iter_mut().find(|v| v.id == *id) {
+            v.at = *at;
+        }
+    }
+    made
 }
 
 /// Tracks of one net that can go without parting anything that was joined:
@@ -814,7 +1135,7 @@ mod tests {
     use super::*;
 
     fn scene(obs: Vec<Obstacle>) -> Scene {
-        Scene { all: obs.clone(), own: obs, lines: vec![], net: 1, layer: TOP, clearance: 0.2 }
+        Scene { all: obs.clone(), own: obs, net: 1, layer: TOP, clearance: 0.2, ..Default::default() }
     }
 
     fn wall() -> Vec<Obstacle> {
@@ -948,7 +1269,7 @@ mod pushing {
         let scene = Scene::new(&b, &analyse(&b), TOP, a);
         assert_eq!(scene.lines.len(), 1);
         let head = [(p(10.0, -5.0), p(10.0, 1.0))];
-        let moved = shove(&scene, &head, 0.25).expect("it can give way");
+        let (moved, _) = shove(&scene, &head, 0.25).expect("it can give way");
         assert_eq!(moved.len(), 1);
         let m = &moved[0];
         assert!(m.pts[0].same(p(0.0, 0.0)) && m.pts.last().unwrap().same(p(20.0, 0.0)), "ends stay put");
@@ -968,7 +1289,7 @@ mod pushing {
         // Its pads keep clear of the first track's pads.
         run(&mut b, 1.3, c);
         let scene = Scene::new(&b, &analyse(&b), TOP, a);
-        let moved = shove(&scene, &[(p(10.0, -5.0), p(10.0, 1.0))], 0.25).expect("both give way");
+        let (moved, _) = shove(&scene, &[(p(10.0, -5.0), p(10.0, 1.0))], 0.25).expect("both give way");
         assert_eq!(moved.len(), 2, "the second track is pushed too");
         let (m0, m1) = (&moved[0], &moved[1]);
         for s in m0.pts.windows(2) {
@@ -991,7 +1312,7 @@ mod pushing {
         // The route comes up from the board's edge, so there's no way round
         // its other end either.
         let got = shove(&scene, &[(p(10.0, -9.6), p(10.0, 1.0))], 0.25);
-        assert!(got.is_none(), "{:?}", got.map(|m| m[0].pts.clone()));
+        assert!(got.is_none(), "{:?}", got.map(|m| m.0[0].pts.clone()));
         // Push mode then walks round instead, and says so.
         let plan = plan(&scene, p(10.0, -9.6), p(10.0, 1.0), 0.25, Corner::D45, false, Conflict::Push, b.outline_bbox(), &[]);
         assert!(plan.pushed.is_empty());
@@ -1009,8 +1330,185 @@ mod pushing {
         let t = std::time::Instant::now();
         let moved = shove(&scene, &[(p(10.0, -5.0), p(10.0, 1.0))], 0.25);
         eprintln!("four tracks pushed in {:?}", t.elapsed());
-        let n = moved.map(|m| m.len()).unwrap_or(0);
+        let n = moved.map(|m| m.0.len()).unwrap_or(0);
         assert!(n >= 2, "only {n} pushed");
         assert!(t.elapsed().as_secs_f64() < 0.25);
     }
 }
+
+#[cfg(test)]
+mod clearance_always_holds {
+    use super::*;
+    use crate::pcb::copper::analyse;
+    use crate::pcb::drc;
+
+    const CLEARANCE: [&str; 4] = ["Too close", "Short circuit", "Too close to the edge", "Off the board"];
+
+    /// Puts a plan on a copy of the board and asks the rule check about it.
+    fn problems(b: &Board, net: u32, plan: &Plan, w: f64) -> Vec<String> {
+        let mut b = b.clone();
+        let mut fresh: Vec<Item> = apply_pushed(&mut b, &plan.pushed, &plan.vias).into_iter().map(Item::Track).collect();
+        fresh.extend(plan.vias.iter().map(|v| Item::Via(v.0)));
+        for s in plan.pts.windows(2) {
+            if !s[0].same(s[1]) {
+                let id = b.new_id();
+                b.tracks.push(Track { id, a: s[0], b: s[1], w, layer: TOP, net });
+                fresh.push(Item::Track(id));
+            }
+        }
+        drc::check(&b, &analyse(&b))
+            .into_iter()
+            .filter(|p| CLEARANCE.contains(&p.title.as_str()) && p.items.iter().any(|i| fresh.contains(i)))
+            .map(|p| format!("{}: {}", p.title, p.detail))
+            .collect()
+    }
+
+    #[test]
+    fn no_mode_but_ignore_ever_plans_too_close() {
+        let b = crate::pcb::sample::board();
+        let c = analyse(&b);
+        let starts: Vec<(P, u32)> = c
+            .items
+            .iter()
+            .filter(|i| matches!(i.item, Item::Pad(..)) && i.net != 0 && i.on.has(TOP))
+            .map(|i| (i.anchors[0], i.net))
+            .collect();
+        // A fixed spread of places to aim at: every pad, and spots across the board.
+        let mut targets: Vec<P> = c.items.iter().filter(|i| matches!(i.item, Item::Pad(..))).map(|i| i.anchors[0]).collect();
+        let mut seed = 12345u64;
+        for _ in 0..20 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let x = 2.0 + (seed >> 33) as f64 % 46.0;
+            let y = 2.0 + (seed >> 13) as f64 % 31.0;
+            targets.push(p(x, y).snap(0.25));
+        }
+        let mut checked = 0;
+        for mode in [Conflict::Walkaround, Conflict::Push, Conflict::HugPush, Conflict::Stop] {
+            for (k, (a, net)) in starts.iter().enumerate() {
+                let mut scene = Scene::new(&b, &c, TOP, *net);
+                scene.via_push = true;
+                for to in targets.iter().skip(k % 3).step_by(3) {
+                    let plan = plan(&scene, *a, *to, 0.25, Corner::D45, k % 2 == 0, mode, b.outline_bbox(), &[]);
+                    let found = problems(&b, *net, &plan, 0.25);
+                    assert!(found.is_empty(), "{mode:?} from {a:?} to {to:?}: {found:?}\n{plan:?}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "only {checked} routes tried");
+    }
+}
+
+#[cfg(test)]
+mod via_pushing {
+    use super::*;
+    use crate::pcb::copper::analyse;
+
+    fn tp(b: &mut Board, at: P, net: u32) {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.8, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+    }
+
+    /// Net B goes from a pad along the top to a via, then along the bottom to
+    /// another pad. The route (net A) comes up at the via from below.
+    fn board() -> (Board, u32, u32) {
+        let mut b = Board { outline: rect_outline(p(-5.0, -10.0), p(25.0, 10.0)), ..Board::default() };
+        let a = b.net("A");
+        let n = b.net("B");
+        tp(&mut b, p(0.0, 0.0), n);
+        tp(&mut b, p(20.0, 0.0), n);
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(10.0, 0.0), dia: 0.6, drill: 0.3, net: n });
+        let t1 = b.new_id();
+        b.tracks.push(Track { id: t1, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.25, layer: TOP, net: n });
+        let t2 = b.new_id();
+        b.tracks.push(Track { id: t2, a: p(10.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: BOTTOM, net: n });
+        (b, a, n)
+    }
+
+    #[test]
+    fn a_via_moves_and_its_tracks_follow_on_both_layers() {
+        let (b, a, _) = board();
+        let mut scene = Scene::new(&b, &analyse(&b), TOP, a);
+        scene.via_push = true;
+        let head = [(p(10.0, -5.0), p(10.0, -0.2))];
+        let (runs, vias) = shove(&scene, &head, 0.25).expect("the via can move");
+        assert_eq!(vias.len(), 1, "the via moves");
+        let to = vias[0].1;
+        let route = Blob::line(head[0].0, head[0].1, 0.25);
+        assert!(route.gap(&Blob::dot(to, 0.6)).0 >= 0.2 - 1e-6, "via still too close at {to:?}");
+        assert!(to.dist(p(10.0, 0.0)) < 1.0, "moved further than needed: {to:?}");
+        for layer in [TOP, BOTTOM] {
+            let m = runs.iter().find(|m| m.layer == layer).unwrap_or_else(|| panic!("track on layer {layer} didn't follow"));
+            assert!(m.pts[0].same(to) || m.pts.last().unwrap().same(to), "{layer}: {:?}", m.pts);
+        }
+    }
+
+    #[test]
+    fn without_via_pushing_it_walks_round() {
+        let (b, a, _) = board();
+        let mut scene = Scene::new(&b, &analyse(&b), TOP, a);
+        scene.via_push = false;
+        let plan = plan(&scene, p(10.0, -5.0), p(10.0, 3.0), 0.25, Corner::D45, false, Conflict::Push, b.outline_bbox(), &[]);
+        assert!(plan.vias.is_empty());
+    }
+
+    #[test]
+    fn hug_and_push_goes_round_when_it_fairly_can() {
+        // A short stub of another net in the way: going round is cheap.
+        let mut b = Board { outline: rect_outline(p(-5.0, -10.0), p(25.0, 10.0)), ..Board::default() };
+        let a = b.net("A");
+        let n = b.net("B");
+        tp(&mut b, p(10.0, 0.0), n);
+        let t = b.new_id();
+        b.tracks.push(Track { id: t, a: p(10.0, 0.0), b: p(11.0, 0.0), w: 0.25, layer: TOP, net: n });
+        let scene = Scene::new(&b, &analyse(&b), TOP, a);
+        let plan = plan(&scene, p(5.0, 0.0), p(15.0, 0.0), 0.25, Corner::D45, false, Conflict::HugPush, b.outline_bbox(), &[]);
+        assert!(plan.pushed.is_empty() && !plan.blocked, "{plan:?}");
+        // A long track across the board: going round is the long way, so it pushes.
+        let (b, a, _) = super::pushing_board();
+        let scene = Scene::new(&b, &analyse(&b), TOP, a);
+        let pushing = super::plan(&scene, p(10.0, -5.0), p(10.0, 1.0), 0.25, Corner::D45, false, Conflict::HugPush, b.outline_bbox(), &[]);
+        assert_eq!(pushing.pushed.len(), 1, "{pushing:?}");
+    }
+}
+
+/// A route's net and another net's long track across its way, for tests.
+#[cfg(test)]
+fn pushing_board() -> (Board, u32, u32) {
+    let mut b = Board { outline: rect_outline(p(-5.0, -10.0), p(25.0, 10.0)), ..Board::default() };
+    let a = b.net("A");
+    let n = b.net("B");
+    for x in [0.0, 20.0] {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at: p(x, 0.0),
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+    }
+    let id = b.new_id();
+    b.tracks.push(Track { id, a: p(0.0, 0.0), b: p(20.0, 0.0), w: 0.25, layer: TOP, net: n });
+    (b, a, n)
+}
+
