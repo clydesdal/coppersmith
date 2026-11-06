@@ -137,8 +137,10 @@ tangent arc of the arc radius (shown in the routing chip). A corner's arc can
 use up to half of each segment it shares with another corner. An arc that
 would come too close to something tries half the radius, and so on, or the
 corner stays sharp. Arcs are real arcs on the board and in the Gerbers
-(G02/G03); moving their ends keeps their shape. Arcs aren't pushed yet: a
-push treats an existing arc as fixed.
+(G02/G03); moving their ends keeps their shape. Arcs are pushed like any
+other track: a run with arc corners is bent as if each arc were the corner it
+rounds off, then its corners are rounded again — the old ones at their old
+radii, new ones at the run's, each shrinking if it would come too close.
 
 **The clearance always holds.** Every mode plans clear paths, and before
 anything is placed (a route, a pushed track, a moved via, a dropped via)

@@ -906,10 +906,16 @@ impl App {
         }
         if let Some(c) = &self.plan {
             for m in &c.plan.pushed {
-                for s in m.pts.windows(2) {
-                    let seg = Blob::line(s[0], s[1], m.w);
-                    fill_blob(painter, tr, &seg, fade(layer_color(Layer::Cu(m.layer)), 0.85));
-                    stroke_blob(painter, tr, &seg, Stroke::new(1.0, Color32::from_white_alpha(70)));
+                for (k, s) in m.pts.windows(2).enumerate() {
+                    let t = Track { mid: m.mids.get(k).copied().flatten(), id: 0, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net };
+                    for part in t.blobs() {
+                        fill_blob(painter, tr, &part, fade(layer_color(Layer::Cu(m.layer)), 0.85));
+                    }
+                    let mut ring: Vec<Pos2> = t.ring().iter().map(|q| tr.pt(*q)).collect();
+                    if let Some(first) = ring.first().copied() {
+                        ring.push(first);
+                    }
+                    painter.add(Shape::line(ring, Stroke::new(1.0, Color32::from_white_alpha(70))));
                 }
             }
         }

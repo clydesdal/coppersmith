@@ -151,8 +151,8 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
         .iter()
         .filter(|c| c.on.has(layer))
         .flat_map(|c| {
-            // An arc is several pieces; arcs aren't pushed (yet), only straight tracks.
-            let movable = matches!(c.item, Item::Track(_)) && c.parts.len() == 1;
+            // Tracks can be pushed, arcs included (see Scene::new for the exceptions).
+            let movable = matches!(c.item, Item::Track(_));
             c.parts.iter().map(move |part| Obstacle {
                 blob: part.clone(),
                 bbox: part.bbox(),
@@ -279,8 +279,13 @@ pub fn as_steps(pieces: &[(P, P, Option<P>)]) -> Vec<(P, P)> {
 /// end segment. An arc that would come too close to `obs` tries half the
 /// radius, and so on; below 0.05 mm the corner stays sharp.
 pub fn fillet(obs: &[Obstacle], pts: &[P], w: f64, radius: f64) -> (Vec<P>, Vec<Option<P>>) {
+    fillet_with(obs, pts, w, &|_| radius)
+}
+
+/// As `fillet`, with each corner's radius from `radius_at` (0 leaves it sharp).
+pub fn fillet_with(obs: &[Obstacle], pts: &[P], w: f64, radius_at: &dyn Fn(P) -> f64) -> (Vec<P>, Vec<Option<P>>) {
     let n = pts.len();
-    if n < 3 || radius <= 0.0 {
+    if n < 3 {
         return (pts.to_vec(), vec![None; n.saturating_sub(1)]);
     }
     let mut out = vec![pts[0]];
@@ -297,7 +302,7 @@ pub fn fillet(obs: &[Obstacle], pts: &[P], w: f64, radius: f64) -> (Vec<P>, Vec<
                 let half = (theta / 2.0).tan();
                 let avail_in = if i == 1 { lin } else { lin / 2.0 };
                 let avail_out = if i + 1 == n - 1 { lout } else { lout / 2.0 };
-                let mut r = radius.min(avail_in.min(avail_out) / half);
+                let mut r = radius_at(c).min(avail_in.min(avail_out) / half);
                 let turn = u.cross(v).signum();
                 while r >= 0.05 {
                     let t = r * half;
@@ -854,9 +859,20 @@ impl Scene {
             .filter(|l| *l != layer)
             .map(|l| (l, obstacles_all(board, copper, l), lines(board, copper, l, 0)))
             .collect();
+        let lines = lines(board, copper, layer, net);
+        // A track that isn't in any run (an arc that can't be bent) can't move.
+        let mut all = all;
+        let in_runs: std::collections::HashSet<u32> = self::lines(board, copper, layer, 0).iter().flat_map(|l| l.ids.iter().copied()).collect();
+        for o in &mut all {
+            if let Some(Item::Track(id)) = o.item
+                && !in_runs.contains(&id)
+            {
+                o.movable = false;
+            }
+        }
         Scene {
             own: for_net(&all, net),
-            lines: lines(board, copper, layer, net),
+            lines,
             all,
             net,
             layer,
@@ -995,9 +1011,67 @@ fn push_plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, area
 #[derive(Clone, Debug)]
 pub struct Line {
     pub ids: Vec<u32>,
+    /// The run's corners. An arc is stood in for by its corner, where the
+    /// straight lines either side of it would meet.
     pub pts: Vec<P>,
     pub w: f64,
     pub net: u32,
+    /// The run as it really is: from, to, and the middle of an arc.
+    pub pieces: Vec<(P, P, Option<P>)>,
+    /// Each arc's corner and radius.
+    pub radii: Vec<(P, f64)>,
+    /// The radius new corners get when it's pushed (0 for a run of straight
+    /// tracks, which keeps square-cut corners).
+    pub radius: f64,
+}
+
+impl Line {
+    fn radius_at(&self, c: P) -> f64 {
+        self.radii.iter().find(|(x, _)| x.same(c)).map(|(_, r)| *r).unwrap_or(self.radius)
+    }
+}
+
+/// The corner an arc rounds off: where the lines it's tangent to meet.
+fn arc_corner(a: P, m: P, b: P) -> Option<P> {
+    let (c, _) = arc_center(a, m, b)?;
+    let tangent = |q: P, towards: P| {
+        let r = q.sub(c);
+        let t = p(-r.y, r.x);
+        if t.dot(towards) < 0.0 { t.scale(-1.0) } else { t }
+    };
+    let ta = tangent(a, m.sub(a));
+    let tb = tangent(b, b.sub(m));
+    let x = meet_lines(a, unit(ta), b, unit(tb))?;
+    // A half circle or more has no corner to stand in for it.
+    (x.sub(a).dot(ta) > 1e-6 && b.sub(x).dot(tb) > 1e-6).then_some(x)
+}
+
+/// A run's corners and arc radii from its pieces; None if an arc can't be
+/// stood in for by a corner.
+fn corners(pieces: &[(P, P, Option<P>)]) -> Option<(Vec<P>, Vec<(P, f64)>)> {
+    let mut pts = vec![pieces.first()?.0];
+    let mut radii = Vec::new();
+    for (a, b, mid) in pieces {
+        match mid {
+            None => pts.push(*b),
+            Some(m) => {
+                let x = arc_corner(*a, *m, *b)?;
+                let (_, r) = arc_center(*a, *m, *b)?;
+                // The straight piece before ended where the arc starts: its
+                // end becomes the corner instead.
+                if pts.len() > 1 && pts.last().is_some_and(|q| q.same(*a)) {
+                    pts.pop();
+                }
+                pts.push(x);
+                radii.push((x, r));
+            }
+        }
+    }
+    // A run ending on an arc still ends where the arc does.
+    if let Some((_, b, Some(_))) = pieces.last() {
+        pts.push(*b);
+    }
+    Some((merge_collinear(pts), radii))
 }
 
 /// A run after it's been pushed: its old tracks go, these corners replace them.
@@ -1005,6 +1079,8 @@ pub struct Line {
 pub struct Moved {
     pub ids: Vec<u32>,
     pub pts: Vec<P>,
+    /// The middle of each piece that's an arc (empty when none are).
+    pub mids: Vec<Option<P>>,
     pub w: f64,
     pub net: u32,
     pub layer: u8,
@@ -1017,9 +1093,7 @@ fn key(q: P) -> (i64, i64) {
 /// Other nets' tracks on a layer, joined into runs.
 pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Line> {
     use std::collections::{HashMap, HashSet};
-    // Arcs aren't pushed (yet); where one meets a straight track it pins it.
-    let tracks: Vec<&Track> =
-        board.tracks.iter().filter(|t| t.layer == layer && t.mid.is_none() && (t.net != skip_net || skip_net == 0)).collect();
+    let tracks: Vec<&Track> = board.tracks.iter().filter(|t| t.layer == layer && (t.net != skip_net || skip_net == 0)).collect();
     let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         ends.entry(key(t.a)).or_default().push(i);
@@ -1043,6 +1117,7 @@ pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Li
         let t0 = tracks[start];
         let mut ids = vec![t0.id];
         let mut pts = std::collections::VecDeque::from([t0.a, t0.b]);
+        let mut pieces = std::collections::VecDeque::from([(t0.a, t0.b, t0.mid)]);
         // Grow forwards from b, then backwards from a.
         for forward in [true, false] {
             loop {
@@ -1060,13 +1135,19 @@ pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Li
                 if forward {
                     pts.push_back(far);
                     ids.push(t.id);
+                    pieces.push_back((here, far, t.mid));
                 } else {
                     pts.push_front(far);
                     ids.insert(0, t.id);
+                    pieces.push_front((far, here, t.mid));
                 }
             }
         }
-        out.push(Line { ids, pts: pts.into_iter().collect(), w: t0.w, net: t0.net });
+        let pieces: Vec<(P, P, Option<P>)> = pieces.into_iter().collect();
+        let Some((corner_pts, radii)) = corners(&pieces) else { continue };
+        let _ = pts;
+        let radius = radii.first().map(|r| r.1).unwrap_or(0.0);
+        out.push(Line { ids, pts: corner_pts, w: t0.w, net: t0.net, pieces, radii, radius });
     }
     out
 }
@@ -1094,10 +1175,6 @@ fn crowded(blob: &Blob, net: u32, who: Owner, pushers: &[Pusher], clearance: f64
     pushers
         .iter()
         .any(|p| p.owner != who && (p.net != net || net == 0) && p.bbox.touches(&bb) && blob.gap(&p.blob).0 < clearance + SURE)
-}
-
-fn crowds(pts: &[P], w: f64, net: u32, who: Owner, pushers: &[Pusher], clearance: f64) -> bool {
-    pts.windows(2).any(|s| crowded(&Blob::line(s[0], s[1], w), net, who, pushers, clearance))
 }
 
 fn as_obstacle(p: &Pusher, gap: f64) -> Obstacle {
@@ -1243,7 +1320,9 @@ pub fn shove(scene: &Scene, segs: &[(P, P)], w: f64) -> Option<(Vec<Moved>, Vec<
 pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Vec<(u32, P)>)> {
     let c = scene.clearance;
     let mut pushers: Vec<Pusher> = push.iter().map(|(blob, net)| pusher(blob.clone(), *net, Owner::Route)).collect();
+    // Each run's corners (arcs stood in for by theirs), and its real shape.
     let mut runs: Vec<Vec<P>> = scene.lines.iter().map(|l| l.pts.clone()).collect();
+    let mut shapes: Vec<Vec<(P, P, Option<P>)>> = scene.lines.iter().map(|l| l.pieces.clone()).collect();
     let mut moved: Vec<bool> = vec![false; runs.len()];
     // Runs on other layers that followed a via: (layer slot, run) -> corners.
     let mut followed: Vec<((usize, usize), Vec<P>)> = Vec::new();
@@ -1252,6 +1331,38 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
     let mut via_moved = vec![false; vias.len()];
     let fixed_here = |net: u32| -> Vec<Obstacle> {
         scene.all.iter().filter(|o| !scene.movable(o) && (o.net != net || net == 0)).cloned().collect()
+    };
+    // What run `i` keeps clear of: what can't move, the vias where they now
+    // are, and everything pushing it.
+    let walls = |i: usize, pushers: &[Pusher], via_at: &[P]| -> Vec<Obstacle> {
+        let l = &scene.lines[i];
+        let mut obs = fixed_here(l.net);
+        for (k, v) in vias.iter().enumerate() {
+            if v.3 != l.net || l.net == 0 {
+                let blob = Blob::dot(via_at[k], v.2);
+                obs.push(Obstacle { bbox: blob.bbox(), blob, gap: c, item: None, net: v.3, movable: false });
+            }
+        }
+        for p in pushers.iter().filter(|p| p.owner != Owner::Run(i) && (p.net != l.net || l.net == 0)) {
+            if !matches!(p.owner, Owner::Via(_)) {
+                obs.push(as_obstacle(p, c));
+            }
+        }
+        obs
+    };
+    // A bent run gets its arcs back: its old corners at their old radii, new
+    // ones at the run's, each shrinking if it would come too close.
+    let round = |l: &Line, obs: &[Obstacle], pts: &[P]| -> Vec<(P, P, Option<P>)> {
+        let (corners, mids) = if l.radius > 0.0 {
+            fillet_with(obs, pts, l.w, &|q| l.radius_at(q))
+        } else {
+            (pts.to_vec(), vec![None; pts.len().saturating_sub(1)])
+        };
+        corners.windows(2).enumerate().map(|(k, s)| (s[0], s[1], mids[k])).collect()
+    };
+    let shape_pushers = |i: usize, shape: &[(P, P, Option<P>)], l: &Line| -> Vec<Pusher> {
+        let t = |a: P, b: P, mid: Option<P>| Track { mid, id: 0, a, b, w: l.w, layer: 0, net: l.net };
+        shape.iter().flat_map(|(a, b, m)| t(*a, *b, *m).blobs()).map(|blob| pusher(blob, l.net, Owner::Run(i))).collect()
     };
     let mut rounds = 0;
     loop {
@@ -1270,11 +1381,12 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
             pushers.retain(|p| p.owner != Owner::Via(k));
             pushers.push(pusher(Blob::dot(to, dia), net, Owner::Via(k)));
             for (i, pts) in here {
+                let obs = walls(i, &pushers, &via_at);
+                let shape = round(&scene.lines[i], &obs, &pts);
                 pushers.retain(|p| p.owner != Owner::Run(i));
-                for s in pts.windows(2) {
-                    pushers.push(pusher(Blob::line(s[0], s[1], scene.lines[i].w), net, Owner::Run(i)));
-                }
+                pushers.extend(shape_pushers(i, &shape, &scene.lines[i]));
                 runs[i] = pts;
+                shapes[i] = shape;
                 moved[i] = true;
             }
             for (key, pts) in there {
@@ -1283,49 +1395,39 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
             }
             continue;
         }
-        // A run something crowds: bend it out of the way.
-        let Some(i) = (0..runs.len()).find(|&i| crowds(&runs[i], scene.lines[i].w, scene.lines[i].net, Owner::Run(i), &pushers, c))
-        else {
-            break;
+        // A run something crowds, judged on its real shape: bend it out of the way.
+        let crowding = |i: usize| {
+            let l = &scene.lines[i];
+            shape_pushers(i, &shapes[i], l).iter().any(|own| crowded(&own.blob, l.net, Owner::Run(i), &pushers, c))
         };
+        let Some(i) = (0..runs.len()).find(|&i| crowding(i)) else { break };
         let l = &scene.lines[i];
-        // Keeps clear of what can't move, and of everything pushing it. Vias
-        // are kept clear of as they stand: only the route pushes vias.
-        let mut obs = fixed_here(l.net);
-        for (k, v) in vias.iter().enumerate() {
-            if v.3 != l.net || l.net == 0 {
-                let blob = Blob::dot(via_at[k], v.2);
-                obs.push(Obstacle { bbox: blob.bbox(), blob, gap: c, item: None, net: v.3, movable: false });
-            }
-        }
-        for p in pushers.iter().filter(|p| p.owner != Owner::Run(i) && (p.net != l.net || l.net == 0)) {
-            if !matches!(p.owner, Owner::Via(_)) {
-                obs.push(as_obstacle(p, c));
-            }
-        }
+        let obs = walls(i, &pushers, &via_at);
         let Some((s0, s1)) = crowded_stretch(&runs[i], l.w, l.net, Owner::Run(i), &pushers, c) else { continue };
-        let pts = rebend(&obs, &runs[i], l.w, s0, s1, None, scene.min_diag)?;
+        // Arc runs get arcs, not square-cut corners, where they're bent.
+        let cut = if l.radius > 0.0 { 0.0 } else { scene.min_diag };
+        let pts = rebend(&obs, &runs[i], l.w, s0, s1, None, cut)?;
+        let shape = round(l, &obs, &pts);
         pushers.retain(|p| p.owner != Owner::Run(i));
-        for s in pts.windows(2) {
-            pushers.push(pusher(Blob::line(s[0], s[1], l.w), l.net, Owner::Run(i)));
-        }
+        pushers.extend(shape_pushers(i, &shape, l));
         runs[i] = pts;
+        shapes[i] = shape;
         moved[i] = true;
     }
-    let mut out: Vec<Moved> = (0..runs.len())
-        .filter(|&i| moved[i])
-        .map(|i| Moved {
-            ids: scene.lines[i].ids.clone(),
-            pts: runs[i].clone(),
-            w: scene.lines[i].w,
-            net: scene.lines[i].net,
-            layer: scene.layer,
-        })
-        .collect();
+    let as_moved = |l: &Line, shape: &[(P, P, Option<P>)], layer: u8| {
+        let mut pts = vec![shape[0].0];
+        pts.extend(shape.iter().map(|s| s.1));
+        let mids: Vec<Option<P>> = shape.iter().map(|s| s.2).collect();
+        let mids = if mids.iter().any(|m| m.is_some()) { mids } else { Vec::new() };
+        Moved { ids: l.ids.clone(), pts, mids, w: l.w, net: l.net, layer }
+    };
+    let mut out: Vec<Moved> = (0..runs.len()).filter(|&i| moved[i]).map(|i| as_moved(&scene.lines[i], &shapes[i], scene.layer)).collect();
     for ((slot, j), pts) in followed {
-        let (layer, _, lines) = &scene.others[slot];
+        let (layer, all, lines) = &scene.others[slot];
         let l = &lines[j];
-        out.push(Moved { ids: l.ids.clone(), pts, w: l.w, net: l.net, layer: *layer });
+        let obs: Vec<Obstacle> = all.iter().filter(|o| (o.net != l.net || l.net == 0) && !l.ids.iter().any(|id| o.item == Some(Item::Track(*id)))).cloned().collect();
+        let shape = round(l, &obs, &pts);
+        out.push(as_moved(l, &shape, *layer));
     }
     let moved_vias = (0..vias.len()).filter(|&k| via_moved[k]).map(|k| (vias[k].0, via_at[k])).collect();
     Some((out, moved_vias))
@@ -1394,7 +1496,7 @@ fn move_via(
             }
             let mut obs: Vec<Obstacle> = scene.all.iter().filter(|o| !scene.movable(o) && other_net(o.net)).cloned().collect();
             obs.extend(pushers.iter().filter(|p| p.owner != Owner::Run(i) && p.owner != Owner::Via(k) && other_net(p.net)).map(|p| as_obstacle(p, c)));
-            match follow(&obs, run, from, to, l.w, scene.min_diag) {
+            match follow(&obs, run, from, to, l.w, if l.radius > 0.0 { 0.0 } else { scene.min_diag }) {
                 Some(pts) => here.push((i, pts)),
                 None => {
                     fine = false;
@@ -1414,7 +1516,7 @@ fn move_via(
                     continue;
                 }
                 let obs: Vec<Obstacle> = all.iter().filter(|o| other_net(o.net)).cloned().collect();
-                match follow(&obs, &run, from, to, l.w, scene.min_diag) {
+                match follow(&obs, &run, from, to, l.w, if l.radius > 0.0 { 0.0 } else { scene.min_diag }) {
                     Some(pts) => there.push(((slot, j), pts)),
                     None => {
                         fine = false;
@@ -1436,10 +1538,11 @@ pub fn apply_pushed(board: &mut Board, pushed: &[Moved], vias: &[(u32, P)]) -> V
     let mut made = Vec::new();
     for m in pushed {
         board.tracks.retain(|t| !m.ids.contains(&t.id));
-        for s in m.pts.windows(2) {
+        for (k, s) in m.pts.windows(2).enumerate() {
             if !s[0].same(s[1]) {
                 let id = board.new_id();
-                board.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net });
+                let mid = m.mids.get(k).copied().flatten();
+                board.tracks.push(Track { mid, id, a: s[0], b: s[1], w: m.w, layer: m.layer, net: m.net });
                 made.push(id);
             }
         }
@@ -2074,5 +2177,115 @@ mod no_square_corners {
         }
         assert!(tried > 50);
         assert_eq!(found, 0, "square corners in {tried} routes");
+    }
+}
+
+#[cfg(test)]
+mod pushing_arcs {
+    use super::*;
+    use crate::pcb::copper::analyse;
+    use crate::pcb::drc;
+    use crate::pcb::slide::octilinear;
+
+    /// Net B: a rounded U from a pad at (0, 10) down, along y = 0 and up to a
+    /// pad at (12, 10), with 2 mm arcs at the bottom corners.
+    fn board() -> (Board, u32) {
+        let s = 2f64.sqrt();
+        let mut b = Board { outline: rect_outline(p(-8.0, -8.0), p(20.0, 14.0)), ..Board::default() };
+        let a = b.net("A");
+        let n = b.net("B");
+        for x in [0.0, 12.0] {
+            let id = b.new_id();
+            b.footprints.push(Footprint {
+                id,
+                def: "TP".into(),
+                refdes: format!("TP{id}"),
+                value: String::new(),
+                at: p(x, 10.0),
+                rot: 0.0,
+                side: Side::Top,
+                pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
+                graphics: vec![],
+                label_at: P::default(),
+                locked: false,
+            });
+        }
+        for (s0, e, mid) in [
+            (p(0.0, 10.0), p(0.0, 2.0), None),
+            (p(0.0, 2.0), p(2.0, 0.0), Some(p(2.0 - s, 2.0 - s))),
+            (p(2.0, 0.0), p(10.0, 0.0), None),
+            (p(10.0, 0.0), p(12.0, 2.0), Some(p(10.0 + s, 2.0 - s))),
+            (p(12.0, 2.0), p(12.0, 10.0), None),
+        ] {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: mid.map(|m: P| m.rounded()), id, a: s0, b: e, w: 0.25, layer: TOP, net: n });
+        }
+        (b, a)
+    }
+
+    fn after(b: &Board, moved: &[Moved]) -> Board {
+        let mut b = b.clone();
+        apply_pushed(&mut b, moved, &[]);
+        b
+    }
+
+    fn problems(b: &Board, head: &[(P, P)]) -> Vec<String> {
+        let mut b = b.clone();
+        let a = b.net_by_name("A").unwrap();
+        for (s, e) in head {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: *s, b: *e, w: 0.25, layer: TOP, net: a });
+        }
+        drc::check(&b, &analyse(&b))
+            .into_iter()
+            .filter(|p| ["Too close", "Short circuit"].contains(&p.title.as_str()))
+            .map(|p| p.detail)
+            .collect()
+    }
+
+    /// Every arc meets its straight neighbours tangent.
+    fn tangent(b: &Board) -> bool {
+        b.tracks.iter().filter(|t| t.mid.is_some()).all(|arc| {
+            let (c, r) = arc_center(arc.a, arc.mid.unwrap(), arc.b).unwrap();
+            [arc.a, arc.b].iter().all(|end| {
+                b.tracks.iter().filter(|t| t.mid.is_none() && t.layer == arc.layer && (t.a.same(*end) || t.b.same(*end))).all(|s| {
+                    let along = s.b.sub(s.a);
+                    (along.dot(end.sub(c)) / (along.len() * r)).abs() < 1e-3
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn an_arc_run_is_pushed_and_keeps_its_arcs() {
+        let (b, a) = board();
+        let scene = Scene::new(&b, &analyse(&b), TOP, a);
+        assert_eq!(scene.lines.len(), 1, "the U is one run");
+        assert_eq!(scene.lines[0].pts.len(), 4, "with corners for its arcs: {:?}", scene.lines[0].pts);
+        let head = [(p(6.0, -5.0), p(6.0, 0.3))];
+        let (moved, _) = shove(&scene, &head, 0.25).expect("the U gives way");
+        let b2 = after(&b, &moved);
+        assert!(problems(&b2, &head).is_empty(), "{:?}", problems(&b2, &head));
+        assert!(tangent(&b2), "{:?}", b2.tracks);
+        assert!(b2.tracks.iter().filter(|t| t.mid.is_some()).count() > 2, "new corners got arcs: {:?}", b2.tracks);
+        assert!(b2.tracks.iter().filter(|t| t.mid.is_none()).all(|t| octilinear(t.b.sub(t.a))));
+        // The old corners keep their 2 mm radius.
+        for corner in [p(0.0, 2.0), p(12.0, 2.0)] {
+            let arc = b2.tracks.iter().find(|t| t.mid.is_some() && (t.a.same(corner) || t.b.same(corner))).expect("old arc still there");
+            let (_, r) = arc_center(arc.a, arc.mid.unwrap(), arc.b).unwrap();
+            assert!((r - 2.0).abs() < 1e-3, "{r}");
+        }
+    }
+
+    #[test]
+    fn an_arc_corner_itself_is_pushed() {
+        let (b, a) = board();
+        let scene = Scene::new(&b, &analyse(&b), TOP, a);
+        // Coming in at 45° towards the bottom left corner.
+        let head = [(p(-5.0, -5.0), p(0.45, 0.45))];
+        let (moved, _) = shove(&scene, &head, 0.25).expect("the corner gives way");
+        let b2 = after(&b, &moved);
+        assert!(problems(&b2, &head).is_empty(), "{:?}", problems(&b2, &head));
+        assert!(tangent(&b2), "{:?}", b2.tracks);
     }
 }
