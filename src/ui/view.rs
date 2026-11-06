@@ -478,6 +478,14 @@ impl App {
     fn end_drag(&mut self, tr: &Tr, at: Pos2) {
         if let Some(drag) = self.drag.take() {
             if drag.moved {
+                // Straight runs left in pieces by the move join up again.
+                crate::ui::app::merge_straight(&mut self.doc);
+                let doc = &self.doc;
+                self.sel.retain(|s| match *s {
+                    Sel::Fp(id) => doc.fp(id).is_some(),
+                    Sel::Track(id) => doc.track(id).is_some(),
+                    Sel::Via(id) => doc.via(id).is_some(),
+                });
                 self.remember(drag.before);
             } else {
                 self.doc = drag.before;

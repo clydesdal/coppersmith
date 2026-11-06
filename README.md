@@ -15,11 +15,28 @@ to it.
 
 | Tool | Key | What it does |
 |---|---|---|
-| Select | S | Click to pick, Shift-click to add, drag to move, drag on empty board to box (left→right takes what's inside, right→left anything touched). Grab a track near its end to move just that end. Double-click a track to pick up everything joined to it. |
+| Select | S | Click to pick, Shift-click to add, drag to move, drag on empty board to box (left→right takes what's inside, right→left anything touched). Grab a track near its end to move just that end. Double-click a track to pick up everything joined to it. Moving keeps 45° work at 45° (see below). |
 | Route | W | Click a pad, via or track to start. Routing works like Altium's: see below. |
 | Via | V | Click to drop a via; it takes the net of what it lands on. |
 | Outline | O | Click the board's corners; click the first corner (or Enter) to close. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
+
+### Moving keeps the corners
+
+On a board laid at 45°, moving things doesn't leave tracks at odd angles:
+
+- Drag one straight track and it slides sideways, keeping its direction.
+  Its neighbours keep theirs too, growing or shrinking to meet it; where the
+  track ends on a pad or via, a short 45° leg joins it back.
+- Move a part, a via, or a group, and each track joined to it keeps its
+  direction while the next corner slides along the following track; a track
+  with nowhere to slide is re-laid as a straight leg and a 45° leg.
+- Drag the corner where tracks meet and they're re-laid from their far ends
+  in 45° legs.
+- Pushed tracks keep 45° too.
+
+Tracks that weren't at a multiple of 45° to begin with just stretch, so
+any-angle work stays as it was drawn. Arcs keep their bulge.
 
 ### Routing
 
@@ -151,7 +168,8 @@ What each computer needs besides Rust:
         library.rs     built-in footprints and your footprint files
         copper.rs      what touches what, and the still-to-connect lines
         drc.rs         the rule check
-        router.rs      the interactive router: corner styles, walk round, stop, loops
+        router.rs      the interactive router: corner styles, walk round, push, arcs, loops
+        slide.rs       moving tracks without losing their 45° corners
         gerber.rs      Gerber and Excellon output
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board

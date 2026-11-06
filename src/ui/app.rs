@@ -417,6 +417,16 @@ impl App {
         if d.len() == 0.0 {
             return;
         }
+        // One straight track on its own slides sideways, keeping its corners.
+        if let [Sel::Track(id)] = sel
+            && board.track(*id).is_some_and(|t| t.mid.is_none())
+        {
+            let mut tried = board.clone();
+            if crate::pcb::slide::slide(&mut tried, *id, d) {
+                *board = tried;
+            }
+            return;
+        }
         let mut anchors: Vec<P> = Vec::new();
         let picked: HashSet<Sel> = sel.iter().copied().collect();
         for f in board.footprints.iter_mut().filter(|f| picked.contains(&Sel::Fp(f.id)) && !f.locked) {
@@ -434,27 +444,17 @@ impl App {
             t.b = t.b.add(d).rounded();
             t.mid = t.mid.map(|m| m.add(d).rounded());
         }
-        for t in board.tracks.iter_mut().filter(|t| !picked.contains(&Sel::Track(t.id))) {
-            let a = if anchors.iter().any(|q| q.same(t.a)) { t.a.add(d).rounded() } else { t.a };
-            let b = if anchors.iter().any(|q| q.same(t.b)) { t.b.add(d).rounded() } else { t.b };
-            t.set_ends(a, b);
-        }
+        // The tracks joined to what moved come along, keeping their corners.
+        let moves: Vec<(P, P)> = anchors.iter().map(|q| (*q, q.add(d).rounded())).collect();
+        let moved: HashSet<u32> = sel.iter().filter_map(|s| if let Sel::Track(id) = s { Some(*id) } else { None }).collect();
+        crate::pcb::slide::follow_moves(board, &moves, &moved);
     }
 
     /// Moves one end of a track, and any other track ends or vias sitting on it.
     pub fn move_end(board: &mut Board, id: u32, far: bool, to: P) {
         let Some(t) = board.track(id) else { return };
         let from = if far { t.b } else { t.a };
-        for t in &mut board.tracks {
-            let a = if t.a.same(from) { to } else { t.a };
-            let b = if t.b.same(from) { to } else { t.b };
-            t.set_ends(a, b);
-        }
-        for v in &mut board.vias {
-            if v.at.same(from) {
-                v.at = to;
-            }
-        }
+        crate::pcb::slide::drag_joint(board, from, to);
     }
 
     pub fn rotate_selection(&mut self, deg: f64) {
@@ -474,19 +474,9 @@ impl App {
                 let f = b.fp_mut(id).unwrap();
                 f.rot = (f.rot + deg).rem_euclid(360.0);
                 let after: Vec<P> = (0..f.pads.len()).map(|i| f.pad_center(i)).collect();
-                // Tracks follow their pads round.
-                for t in &mut b.tracks {
-                    let (mut a, mut e) = (t.a, t.b);
-                    for (from, to) in before.iter().zip(&after) {
-                        if t.a.same(*from) {
-                            a = *to;
-                        }
-                        if t.b.same(*from) {
-                            e = *to;
-                        }
-                    }
-                    t.set_ends(a, e);
-                }
+                // Tracks follow their pads round, keeping their corners.
+                let moves: Vec<(P, P)> = before.into_iter().zip(after).collect();
+                crate::pcb::slide::follow_moves(b, &moves, &HashSet::new());
             }
         });
     }
@@ -1203,8 +1193,11 @@ mod tests {
         let mut b = crate::pcb::sample::board();
         let r3 = b.footprints.iter().find(|f| f.refdes == "R3").unwrap().id;
         App::move_selection(&mut b, &[Sel::Fp(r3)], p(0.0, -1.0));
-        let led = b.tracks.iter().find(|t| t.b.same(p(16.9125, 27.0))).unwrap();
-        assert!(led.a.same(p(16.9125, 21.0)));
+        // Still one straight track from D1 to where R3's pad has gone.
+        let led: Vec<&Track> = b.tracks.iter().filter(|t| t.net == b.net_by_name("LED").unwrap()).collect();
+        assert_eq!(led.len(), 1);
+        let ends = [led[0].a, led[0].b];
+        assert!(ends.iter().any(|q| q.same(p(16.9125, 27.0))) && ends.iter().any(|q| q.same(p(16.9125, 21.0))), "{led:?}");
     }
 
     #[test]

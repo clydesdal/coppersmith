@@ -1768,3 +1768,46 @@ mod arcs {
         assert!(ij[0].abs() <= 2 && (ij[1] - 2_000_000).abs() <= 2, "{line}");
     }
 }
+
+#[cfg(test)]
+mod pushes_keep_45 {
+    use super::*;
+    use crate::pcb::copper::analyse;
+    use crate::pcb::slide::octilinear;
+
+    fn all_45(moved: &[Moved]) -> bool {
+        moved.iter().all(|m| m.pts.windows(2).all(|s| octilinear(s[1].sub(s[0]))))
+    }
+
+    #[test]
+    fn pushed_tracks_stay_at_45() {
+        // A route poking at a track, from a range of places and heights.
+        for (x, top) in [(10.0, 1.0), (7.3, 0.6), (12.85, 1.7), (3.0, 0.4)] {
+            let (b, a, _) = super::pushing_board();
+            let scene = Scene::new(&b, &analyse(&b), TOP, a);
+            let (moved, _) = shove(&scene, &[(p(x, -5.0), p(x, top))], 0.25).expect("it gives way");
+            assert!(!moved.is_empty());
+            assert!(all_45(&moved), "x {x}: {:?}", moved[0].pts);
+        }
+    }
+
+    #[test]
+    fn a_pushed_vias_tracks_stay_at_45() {
+        let mut b = super::pushing_board().0;
+        let n = b.net_by_name("B").unwrap();
+        let a = b.net_by_name("A").unwrap();
+        // Put a via in the middle of the track, with the second half on the bottom.
+        b.tracks.clear();
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(10.0, 0.0), dia: 0.6, drill: 0.3, net: n });
+        for (s, e, layer) in [((0.0, 0.0), (10.0, 0.0), TOP), ((10.0, 0.0), (20.0, 0.0), BOTTOM)] {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: p(s.0, s.1), b: p(e.0, e.1), w: 0.25, layer, net: n });
+        }
+        let mut scene = Scene::new(&b, &analyse(&b), TOP, a);
+        scene.via_push = true;
+        let (moved, vias) = shove(&scene, &[(p(10.3, -5.0), p(10.3, -0.15))], 0.25).expect("the via moves");
+        assert_eq!(vias.len(), 1);
+        assert!(all_45(&moved), "{moved:?}");
+    }
+}

@@ -34,7 +34,13 @@ Done in 0.3.2: arc corners (45° and 90° with arc, radius keys), arcs as a
 track shape through the board model, rule check, picking, editing and
 Gerbers.
 
+Done in 0.3.3: moving keeps corners — sliding a track keeps its and its
+neighbours' directions, moving parts and vias brings tracks along at 45°,
+corner drags re-lay in 45° legs; pushes are tested to stay at 45°.
+
 Next:
+- Sliding that also pushes what the slid track runs into, and keeps arc
+  corners tangent while sliding.
 - Push arcs (today an existing arc is fixed when pushing).
 - Pushing on other layers when a moved via's tracks there run into things
   (today they bend round, but don't push).
