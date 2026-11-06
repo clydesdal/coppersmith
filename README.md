@@ -33,7 +33,7 @@ and ends the route.
 |---|---|
 | Shift+Space | Corners: 45°, 90°, any angle |
 | Space (or /) | Flip which way the corner goes |
-| Shift+R | When something's in the way: walk around it, stop at it, or ignore it (the rule check then shows the clash; what it runs over is outlined red) |
+| Shift+R | When something's in the way: walk around it, push it aside, stop at it, or ignore it (the rule check then shows the clash; what it runs over is outlined red) |
 | Ctrl+click | Finish the connection by itself, round whatever is in the way |
 | Ctrl | Hold to stop the pointer snapping to pad centres |
 | V | Via, and carry on on the other side |
@@ -50,6 +50,14 @@ and ends the route.
 The same settings are in the routing pill on the toolbar. Walking round is
 an A* search on a fine grid kept clear of other nets and the board edge,
 then pulled straight wherever an exact clearance check allows.
+
+**Push** goes round what can't move (pads, vias, holes, the board edge) and
+through other nets' tracks, which bend out of its way. Each track is bent as
+little as it can be, its ends stay where they are, and a pushed track pushes
+whatever it then runs into. Move the pointer away and they spring back; a
+click keeps them. If a track can't give way (pinned between pads, or it
+would have to go the long way round) the route walks round instead and the
+routing chip says so. Backspace and Ctrl+Z put pushed tracks back too.
 
 Anywhere: R turn 90° (Shift+R the other way), L other side, Delete remove,
 Ctrl+D copy, Ctrl+A everything, N light up the net under the pointer, 1–6 or

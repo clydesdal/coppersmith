@@ -12,7 +12,7 @@
 use crate::pcb::copper::Item;
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
-use crate::pcb::router::{self, Conflict, Corner, Obstacle, Plan};
+use crate::pcb::router::{self, Conflict, Corner, Plan, Scene};
 use crate::ui::app::App;
 
 /// A route being laid: the segments and vias placed so far.
@@ -30,14 +30,19 @@ pub struct Route {
     pub start: Option<Item>,
     /// How things stood before each click, for Backspace.
     marks: Vec<Mark>,
+    /// The board before the route began, so the whole route (and anything
+    /// it pushed) is one undo.
+    pub before: Option<Board>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Mark {
     segs: usize,
     vias: usize,
     from: P,
     layer: u8,
+    /// The board before this click pushed anything aside.
+    doc: Option<Board>,
 }
 
 /// Where the width of a new track comes from (3 cycles it).
@@ -95,7 +100,7 @@ pub struct PlanCache {
 #[derive(Default)]
 pub struct ObstacleCache {
     key: Option<(u64, u8, u32)>,
-    pub list: Vec<Obstacle>,
+    pub scene: Scene,
 }
 
 impl App {
@@ -163,19 +168,24 @@ impl App {
             flip: false,
             start: item,
             marks: Vec::new(),
+            before: Some(self.doc.clone()),
         });
         self.plan = None;
     }
 
-    /// Other nets' copper on the routing layer, worked out once per change.
-    pub fn route_obstacles(&mut self) -> &[Obstacle] {
+    /// What's on the routing layer, worked out once per change.
+    pub fn route_scene(&mut self) {
         let (layer, net) = self.route.as_ref().map(|r| (r.layer, r.net)).unwrap_or((self.layer, 0));
         let key = (self.rev, layer, net);
         if self.obstacles.key != Some(key) {
-            self.obstacles.list = router::obstacles(&self.doc, &self.copper, layer, net);
+            self.obstacles.scene = Scene::new(&self.doc, &self.copper, layer, net);
             self.obstacles.key = Some(key);
         }
-        &self.obstacles.list
+    }
+
+    /// The route already placed on this layer, which pushed tracks keep clear of.
+    fn held(r: &Route) -> Vec<(P, P)> {
+        r.segs.iter().filter(|s| s.2 == r.layer).map(|s| (s.0, s.1)).collect()
     }
 
     /// Asks the router what it would lay to `to`, unless it already knows.
@@ -193,8 +203,8 @@ impl App {
             return;
         }
         let area = self.doc.outline_bbox();
-        let obs = self.route_obstacles().to_vec();
-        let plan = router::plan(&obs, r.from, to, r.width, m.corner, r.flip, m.conflict, area);
+        self.route_scene();
+        let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
         self.plan = Some(PlanCache { key, plan, to, item });
     }
 
@@ -219,8 +229,25 @@ impl App {
         let arrived = !c.plan.blocked && self.arrives(&r, end, c.to, c.item);
         let upto = if arrived || !self.route_mode.look_ahead || pts.len() <= 2 { pts.len() } else { pts.len() - 1 };
         let net = if arrived && r.net == 0 { c.item.map(|i| self.net_of(i)).unwrap_or(0) } else { r.net };
+        // What this click pushes aside: all of the plan's pushes when it
+        // places the whole plan, else just enough for the part it places.
+        let pushed = if c.plan.pushed.is_empty() {
+            Vec::new()
+        } else if upto == pts.len() {
+            c.plan.pushed.clone()
+        } else {
+            self.route_scene();
+            let mut segs = App::held(&r);
+            segs.extend(pts[..upto].windows(2).map(|s| (s[0], s[1])));
+            router::shove(&self.obstacles.scene, &segs, r.width).unwrap_or_default()
+        };
+        let doc_before = (!pushed.is_empty()).then(|| self.doc.clone());
+        if !pushed.is_empty() {
+            router::apply_pushed(&mut self.doc, &pushed);
+            self.touch();
+        }
         let Some(route) = &mut self.route else { return };
-        route.marks.push(Mark { segs: route.segs.len(), vias: route.vias.len(), from: route.from, layer: route.layer });
+        route.marks.push(Mark { segs: route.segs.len(), vias: route.vias.len(), from: route.from, layer: route.layer, doc: doc_before });
         for s in pts[..upto].windows(2) {
             if !s[0].same(s[1]) {
                 route.segs.push((s[0], s[1], route.layer));
@@ -265,8 +292,8 @@ impl App {
             return;
         };
         let area = self.doc.outline_bbox();
-        let obs = self.route_obstacles().to_vec();
-        let plan = router::plan(&obs, r.from, to, r.width, self.route_mode.corner, r.flip, Conflict::Walkaround, area);
+        self.route_scene();
+        let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, self.route_mode.corner, r.flip, Conflict::Walkaround, area, &[]);
         if plan.blocked {
             self.notice = Some("There's no clear way to finish this on this layer.".into());
             return;
@@ -284,7 +311,7 @@ impl App {
         let Some(r) = &mut self.route else { return };
         let fresh = !r.vias.last().is_some_and(|v| v.same(r.from));
         if fresh || to_layer.is_some() {
-            r.marks.push(Mark { segs: r.segs.len(), vias: r.vias.len(), from: r.from, layer: r.layer });
+            r.marks.push(Mark { segs: r.segs.len(), vias: r.vias.len(), from: r.from, layer: r.layer, doc: None });
         }
         if fresh {
             r.vias.push(r.from);
@@ -313,6 +340,11 @@ impl App {
                 r.from = m.from;
                 r.layer = m.layer;
                 self.layer = m.layer;
+                // Whatever that click pushed goes back where it was.
+                if let Some(doc) = m.doc {
+                    self.doc = doc;
+                    self.touch();
+                }
             }
             None => self.route = None,
         }
@@ -323,15 +355,23 @@ impl App {
     /// path the new one makes redundant.
     pub fn finish_route(&mut self) {
         self.plan = None;
-        let Some(r) = self.route.take() else { return };
+        let Some(mut r) = self.route.take() else { return };
+        let before = r.before.take().unwrap_or_else(|| self.doc.clone());
         if r.segs.is_empty() {
+            if self.doc != before {
+                self.doc = before;
+                self.touch();
+            }
             return;
         }
         let rules = self.doc.rules.clone();
         let loops = self.route_mode.remove_loops && r.net != 0;
         let spare_before = if loops { router::spare_tracks(&self.doc, r.net) } else { Vec::new() };
         let mut removed = 0;
-        self.edit(|b| {
+        // One undo for the route and everything it pushed.
+        let mut board = self.doc.clone();
+        let b = &mut board;
+        {
             let mut new = Vec::new();
             for (a, e, layer) in &r.segs {
                 let id = b.new_id();
@@ -351,9 +391,21 @@ impl App {
                 removed = count - b.tracks.len();
             }
             crate::ui::app::merge_straight(b);
-        });
+        }
+        self.doc = board;
+        if self.doc != before {
+            self.remember(before);
+        }
         if removed > 0 {
             self.notice = Some(format!("Took out {removed} old track{} the new route replaces.", if removed == 1 { "" } else { "s" }));
         }
+    }
+}
+
+impl Route {
+    /// The board as it was before the route began, if the route has
+    /// pushed anything since.
+    pub fn take_before(&mut self) -> Option<Board> {
+        self.before.take()
     }
 }

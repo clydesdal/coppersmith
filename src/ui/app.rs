@@ -365,7 +365,14 @@ impl App {
             self.doc = d.before;
             self.touch();
         }
-        self.route = None;
+        // A route in progress may have pushed tracks aside: put them back.
+        if let Some(before) = self.route.take().and_then(|mut r| r.take_before())
+            && before != self.doc
+        {
+            self.doc = before;
+            self.touch();
+        }
+        self.plan = None;
         self.outline.clear();
         self.box_from = None;
     }

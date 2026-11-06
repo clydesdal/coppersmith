@@ -23,9 +23,13 @@ auto-complete, vias mid-route on any layer, width sources, Backspace undoes a
 click, loop and stub removal after re-routing, clearance shading, the routing
 pill.
 
+Done in 0.3: Push. Other nets' tracks bend aside as runs between their fixed
+ends, cascading, springing back until clicked, with undo and Backspace.
+
 Next:
-- Push obstacles and hug-and-push: shove other nets' tracks and vias aside,
-  springing back if the route moves away.
+- Push vias too (Altium's "Allow via pushing"), and hug-and-push (follow
+  obstacles closely, pushing only when there's no room).
+- Push on the layers a via passes through, not just the routing layer.
 - Arc corner modes (45° and 90° with arcs, arc radius keys), which need arcs
   as a track shape in the board model, the rule check and the Gerber writer.
 - Gloss: re-smooth the routed and neighbouring tracks after each click.

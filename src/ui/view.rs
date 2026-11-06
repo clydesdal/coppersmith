@@ -559,6 +559,9 @@ impl App {
             None => 1.0,
         };
         let active = Layer::Cu(self.layer);
+        // Tracks a push would move are drawn where they'd go, not where they are.
+        let pushed: std::collections::HashSet<u32> =
+            self.plan.iter().flat_map(|c| c.plan.pushed.iter().flat_map(|m| m.ids.iter().copied())).collect();
 
         for layer in self.draw_order() {
             if !self.shows(layer) {
@@ -574,7 +577,7 @@ impl App {
             };
             match layer {
                 Layer::Cu(l) => {
-                    for t in doc.tracks.iter().filter(|t| t.layer == l) {
+                    for t in doc.tracks.iter().filter(|t| t.layer == l && !pushed.contains(&t.id)) {
                         fill_blob(painter, tr, &t.blob(), fade(base, strength * keep(t.net)));
                     }
                     for f in doc.footprints.iter().filter(|f| f.copper() == l) {
@@ -794,11 +797,20 @@ impl App {
         if self.route_mode.show_clearance {
             let around = self.route_target.map(|t| t.0).unwrap_or(r.from);
             let reach = BBox::of(&[around, r.from]).grown(6.0);
-            for o in &self.obstacles.list {
+            for o in &self.obstacles.scene.own {
                 if o.bbox.touches(&reach) && o.item.is_some() {
                     let grown = Blob { core: o.blob.core.clone(), r: o.blob.r + o.gap + r.width / 2.0 };
                     fill_blob(painter, tr, &grown, Color32::from_white_alpha(14));
                     stroke_blob(painter, tr, &grown, Stroke::new(1.0, Color32::from_white_alpha(45)));
+                }
+            }
+        }
+        if let Some(c) = &self.plan {
+            for m in &c.plan.pushed {
+                for s in m.pts.windows(2) {
+                    let seg = Blob::line(s[0], s[1], m.w);
+                    fill_blob(painter, tr, &seg, fade(layer_color(Layer::Cu(m.layer)), 0.85));
+                    stroke_blob(painter, tr, &seg, Stroke::new(1.0, Color32::from_white_alpha(70)));
                 }
             }
         }
@@ -882,7 +894,15 @@ impl App {
         }
         if let Some(r) = &self.route {
             let m = &self.route_mode;
-            let blocked = if self.plan.as_ref().is_some_and(|c| c.plan.blocked) { " · blocked" } else { "" };
+            let blocked = match &self.plan {
+                Some(c) if c.plan.blocked => " · blocked".to_string(),
+                Some(c) if c.plan.note.is_some() => format!(" · {}", c.plan.note.unwrap_or_default()),
+                Some(c) if !c.plan.pushed.is_empty() => {
+                    let n = c.plan.pushed.len();
+                    format!(" · pushing {n} track{}", if n == 1 { "" } else { "s" })
+                }
+                _ => String::new(),
+            };
             let text = format!(
                 "Routing {} · {} · {} · {}{blocked}",
                 self.doc.net_name(r.net),
@@ -1015,7 +1035,7 @@ impl App {
         }
         ui.separator();
         label(ui, "When something's in the way  ·  Shift+R");
-        for c in [Conflict::Walkaround, Conflict::Stop, Conflict::Ignore] {
+        for c in [Conflict::Walkaround, Conflict::Push, Conflict::Stop, Conflict::Ignore] {
             if ui.selectable_label(m.conflict == c, c.name()).clicked() {
                 m.conflict = c;
             }
