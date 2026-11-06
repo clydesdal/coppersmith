@@ -397,6 +397,34 @@ pub fn ring_area(ring: &[P]) -> f64 {
     (0..n).map(|i| ring[i].cross(ring[(i + 1) % n])).sum::<f64>() / 2.0
 }
 
+/// Whether a ring turns the same way at every corner.
+pub fn is_convex(ring: &[P]) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return false;
+    }
+    let mut sign = 0.0;
+    for i in 0..n {
+        let c = ring[(i + 1) % n].sub(ring[i]).cross(ring[(i + 2) % n].sub(ring[(i + 1) % n]));
+        if c.abs() < 1e-12 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = c.signum();
+        } else if c.signum() != sign {
+            return false;
+        }
+    }
+    sign != 0.0
+}
+
+/// The gap between two boxes, 0 where they overlap.
+pub fn box_gap(a: &BBox, b: &BBox) -> f64 {
+    let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);
+    let dy = (a.min.y - b.max.y).max(b.min.y - a.max.y).max(0.0);
+    dx.hypot(dy)
+}
+
 /// A shape cut into triangles: the indices point into `pts`.
 pub fn triangulate(ring: &[P]) -> Vec<u32> {
     let mut idx: Vec<u32> = Vec::new();

@@ -158,6 +158,15 @@ pub fn files(board: &Board) -> Vec<(String, String)> {
             n => (format!("G{n}"), format!("Copper,L{},Inr", k + 1)),
         };
         let mut g = Gerber::new(&function, false);
+        // Pours, each island one region, its holes joined by cut-ins.
+        for pour in board.pours.iter().filter(|p| p.layer == layer) {
+            for island in &pour.fill {
+                g.region(&crate::pcb::pour::fracture(&island.rings));
+            }
+        }
+        for fill in board.fills.iter().filter(|f| f.layer == layer) {
+            g.region(&fill.pts);
+        }
         for f in &board.footprints {
             for (i, pad) in f.pads.iter().enumerate() {
                 if pad.bare_hole() || !(pad.through() || f.copper() == layer) {

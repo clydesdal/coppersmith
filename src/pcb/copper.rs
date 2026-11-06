@@ -10,6 +10,17 @@ pub enum Item {
     Pad(u32, u16),
     Track(u32),
     Via(u32),
+    /// One island of a pour.
+    Pour(u32, u16),
+    Fill(u32),
+}
+
+impl Item {
+    /// Copper that pours itself again after every change, so routing and
+    /// moving don't treat it as in the way.
+    pub fn poured(self) -> bool {
+        matches!(self, Item::Pour(..))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,22 +52,45 @@ pub struct Cu {
     pub blob: Blob,
     /// All of it, as pieces: just `blob`, or the many pieces of an arc.
     pub parts: Vec<Blob>,
+    /// Each part's box.
+    pub boxes: Vec<BBox>,
     pub bbox: BBox,
     pub on: On,
     pub net: u32,
     /// Where a "still to connect" line can end.
     pub anchors: Vec<P>,
+    /// For a pour: the clearance it keeps from other nets and from the edge,
+    /// where they differ from the board's rules.
+    pub keeps: Option<(f64, f64)>,
 }
 
 impl Cu {
-    /// The gap to another piece of copper, and the nearest points.
-    pub fn gap(&self, o: &Cu) -> (f64, P, P) {
+    fn new(item: Item, blob: Blob, parts: Vec<Blob>, on: On, net: u32, anchors: Vec<P>) -> Cu {
+        let boxes: Vec<BBox> = parts.iter().map(|b| b.bbox()).collect();
+        let mut bbox = BBox::default();
+        for b in &boxes {
+            bbox.union(b);
+        }
+        Cu { item, blob, parts, boxes, bbox, on, net, anchors, keeps: None }
+    }
+
+    /// The gap to another piece of copper and the nearest points, worked
+    /// out exactly only where it could be under `limit`;
+    /// otherwise anything at least `limit`.
+    pub fn gap_within(&self, o: &Cu, limit: f64) -> (f64, P, P) {
         let mut best = (f64::MAX, P::default(), P::default());
-        for a in &self.parts {
-            for b in &o.parts {
+        let (small, big) = if self.parts.len() <= o.parts.len() { (self, o) } else { (o, self) };
+        for (a, ab) in small.parts.iter().zip(&small.boxes) {
+            if box_gap(ab, &big.bbox) >= best.0.min(limit) {
+                continue;
+            }
+            for (b, bb) in big.parts.iter().zip(&big.boxes) {
+                if box_gap(ab, bb) >= best.0.min(limit) {
+                    continue;
+                }
                 let g = a.gap(b);
                 if g.0 < best.0 {
-                    best = g;
+                    best = if std::ptr::eq(small, self) { g } else { (g.0, g.2, g.1) };
                 }
             }
         }
@@ -84,7 +118,30 @@ pub struct Copper {
     pub index: HashMap<Item, usize>,
 }
 
+/// All the copper, pours included.
 pub fn collect(board: &Board) -> Vec<Cu> {
+    let mut items = collect_fixed(board);
+    for pour in &board.pours {
+        for (k, island) in pour.fill.iter().enumerate() {
+            let parts: Vec<Blob> = island.tris.iter().map(|t| Blob { core: t.to_vec(), r: 0.0 }).collect();
+            if parts.is_empty() {
+                continue;
+            }
+            // Where a "still to connect" line may end: corners round it.
+            let ring = &island.rings[0];
+            let step = (ring.len() / 24).max(1);
+            let anchors: Vec<P> = ring.iter().step_by(step).copied().collect();
+            let mut cu = Cu::new(Item::Pour(pour.id, k as u16), parts[0].clone(), parts, On::One(pour.layer), pour.net, anchors);
+            let near = if pour.plane { board.rules.clearance } else { pour.clearance };
+            cu.keeps = Some((near, pour.edge));
+            items.push(cu);
+        }
+    }
+    items
+}
+
+/// The copper that stays put: everything but pours.
+pub fn collect_fixed(board: &Board) -> Vec<Cu> {
     let mut items = Vec::new();
     for f in &board.footprints {
         for (i, pad) in f.pads.iter().enumerate() {
@@ -93,32 +150,23 @@ pub fn collect(board: &Board) -> Vec<Cu> {
             }
             let blob = f.pad_blob(i, 0.0);
             let on = if pad.through() { On::All } else { On::One(f.copper()) };
-            items.push(Cu {
-                item: Item::Pad(f.id, i as u16),
-                bbox: blob.bbox(),
-                parts: vec![blob.clone()],
-                blob,
-                on,
-                net: pad.net,
-                anchors: vec![f.pad_center(i)],
-            });
+            items.push(Cu::new(Item::Pad(f.id, i as u16), blob.clone(), vec![blob], on, pad.net, vec![f.pad_center(i)]));
         }
     }
     for t in &board.tracks {
-        let parts = t.blobs();
-        items.push(Cu {
-            item: Item::Track(t.id),
-            bbox: t.bbox(),
-            blob: t.blob(),
-            parts,
-            on: On::One(t.layer),
-            net: t.net,
-            anchors: vec![t.a, t.b],
-        });
+        items.push(Cu::new(Item::Track(t.id), t.blob(), t.blobs(), On::One(t.layer), t.net, vec![t.a, t.b]));
     }
     for v in &board.vias {
         let blob = v.blob();
-        items.push(Cu { item: Item::Via(v.id), bbox: blob.bbox(), parts: vec![blob.clone()], blob, on: On::All, net: v.net, anchors: vec![v.at] });
+        items.push(Cu::new(Item::Via(v.id), blob.clone(), vec![blob], On::All, v.net, vec![v.at]));
+    }
+    for f in &board.fills {
+        let parts: Vec<Blob> = f.pieces().into_iter().map(|core| Blob { core, r: 0.0 }).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let anchors = vec![BBox::of(&f.pts).center()];
+        items.push(Cu::new(Item::Fill(f.id), parts[0].clone(), parts, On::One(f.layer), f.net, anchors));
     }
     items
 }
@@ -150,15 +198,25 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
     i
 }
 
+/// Connectivity and still-to-connect lines, pours included.
 pub fn analyse(board: &Board) -> Copper {
-    let items = collect(board);
+    analyse_items(collect(board))
+}
+
+/// The same leaving pours out: for checking a change before the pours are
+/// poured again round it.
+pub fn analyse_fixed(board: &Board) -> Copper {
+    analyse_items(collect_fixed(board))
+}
+
+fn analyse_items(items: Vec<Cu>) -> Copper {
     let mut parent: Vec<usize> = (0..items.len()).collect();
     for (i, j) in near_pairs(&items, 0.0) {
         let (a, b) = (&items[i], &items[j]);
         if a.net == 0 || a.net != b.net || !a.on.shares(b.on) {
             continue;
         }
-        if a.gap(b).0 <= 1e-6 {
+        if a.gap_within(b, 1e-6).0 <= 1e-6 {
             let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
             parent[ri] = rj;
         }

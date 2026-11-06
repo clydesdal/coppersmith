@@ -192,7 +192,7 @@ pub fn footprint(
                 None if prims::is_copper(head.layer) => skipped.copper_drawing += 1,
                 None => {}
             },
-            Prim::Region { head, pts } => match layer_for(head.layer) {
+            Prim::Region { head, pts, .. } => match layer_for(head.layer) {
                 Some(l) if pts.len() >= 3 => {
                     let pts: Vec<P> = pts.iter().map(|q| local(*q).rounded()).collect();
                     let bb = BBox::of(&pts);

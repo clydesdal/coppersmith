@@ -1,6 +1,6 @@
 [package]
 name = "coppersmith"
-version = "0.3.14"
+version = "0.3.15"
 edition = "2024"
 rust-version = "1.88"
 description = "Lay out printed circuit boards: place parts, route copper, check the rules, and write Gerbers."
@@ -14,6 +14,7 @@ cfb = "0.16.0"
 earcut = "0.4"
 eframe = { version = "0.37.0", default-features = false, features = ["glow"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+i_overlay = "9.1"
 png = "0.18"
 rfd = { version = "0.17.2", default-features = false }
 serde = { version = "1", features = ["derive"] }

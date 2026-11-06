@@ -19,7 +19,34 @@ to it.
 | Route | W | Click a pad, via or track to start. Routing works like Altium's: see below. |
 | Via | V | Click to drop a via; it takes the net of what it lands on. |
 | Outline | O | Click the board's corners; click the first corner (or Enter) to close. |
+| Pour | P | Click a copper pour's corners on the layer in use; click the first corner (or Enter) to close. It takes the lit-up net, or the net under its first corner, or GND. See below. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
+
+### Copper pours and planes
+
+A pour fills its outline with copper on one layer, keeping its clearance from
+everything of other nets, from holes and from the board's edge. Pads of its
+own net join it solid or by thermal relief (four spokes across a gap round
+the pad). Pieces that touch nothing of its net, pieces smaller than a set
+area, and necks narrower than a set width are taken out. Pours go down in
+their pour order, each later one keeping clear of those before it.
+
+Pours pour again by themselves whenever a change is finished; while a part
+is dragged or a route is laid they keep their old shape, and the router and
+pushing take no notice of them, as they'll make way afterwards. Pick a pour
+by its dashed outline, or click inside it; its card on the right sets the
+net, layer, clearances, how pads join, and the rest. Dragging a pour moves it.
+
+A **power plane** is a pour that ticks *Power plane* (and usually *Covers
+the whole board*) on an inner layer: it keeps clear of other nets' holes by
+its clearance measured from the hole, as Altium's planes do, and keeps every
+piece. Planes are written as ordinary positive copper layers.
+
+A **fill** is copper of a fixed shape (an Altium fill or solid region).
+Routing treats it like any other copper.
+
+Gerbers write each poured piece as one region, its holes joined to the
+outline by cut-ins.
 
 ### Moving keeps the corners
 
@@ -224,11 +251,19 @@ editor still to come. Writing Altium libraries is next.
 
 **Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in
 unsaved, as a new Coppersmith board: outline, copper layers, parts (with
-their footprints as placed), nets, tracks, arcs and vias, and the design
-rules (clearance from the clearance table, track widths, via sizes, mask
-and edge clearance). Pours, fills, free pads and plane layers aren't brought
-in yet; the status bar says what was left out. Part names sit at
-Coppersmith's usual spot, not where Altium had them.
+their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (clearance from the
+clearance table, track widths, via sizes, mask and edge clearance).
+
+Pours come in as pours, from their outlines and settings (pour order,
+dead copper and small-island removal, neck width), with the clearance the
+rules give polygons and the polygon-connect rule's direct or relief joins,
+and are poured again here rather than copied, so they stay live. Plane
+layers become plane pours: one per split plane, or the whole board for a
+plane layer with a net and no splits, with the plane clearance and
+plane-connect rules and the layer's pullback from the edge. Hatched pours
+are poured solid; pour cutouts, shelved pours and free pads are left out.
+The status bar says what was left out. Part names sit at Coppersmith's
+usual spot, not where Altium had them.
 
     coppersmith --read-altium BOARD.CSPcbDoc
     coppersmith --read-altium SHEET.SchDoc
@@ -265,6 +300,7 @@ What each computer needs besides Rust:
         model.rs       the board, parts, pads, tracks, vias, nets, rules; the .cspcb file
         library.rs     built-in footprints and your footprint files
         copper.rs      what touches what, and the still-to-connect lines
+        pour.rs        pouring copper pours and planes
         drc.rs         the rule check
         router.rs      the interactive router: corner styles, walk round, push, arcs, loops
         slide.rs       moving tracks without losing their 45° corners

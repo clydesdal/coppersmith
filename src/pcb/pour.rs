@@ -1,0 +1,422 @@
+//! Pouring copper: each pour fills its outline (or, for a plane, the whole
+//! board) with copper, less a clearance round everything of other nets, the
+//! board's edge, and pours poured before it. Pads of its own net are joined
+//! solid or by thermal relief spokes; necks too narrow and pieces that touch
+//! nothing of the net are taken out.
+//!
+//! Every cut is drawn just outside the true round shape it stands for, so
+//! poured copper is never closer than the clearance, by the rule check's
+//! own measure.
+
+use crate::pcb::copper::{self, Item};
+use crate::pcb::geom::*;
+use crate::pcb::model::*;
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::single::SingleFloatOverlay;
+use i_overlay::float::slice::FloatSlice;
+use i_overlay::mesh::float::outline::offset::OutlineOffset;
+use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
+
+type Pt = [f64; 2];
+type Ring = Vec<Pt>;
+type Shape = Vec<Ring>;
+
+/// How much further out than the rule every cut goes, against rounding.
+const MARGIN: f64 = 0.0005;
+/// The size of the tiles a pour is cut into for checking.
+const TILE: f64 = 2.0;
+
+fn to(ring: &[P]) -> Ring {
+    ring.iter().map(|q| [q.x, q.y]).collect()
+}
+
+fn from(ring: &[Pt]) -> Vec<P> {
+    ring.iter().map(|q| p(q[0], q[1])).collect()
+}
+
+fn ccw(mut ring: Vec<P>) -> Vec<P> {
+    if ring_area(&ring) < 0.0 {
+        ring.reverse();
+    }
+    ring
+}
+
+/// A blob grown by `by`, its round parts drawn round the outside of the
+/// true circle so nothing inside the ring is nearer than `by`.
+fn cut(b: &Blob, by: f64) -> Ring {
+    let r = b.r + by;
+    if r <= 0.0 {
+        return to(&ccw(b.core.clone()));
+    }
+    let steps = circle_steps(r) as f64;
+    let r_out = r / (std::f64::consts::PI / steps).cos() + MARGIN;
+    to(&ccw(grown_ring(&b.core, r_out)))
+}
+
+fn rings_of(shapes: &[Shape]) -> Vec<Ring> {
+    shapes.iter().flatten().cloned().collect()
+}
+
+fn overlay(a: &[Ring], b: &[Ring], rule: OverlayRule) -> Vec<Shape> {
+    if a.is_empty() {
+        return Vec::new();
+    }
+    if b.is_empty() && rule != OverlayRule::Intersect {
+        return a.to_vec().overlay(&Vec::<Ring>::new(), OverlayRule::Subject, FillRule::NonZero);
+    }
+    a.to_vec().overlay(&b.to_vec(), rule, FillRule::NonZero)
+}
+
+/// Grows (or with a negative `by`, shrinks) shapes, with round corners.
+fn offset(shapes: &[Shape], by: f64) -> Vec<Shape> {
+    if shapes.is_empty() || by == 0.0 {
+        return shapes.to_vec();
+    }
+    let style = OutlineStyle::new(by).line_join(LineJoin::Round(0.1));
+    shapes.to_vec().outline(&style)
+}
+
+fn shape_area(s: &Shape) -> f64 {
+    s.iter().map(|r| ring_area(&from(r))).sum()
+}
+
+fn in_shape(q: P, s: &[Vec<P>]) -> bool {
+    !s.is_empty() && point_in_ring(q, &s[0]) && !s[1..].iter().any(|h| point_in_ring(q, h))
+}
+
+/// Everything about the board a pour on `layer` needs to keep clear of or join.
+struct Around {
+    /// Fixed copper (no pours), with its holes.
+    items: Vec<(copper::Cu, f64)>,
+    bare_holes: Vec<Blob>,
+}
+
+fn around(board: &Board) -> Around {
+    let drill = |item: Item| -> f64 {
+        match item {
+            Item::Via(id) => board.via(id).map(|v| v.drill).unwrap_or(0.0),
+            Item::Pad(f, i) => board.fp(f).and_then(|f| f.pads.get(i as usize)).map(|p| if p.through() { p.drill } else { 0.0 }).unwrap_or(0.0),
+            _ => 0.0,
+        }
+    };
+    let items = copper::collect_fixed(board).into_iter().map(|c| {
+        let d = drill(c.item);
+        (c, d)
+    }).collect();
+    let mut bare_holes = Vec::new();
+    for f in &board.footprints {
+        for (i, pad) in f.pads.iter().enumerate() {
+            if pad.bare_hole() {
+                bare_holes.push(Blob::dot(f.pad_center(i), pad.drill));
+            }
+        }
+    }
+    Around { items, bare_holes }
+}
+
+/// Pours every pour on the board, in order.
+pub fn repour(board: &mut Board) {
+    if board.pours.is_empty() {
+        return;
+    }
+    let env = around(board);
+    let mut order: Vec<usize> = (0..board.pours.len()).collect();
+    order.sort_by_key(|&i| (board.pours[i].plane, board.pours[i].order, board.pours[i].id));
+    let mut done: Vec<(u8, u32, f64, Vec<Shape>)> = Vec::new();
+    for i in order {
+        let shapes = pour_one(board, &board.pours[i], &env, &done);
+        let pour = &board.pours[i];
+        let islands = finish(board, pour, &env, &shapes);
+        done.push((pour.layer, pour.net, pour.clearance, islands.iter().map(|is| is.rings.iter().map(|r| to(r)).collect()).collect()));
+        board.pours[i].fill = islands;
+    }
+}
+
+fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec<Shape>)]) -> Vec<Shape> {
+    let layer = pour.layer;
+    let area_ring = pour.area(board);
+    if area_ring.len() < 3 || board.outline.len() < 3 {
+        return Vec::new();
+    }
+    // Where it may go: its outline, on the board.
+    let mut area = overlay(&[to(&ccw(area_ring.to_vec()))], &[to(&ccw(board.outline.clone()))], OverlayRule::Intersect);
+
+    // Clear of other nets, holes and the edge.
+    let near = if pour.plane { board.rules.clearance.max(0.0) } else { pour.clearance };
+    let mut away: Vec<Ring> = Vec::new();
+    let o = &board.outline;
+    for k in 0..o.len() {
+        away.push(cut(&Blob::line(o[k], o[(k + 1) % o.len()], 0.0), pour.edge));
+    }
+    for h in &env.bare_holes {
+        away.push(cut(h, near));
+    }
+    let mut reliefs: Vec<Ring> = Vec::new();
+    let mut spokes: Vec<Ring> = Vec::new();
+    for (cu, drill) in &env.items {
+        if !cu.on.has(layer) {
+            continue;
+        }
+        let ours = pour.net != 0 && cu.net == pour.net;
+        if !ours {
+            for part in &cu.parts {
+                away.push(cut(part, near));
+            }
+            if pour.plane && *drill > 0.0 {
+                away.push(cut(&Blob::dot(cu.anchors[0], *drill), pour.clearance));
+            }
+            continue;
+        }
+        // A pad of its own net, joined by spokes.
+        if pour.connect == Connect::Relief && matches!(cu.item, Item::Pad(..)) {
+            let b = &cu.blob;
+            reliefs.push(cut(b, pour.gap));
+            let c = cu.anchors[0];
+            let u = if b.core.len() >= 2 { b.core[1].sub(b.core[0]) } else { p(1.0, 0.0) };
+            let u = u.scale(1.0 / u.len().max(1e-12));
+            let v = p(-u.y, u.x);
+            let ring = b.ring();
+            for d in [u, v, u.scale(-1.0), v.scale(-1.0)] {
+                let reach = ring.iter().map(|q| q.sub(c).dot(d)).fold(0.0, f64::max) + pour.gap + pour.spoke;
+                let side = p(-d.y, d.x).scale(pour.spoke / 2.0);
+                let end = c.add(d.scale(reach));
+                spokes.push(to(&ccw(vec![c.add(side), end.add(side), end.sub(side), c.sub(side)])));
+            }
+        }
+    }
+    // Pours poured before this one, of other nets.
+    for (l, net, gap, shapes) in done {
+        if *l == layer && (*net != pour.net || pour.net == 0) {
+            let grown = offset(shapes, near.max(*gap) + MARGIN);
+            away.extend(rings_of(&grown));
+        }
+    }
+    area = overlay(&rings_of(&area), &away, OverlayRule::Difference);
+    let base = area.clone();
+    let mut fill = if reliefs.is_empty() { base.clone() } else { overlay(&rings_of(&base), &reliefs, OverlayRule::Difference) };
+    if pour.neck > 0.0 {
+        fill = offset(&offset(&fill, -pour.neck / 2.0), pour.neck / 2.0);
+        // Opening can only take away; keep it inside what was poured.
+        fill = overlay(&rings_of(&fill), &rings_of(&base), OverlayRule::Intersect);
+    }
+    if !spokes.is_empty() {
+        let joined = overlay(&spokes, &rings_of(&base), OverlayRule::Intersect);
+        fill = overlay(&rings_of(&fill), &rings_of(&joined), OverlayRule::Union);
+    }
+    fill
+}
+
+/// The poured shapes as islands: those too small or touching nothing of
+/// the net taken out, each cut into small triangles.
+fn finish(board: &Board, pour: &Pour, env: &Around, shapes: &[Shape]) -> Vec<Island> {
+    // Points that show an island touches its net.
+    let mut marks: Vec<P> = Vec::new();
+    for (cu, _) in &env.items {
+        if cu.net == pour.net && cu.on.has(pour.layer) {
+            marks.extend(cu.anchors.iter().copied());
+            if let Item::Track(_) = cu.item
+                && cu.anchors.len() == 2
+            {
+                marks.push(cu.anchors[0].lerp(cu.anchors[1], 0.5));
+            }
+            if matches!(cu.item, Item::Fill(_)) {
+                marks.extend(cu.parts.iter().map(|b| b.center()));
+            }
+        }
+    }
+    let _ = board;
+    let mut out = Vec::new();
+    for s in shapes {
+        let rings: Vec<Vec<P>> = s.iter().map(|r| from(r)).collect();
+        if rings.is_empty() || rings[0].len() < 3 {
+            continue;
+        }
+        let area = shape_area(s);
+        if area <= 1e-9 || area < pour.min_area {
+            continue;
+        }
+        if !pour.plane && pour.remove_islands && pour.net != 0 && !marks.iter().any(|q| in_shape(*q, &rings)) {
+            continue;
+        }
+        let tris = triangles(s);
+        out.push(Island { rings, tris, area });
+    }
+    out
+}
+
+/// Lines across a shape: one through each hole, and with `tile`, a grid.
+fn cuts(s: &Shape, tile: Option<f64>) -> Vec<Ring> {
+    let all: Vec<P> = s.iter().flat_map(|r| from(r)).collect();
+    let bb = BBox::of(&all);
+    let (y0, y1) = (bb.min.y - 1.0, bb.max.y + 1.0);
+    let mut lines: Vec<Ring> = Vec::new();
+    for h in &s[1..] {
+        let x = BBox::of(&from(h)).center().x;
+        lines.push(vec![[x, y0], [x, y1]]);
+    }
+    if let Some(t) = tile {
+        let (x0, x1) = (bb.min.x - 1.0, bb.max.x + 1.0);
+        let mut x = (bb.min.x / t).floor() * t + t;
+        while x < bb.max.x {
+            lines.push(vec![[x, y0], [x, y1]]);
+            x += t;
+        }
+        let mut y = (bb.min.y / t).floor() * t + t;
+        while y < bb.max.y {
+            lines.push(vec![[x0, y], [x1, y]]);
+            y += t;
+        }
+    }
+    lines
+}
+
+/// A shape with holes as one ring: each hole joined to what's left of it
+/// by a cut-in, a line out and back along the same path, as Gerber regions
+/// are written. Holes go in from the leftmost, each joined by a line run
+/// left from its leftmost corner to the nearest edge already in the ring.
+pub fn fracture(rings: &[Vec<P>]) -> Vec<P> {
+    let Some(outer) = rings.first() else { return Vec::new() };
+    let mut ring = outer.clone();
+    let mut holes: Vec<&Vec<P>> = rings[1..].iter().filter(|h| h.len() >= 3).collect();
+    let left = |h: &Vec<P>| (0..h.len()).min_by(|a, b| h[*a].x.total_cmp(&h[*b].x).then(h[*a].y.total_cmp(&h[*b].y))).unwrap_or(0);
+    holes.sort_by(|a, b| a[left(a)].x.total_cmp(&b[left(b)].x));
+    for h in holes {
+        let k = left(h);
+        let q = h[k];
+        // The nearest edge crossing the line run left from q.
+        let n = ring.len();
+        let mut best: Option<(f64, usize)> = None;
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a.y > q.y) == (b.y > q.y) {
+                continue;
+            }
+            let x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x <= q.x + 1e-12 && best.is_none_or(|(bx, _)| x > bx) {
+                best = Some((x, i));
+            }
+        }
+        let Some((x, i)) = best else { continue };
+        let at = p(x, q.y);
+        let mut joined = Vec::with_capacity(n + h.len() + 4);
+        joined.extend_from_slice(&ring[..=i]);
+        joined.push(at);
+        for j in 0..=h.len() {
+            joined.push(h[(k + j) % h.len()]);
+        }
+        joined.push(at);
+        joined.extend_from_slice(&ring[i + 1..]);
+        ring = joined;
+    }
+    ring
+}
+
+/// Small triangles covering a shape, for drawing and checking.
+fn triangles(s: &Shape) -> Vec<[P; 3]> {
+    let lines = cuts(s, Some(TILE));
+    let pieces = if lines.is_empty() { vec![s.clone()] } else { s.slice_by(&lines, FillRule::NonZero) };
+    let mut out = Vec::new();
+    for piece in &pieces {
+        let mut flat: Vec<[f64; 2]> = Vec::new();
+        let mut holes: Vec<usize> = Vec::new();
+        for (k, r) in piece.iter().enumerate() {
+            if k > 0 {
+                holes.push(flat.len());
+            }
+            flat.extend(r.iter().copied());
+        }
+        let mut idx: Vec<usize> = Vec::new();
+        earcut::Earcut::<f64>::new().earcut(flat.iter().copied(), &holes, &mut idx);
+        for t in idx.chunks(3) {
+            let q = |i: usize| p(flat[i][0], flat[i][1]);
+            let (a, b, c) = (q(t[0]), q(t[1]), q(t[2]));
+            let tri = if b.sub(a).cross(c.sub(a)) < 0.0 { [a, c, b] } else { [a, b, c] };
+            out.push(tri);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pad(b: &mut Board, at: P, net: u32, drill: f64) -> u32 {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.5, 1.5), rot: 0.0, shape: PadShape::Circle, drill, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+        id
+    }
+
+    #[test]
+    fn a_pour_keeps_clear_and_joins_its_pads() {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        pad(&mut b, p(10.0, 10.0), gnd, 0.0);
+        pad(&mut b, p(20.0, 10.0), sig, 0.0);
+        b.tracks.push(Track { mid: None, id: 900, a: p(20.0, 10.0), b: p(30.0, 30.0), w: 0.25, layer: TOP, net: sig });
+        let id = b.new_id();
+        let mut pour = Pour::new(id, TOP, gnd, rect_outline(p(0.0, 0.0), p(50.0, 40.0)), &b.rules);
+        pour.connect = Connect::Relief;
+        b.pours.push(pour);
+        b.repour();
+        let fill = &b.pours[0].fill;
+        assert_eq!(fill.len(), 1, "one piece");
+        assert!(fill[0].area > 1500.0, "{}", fill[0].area);
+        let c = copper::analyse(&b);
+        let found = crate::pcb::drc::check(&b, &c);
+        let bad: Vec<_> = found.iter().filter(|p| p.severity == crate::pcb::drc::Severity::Error).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        // The GND pad is joined to the pour, so nothing's left to connect.
+        assert!(c.rats.is_empty(), "{:?}", c.rats);
+    }
+
+    #[test]
+    fn islands_with_nothing_of_the_net_go() {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        pad(&mut b, p(5.0, 5.0), gnd, 0.0);
+        // A wall of SIG across the board cuts the pour in two.
+        b.tracks.push(Track { mid: None, id: 900, a: p(25.0, -1.0), b: p(25.0, 41.0), w: 1.0, layer: TOP, net: sig });
+        let id = b.new_id();
+        b.pours.push(Pour::new(id, TOP, gnd, Vec::new(), &b.rules));
+        b.repour();
+        assert_eq!(b.pours[0].fill.len(), 1);
+        b.pours[0].remove_islands = false;
+        b.repour();
+        assert_eq!(b.pours[0].fill.len(), 2);
+    }
+
+    #[test]
+    fn shrinking_takes_out_necks() {
+        let square: Vec<Shape> = vec![vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]]];
+        let small = offset(&square, -1.0);
+        assert!((shape_area(&small[0]) - 64.0).abs() < 0.1, "{}", shape_area(&small[0]));
+    }
+
+    #[test]
+    fn holes_join_the_outline_by_cut_ins() {
+        let hole = |a: P, b: P| {
+            let mut h = rect_outline(a, b);
+            h.reverse();
+            h
+        };
+        let rings = vec![rect_outline(p(0.0, 0.0), p(10.0, 10.0)), hole(p(4.0, 4.0), p(6.0, 6.0)), hole(p(7.0, 1.0), p(8.0, 2.0))];
+        let one = fracture(&rings);
+        // The cut-ins add no area: what's left is the square less its holes.
+        assert!((ring_area(&one) - 95.0).abs() < 1e-9, "{}", ring_area(&one));
+        assert!(!point_in_ring(p(5.0, 5.0), &one) && point_in_ring(p(2.0, 5.0), &one));
+    }
+}

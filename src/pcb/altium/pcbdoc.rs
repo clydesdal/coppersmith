@@ -78,10 +78,34 @@ fn rule_records(data: &[u8]) -> Vec<HashMap<String, String>> {
     out
 }
 
+/// How pours and planes are made, from the rules about them.
+#[derive(Clone, Copy, Debug)]
+struct AreaRules {
+    pour_clearance: f64,
+    pour_connect: Connect,
+    pour_spoke: f64,
+    pour_gap: f64,
+    plane_clearance: f64,
+    plane_connect: Connect,
+    plane_spoke: f64,
+    plane_gap: f64,
+}
+
 /// The board's design rules that Coppersmith has a place for. Each comes
 /// from the general rule of its kind: enabled, applying to everything, the
 /// lowest priority (Altium's fallback).
-fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) {
+fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules {
+    // Altium's defaults where a board has no rule.
+    let mut area = AreaRules {
+        pour_clearance: rules.clearance,
+        pour_connect: Connect::Relief,
+        pour_spoke: 0.254,
+        pour_gap: 0.254,
+        plane_clearance: 0.508,
+        plane_connect: Connect::Relief,
+        plane_spoke: 0.254,
+        plane_gap: 0.254,
+    };
     let general = |kind: &str| -> Option<&HashMap<String, String>> {
         recs.iter()
             .filter(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case(kind)))
@@ -109,6 +133,40 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) {
             (_, Some(v)) => rules.clearance = nm(v),
             _ => {}
         }
+        // Pours keep the table's polygon gaps, or where it has none, the
+        // general gap.
+        let poly = r.get("OBJECTCLEARANCES").map(|t| {
+            t.trim_end_matches('\0')
+                .split(';')
+                .filter_map(|e| e.split_once(':'))
+                .filter(|(k, _)| k.contains("Poly"))
+                .filter_map(|(_, v)| v.trim().parse::<f64>().ok())
+                .map(|v| v * super::UNIT)
+                .fold(f64::MAX, f64::min)
+        });
+        area.pour_clearance = match (poly, len(r, "GAP")) {
+            (Some(t), _) if t < f64::MAX && t > 0.0 => nm(t),
+            (_, Some(v)) => nm(v),
+            _ => rules.clearance,
+        };
+    } else {
+        area.pour_clearance = rules.clearance;
+    }
+    let style = |v: Option<&String>| if v.is_some_and(|s| s.trim().eq_ignore_ascii_case("Direct")) { Connect::Direct } else { Connect::Relief };
+    if let Some(r) = general("PolygonConnect") {
+        area.pour_connect = style(r.get("CONNECTSTYLE"));
+        area.pour_spoke = len(r, "RELIEFCONDUCTORWIDTH").map(nm).unwrap_or(area.pour_spoke);
+        area.pour_gap = len(r, "AIRGAPWIDTH").map(nm).unwrap_or(area.pour_gap);
+    }
+    if let Some(r) = general("PlaneConnect") {
+        area.plane_connect = style(r.get("PLANECONNECTSTYLE"));
+        area.plane_spoke = len(r, "RELIEFCONDUCTORWIDTH").map(nm).unwrap_or(area.plane_spoke);
+        area.plane_gap = len(r, "RELIEFAIRGAP").map(nm).unwrap_or(area.plane_gap);
+    }
+    if let Some(r) = general("PlaneClearance")
+        && let Some(v) = len(r, "CLEARANCE")
+    {
+        area.plane_clearance = nm(v);
     }
     if let Some(r) = general("Width") {
         if let Some(v) = len(r, "PREFEREDWIDTH") {
@@ -147,6 +205,58 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) {
         && let Some(v) = len(r, "GAP")
     {
         rules.edge_clearance = nm(v);
+    }
+    area
+}
+
+/// A ring from `VX0`, `VY0`, `KIND0`… (arcs given by `CX`, `CY`, `R`,
+/// `SA`, `EA`), counter-clockwise, through `at`.
+fn vertex_ring(rec: &HashMap<String, String>, at: &dyn Fn(P) -> P) -> Vec<P> {
+    let mut ring = Vec::new();
+    let n = (0..).take_while(|i| rec.contains_key(&format!("VX{i}"))).count();
+    for i in 0..n {
+        let k = |s: &str| rec.get(&format!("{s}{i}"));
+        let v = p(mil(k("VX")), mil(k("VY")));
+        if k("KIND").map(|s| s.trim()) == Some("1") {
+            let c = p(mil(k("CX")), mil(k("CY")));
+            let r = mil(k("R"));
+            let num = |s: Option<&String>| s.and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
+            let (sa, ea) = (num(k("SA")), num(k("EA")));
+            // Arcs run from the corner they start at; which way round
+            // depends on which end that corner is.
+            let start = c.add(p(sa.to_radians().cos(), sa.to_radians().sin()).scale(r));
+            let lines = prims::arc_lines(c, r, sa, ea);
+            let mut pts: Vec<P> = lines.iter().map(|l| l.0).chain(lines.last().map(|l| l.1)).collect();
+            if !start.same(v) {
+                pts.reverse();
+            }
+            ring.extend(pts.into_iter().map(at));
+        } else {
+            ring.push(at(v));
+        }
+    }
+    let mut ring = dedup_ring(ring);
+    if ring_area(&ring) < 0.0 {
+        ring.reverse();
+    }
+    ring
+}
+
+/// Altium's number for a layer named in a text record.
+fn layer_number(name: &str) -> Option<u8> {
+    let n = name.trim().to_ascii_uppercase();
+    match n.as_str() {
+        "TOP" => Some(TOP),
+        "BOTTOM" => Some(BOTTOM),
+        _ => {
+            if let Some(k) = n.strip_prefix("MID") {
+                k.parse::<u8>().ok().filter(|k| (1..=30).contains(k)).map(|k| k + 1)
+            } else if let Some(k) = n.strip_prefix("PLANE") {
+                k.parse::<u8>().ok().filter(|k| (1..=16).contains(k)).map(|k| k + 38)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -193,7 +303,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut board_rec: HashMap<String, String> = HashMap::new();
     let mut nets_recs = Vec::new();
     let mut comp_recs = Vec::new();
-    let mut polygons = 0usize;
+    let mut polygon_recs = Vec::new();
     let mut prims: Vec<Prim> = Vec::new();
     let mut circuit_studio = false;
     let mut rule_recs = Vec::new();
@@ -211,7 +321,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             Kind::Board => board_rec = text_records(&data).into_iter().next().unwrap_or_default(),
             Kind::Nets => nets_recs = text_records(&data),
             Kind::Components => comp_recs = text_records(&data),
-            Kind::Polygons => polygons += text_records(&data).len(),
+            Kind::Polygons => polygon_recs = text_records(&data),
             Kind::Rules => rule_recs = rule_records(&data),
             Kind::Prims => match prims::parse(&data) {
                 Ok(p) => prims.extend(p),
@@ -223,41 +333,26 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     if board_rec.is_empty() {
         return Err("no board settings found: is this a PcbDoc?".into());
     }
+    // Regions are kept twice, plainly and shape-based (with their arcs): one of each.
+    let mut seen = std::collections::HashSet::new();
+    prims.retain(|pr| match pr {
+        Prim::Region { head, pts, kind, cutout } => {
+            let bb = BBox::of(pts);
+            let k = |v: f64| (v * 1000.0).round() as i64;
+            seen.insert((head.layer, head.net, head.component, head.polygon, *kind, *cutout, k(bb.min.x), k(bb.min.y), k(bb.max.x), k(bb.max.y)))
+        }
+        _ => true,
+    });
     let mut notes = Vec::new();
     let origin = p(mil(board_rec.get("ORIGINX")), mil(board_rec.get("ORIGINY")));
     let at = |q: P| q.sub(origin).rounded();
     let names = layer_names(&board_rec.iter().map(|(k, v)| format!("|{k}={v}")).collect::<String>().into_bytes());
 
     let mut b = Board { name: name.to_string(), footprints: Vec::new(), outline: Vec::new(), ..Board::default() };
-    read_rules(&rule_recs, &mut b.rules);
+    let area_rules = read_rules(&rule_recs, &mut b.rules);
 
     // The outline: corners, and arcs between them.
-    let n = (0..).take_while(|i| board_rec.contains_key(&format!("VX{i}"))).count();
-    for i in 0..n {
-        let k = |s: &str| board_rec.get(&format!("{s}{i}"));
-        let v = p(mil(k("VX")), mil(k("VY")));
-        if k("KIND").map(|s| s.trim()) == Some("1") {
-            let c = p(mil(k("CX")), mil(k("CY")));
-            let r = mil(k("R"));
-            let num = |s: Option<&String>| s.and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
-            let (sa, ea) = (num(k("SA")), num(k("EA")));
-            // Arcs run from the corner they start at; which way round
-            // depends on which end that corner is.
-            let start = c.add(p(sa.to_radians().cos(), sa.to_radians().sin()).scale(r));
-            let lines = prims::arc_lines(c, r, sa, ea);
-            let mut pts: Vec<P> = lines.iter().map(|l| l.0).chain(lines.last().map(|l| l.1)).collect();
-            if !start.same(v) {
-                pts.reverse();
-            }
-            b.outline.extend(pts.into_iter().map(at));
-        } else {
-            b.outline.push(at(v));
-        }
-    }
-    b.outline = dedup_ring(b.outline);
-    if ring_area(&b.outline) < 0.0 {
-        b.outline.reverse();
-    }
+    b.outline = vertex_ring(&board_rec, &at);
 
     // The copper layers, top to bottom, following the stack.
     let mut stack = vec![TOP];
@@ -281,9 +376,6 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             _ => inner.iter().position(|x| *x == l).map(|i| i as u8 + 1),
         }
     };
-    if inner.iter().any(|l| (39..=54).contains(l)) {
-        notes.push("Plane layers came across as ordinary copper layers, without their split planes".into());
-    }
 
     // Nets, in the order the primitives count them.
     let mut net_ids: Vec<u32> = Vec::new();
@@ -366,20 +458,122 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
                 b.vias.push(Via { id, at: at(v), dia: nm(dia), drill: nm(hole), net: net(head.net) });
                 let _ = head;
             }
-            Prim::Region { head, .. } if prims::is_copper(head.layer) => pour_bits += 1,
-            Prim::Fill { head, .. } if prims::is_copper(head.layer) => copper_fills += 1,
+            Prim::Region { head, pts, kind, cutout } if prims::is_copper(head.layer) => {
+                if head.polygon != NONE {
+                    // Poured copper: poured again from the pour's outline.
+                    pour_bits += 1;
+                } else if kind != 0 || cutout {
+                    copper_fills += 1;
+                } else if let Some(l) = copper_of(head.layer)
+                    && pts.len() >= 3
+                {
+                    let mut pts: Vec<P> = dedup_ring(pts.into_iter().map(at).collect());
+                    if ring_area(&pts) < 0.0 {
+                        pts.reverse();
+                    }
+                    let id = b.new_id();
+                    b.fills.push(Fill { id, layer: l, net: net(head.net), pts });
+                }
+            }
+            Prim::Fill { head, a, b: e, rot } if prims::is_copper(head.layer) => {
+                if let Some(l) = copper_of(head.layer) {
+                    let (a, e) = (at(a), at(e));
+                    let pts = rect_core(a.lerp(e, 0.5), (e.x - a.x).abs(), (e.y - a.y).abs(), rot).into_iter().map(|q| q.rounded()).collect();
+                    let id = b.new_id();
+                    b.fills.push(Fill { id, layer: l, net: net(head.net), pts });
+                }
+            }
             Prim::Pad { head, .. } if head.layer == MULTI_LAYER || prims::is_copper(head.layer) => free_pads += 1,
             _ => {}
         }
     }
-    let _ = &mut blind;
-    if polygons > 0 {
-        notes.push(format!("{polygons} copper pours left out (pours aren't in Coppersmith yet); their nets show as still to connect"));
-    } else if pour_bits > 0 {
-        notes.push(format!("{pour_bits} pieces of copper pour left out"));
+    let _ = (&mut blind, pour_bits);
+
+    // Pours and split planes, poured again here from their outlines.
+    let (mut pours, mut hatched, mut shelved) = (0usize, 0usize, 0usize);
+    let mut split_layers: Vec<u8> = Vec::new();
+    for rec in &polygon_recs {
+        let get = |k: &str| rec.get(k).map(|s| s.trim().trim_end_matches('\0').to_string());
+        let Some(layer) = get("LAYER").and_then(|l| layer_number(&l)) else { continue };
+        let Some(l) = copper_of(layer) else { continue };
+        if get("SHELVED").as_deref() == Some("TRUE") {
+            shelved += 1;
+            continue;
+        }
+        let outline = vertex_ring(rec, &at);
+        if outline.len() < 3 {
+            continue;
+        }
+        let n = get("NET").and_then(|v| v.parse::<u16>().ok()).map(net).unwrap_or(0);
+        let id = b.new_id();
+        let mut pour = Pour::new(id, l, n, outline, &b.rules);
+        if get("POLYGONTYPE").is_some_and(|t| t.eq_ignore_ascii_case("Split Plane")) {
+            split_layers.push(layer);
+            let k = layer - 38;
+            pour.plane = true;
+            pour.clearance = area_rules.plane_clearance;
+            pour.edge = nm(mil(board_rec.get(&format!("PLANE{k}PULLBACK")).or(Some(&"20mil".to_string()))));
+            pour.connect = area_rules.plane_connect;
+            pour.spoke = area_rules.plane_spoke;
+            pour.gap = area_rules.plane_gap;
+            pour.remove_islands = false;
+        } else {
+            pours += 1;
+            if get("HATCHSTYLE").is_some_and(|h| !h.eq_ignore_ascii_case("Solid")) {
+                hatched += 1;
+            }
+            pour.clearance = area_rules.pour_clearance;
+            pour.connect = area_rules.pour_connect;
+            pour.spoke = area_rules.pour_spoke;
+            pour.gap = area_rules.pour_gap;
+            pour.remove_islands = get("REMOVEDEAD").as_deref() != Some("FALSE");
+            if get("REMOVEISLANDSBYAREA").as_deref() == Some("TRUE") {
+                // In Altium's units squared.
+                let a: f64 = get("AREATHRESHOLD").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                pour.min_area = a * super::UNIT * super::UNIT;
+            }
+            if get("REMOVENECKS").as_deref() == Some("TRUE") {
+                pour.neck = nm(mil(get("NECKWIDTHTHRESHOLD").as_ref()));
+            }
+        }
+        pour.order = get("POURINDEX").and_then(|v| v.parse().ok()).unwrap_or(id);
+        b.pours.push(pour);
+    }
+    // A plane layer with a net and no split planes is one plane, the whole board.
+    for &layer in &inner {
+        if !(39..=54).contains(&layer) || split_layers.contains(&layer) {
+            continue;
+        }
+        let k = layer - 38;
+        let name = board_rec.get(&format!("PLANE{k}NETNAME")).map(|s| s.trim().trim_end_matches('\0').to_string()).unwrap_or_default();
+        let n = if name.is_empty() || name == "(No Net)" { 0 } else { b.net_by_name(&name).unwrap_or(0) };
+        let Some(l) = copper_of(layer) else { continue };
+        let id = b.new_id();
+        let mut pour = Pour::new(id, l, n, Vec::new(), &b.rules);
+        pour.plane = true;
+        pour.clearance = area_rules.plane_clearance;
+        pour.edge = nm(mil(board_rec.get(&format!("PLANE{k}PULLBACK")).or(Some(&"20mil".to_string()))));
+        pour.connect = area_rules.plane_connect;
+        pour.spoke = area_rules.plane_spoke;
+        pour.gap = area_rules.plane_gap;
+        pour.remove_islands = false;
+        b.pours.push(pour);
+    }
+    if pours > 0 {
+        notes.push(format!("{pours} copper pour{} poured again here from {} outline{}", if pours == 1 { "" } else { "s" }, if pours == 1 { "its" } else { "their" }, if pours == 1 { "" } else { "s" }));
+    }
+    if hatched > 0 {
+        notes.push(format!("{hatched} hatched pour{} poured solid", if hatched == 1 { "" } else { "s" }));
+    }
+    if shelved > 0 {
+        notes.push(format!("{shelved} shelved pour{} left out", if shelved == 1 { "" } else { "s" }));
+    }
+    let planes = b.pours.iter().filter(|p| p.plane).count();
+    if planes > 0 {
+        notes.push(format!("{planes} power plane{} poured as positive copper", if planes == 1 { "" } else { "s" }));
     }
     if copper_fills > 0 {
-        notes.push(format!("{copper_fills} copper fills left out"));
+        notes.push(format!("{copper_fills} pour cutout{} left out", if copper_fills == 1 { "" } else { "s" }));
     }
     if free_pads > 0 {
         notes.push(format!("{free_pads} pads not belonging to a part left out"));
@@ -387,6 +581,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     if circuit_studio {
         notes.push("Read as a Circuit Studio board".into());
     }
+    b.repour();
     Ok(ImportedBoard { board: b, notes })
 }
 
@@ -420,6 +615,35 @@ mod tests {
         assert_eq!(p1.pads.len(), 2);
         // Each part's pads sit where Altium had them on the board.
         assert!(p1.pads.iter().all(|p| p.net != 0 || p.drill > 0.0));
+        // Its GND pour on the second inner layer, poured again here, joins
+        // every GND pad: nothing's left to connect and nothing's too close.
+        assert_eq!(b.pours.len(), 1);
+        let pour = &b.pours[0];
+        assert_eq!((b.net_name(pour.net), pour.layer), ("GND", 2));
+        assert!(pour.copper_area() > 1000.0, "{}", pour.copper_area());
+        let c = crate::pcb::copper::analyse(b);
+        let found = crate::pcb::drc::check(b, &c);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn list_fills() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/projects/J1939Plug/J1939PLUG.CSPcbDoc");
+        let got = read(&std::fs::read(&path).unwrap(), "j").unwrap();
+        assert_eq!(got.board.fills.len(), 19);
+        let mut b = got.board.clone();
+        let t = std::time::Instant::now();
+        b.repour();
+        let poured = t.elapsed();
+        let t = std::time::Instant::now();
+        let c = crate::pcb::copper::analyse(&b);
+        let found = crate::pcb::drc::check(&b, &c);
+        println!("repour {poured:?}, analyse+check {:?} ({} problems)", t.elapsed(), found.len());
+        for f in &got.board.fills {
+            let bb = BBox::of(&f.pts);
+            println!("{} {} {:.2} corners {} at {:.2},{:.2} size {:.2}x{:.2}", f.layer, got.board.net_name(f.net), ring_area(&f.pts), f.pts.len(), bb.center().x, bb.center().y, bb.w(), bb.h());
+        }
     }
 }
 

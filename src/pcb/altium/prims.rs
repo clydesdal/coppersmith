@@ -41,7 +41,9 @@ pub enum Prim {
     /// Angles in degrees, anticlockwise from `start` to `end`.
     Arc { head: Head, c: P, r: f64, start: f64, end: f64, w: f64 },
     Via { head: Head, at: P, dia: f64, hole: f64 },
-    Region { head: Head, pts: Vec<P> },
+    /// `kind` 0 is copper, 1 a pour cutout, 2 a dashed outline, 3 a cavity;
+    /// `cutout` marks a hole in the board.
+    Region { head: Head, pts: Vec<P>, kind: u8, cutout: bool },
     Fill { head: Head, a: P, b: P, rot: f64 },
     /// Text, 3D bodies and the like: counted, not drawn.
     Other { kind: u8, head: Option<Head> },
@@ -140,7 +142,9 @@ fn region(b: &[u8]) -> Result<Prim, String> {
     r.skip(5)?;
     r.u16()?; // holes
     r.skip(2)?;
-    r.block()?; // properties
+    let props = super::params(r.block()?);
+    let kind = props.get("KIND").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    let cutout = props.get("ISBOARDCUTOUT").is_some_and(|v| v.trim() == "TRUE");
     let n = r.u32()? as usize;
     // Two layouts: plain corners as two doubles each; or, in shape-based
     // regions, an extra closing corner and each corner as a flag, integer
@@ -163,7 +167,7 @@ fn region(b: &[u8]) -> Result<Prim, String> {
     // Anything not a sensible number (or further than ten metres out) is a
     // misread, not a shape.
     pts.retain(|q| q.x.is_finite() && q.y.is_finite() && q.x.abs() < 1e4 && q.y.abs() < 1e4);
-    Ok(Prim::Region { head: Head { layer, net, polygon, component }, pts })
+    Ok(Prim::Region { head: Head { layer, net, polygon, component }, pts, kind, cutout })
 }
 
 fn pad(blocks: &[&[u8]]) -> Result<Prim, String> {

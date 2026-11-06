@@ -31,6 +31,7 @@ pub enum Icon {
     Route,
     Via,
     Outline,
+    Pour,
     Chip,
     Save,
     New,
@@ -157,6 +158,13 @@ pub fn draw(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(2.2, 4.6), (9.0, 2.2), (13.8, 6.4), (12.4, 13.6), (3.6, 12.6)] {
                 p.circle_filled(at(x, y), 1.3 * k, color);
             }
+        }
+        Icon::Pour => {
+            // A shaded area with a pad cleared out of it.
+            let pts: Vec<Pos2> = [(2.4, 4.0), (8.6, 2.4), (13.6, 4.6), (13.6, 13.6), (2.4, 13.6)].iter().map(|q| at(q.0, q.1)).collect();
+            p.add(Shape::convex_polygon(pts, color.gamma_multiply(0.35), Stroke::NONE));
+            l(&[(2.4, 4.0), (8.6, 2.4), (13.6, 4.6), (13.6, 13.6), (2.4, 13.6), (2.4, 4.0)]);
+            p.circle_stroke(at(8.4, 9.0), 2.1 * k, Stroke::new(1.2 * k, color));
         }
         Icon::Chip => {
             l(&[(4.4, 3.0), (11.6, 3.0), (11.6, 13.0), (4.4, 13.0), (4.4, 3.0)]);

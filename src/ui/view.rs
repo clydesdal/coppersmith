@@ -119,6 +119,47 @@ fn ink(painter: &Painter, tr: &Tr, i: Ink, color: Color32) {
     }
 }
 
+/// How far a point is from a ring's edge.
+fn edge_dist(q: P, ring: &[P]) -> f64 {
+    let n = ring.len();
+    (0..n).map(|i| dist_to_segment(q, ring[i], ring[(i + 1) % n]).0).fold(f64::MAX, f64::min)
+}
+
+fn in_island(q: P, i: &Island) -> bool {
+    !i.rings.is_empty() && point_in_ring(q, &i.rings[0]) && !i.rings[1..].iter().any(|h| point_in_ring(q, h))
+}
+
+/// Triangles as one mesh.
+fn tri_mesh(painter: &Painter, tr: &Tr, tris: &[[P; 3]], color: Color32) {
+    let mut mesh = egui::Mesh::default();
+    for t in tris {
+        let base = mesh.vertices.len() as u32;
+        for q in t {
+            mesh.colored_vertex(tr.pt(*q), color);
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        // egui's meshes take up to 65k corners each.
+        if mesh.vertices.len() > 60_000 {
+            painter.add(Shape::mesh(std::mem::take(&mut mesh)));
+        }
+    }
+    if !mesh.is_empty() {
+        painter.add(Shape::mesh(mesh));
+    }
+}
+
+fn closed_line(painter: &Painter, tr: &Tr, ring: &[P], stroke: Stroke, dashed: bool) {
+    let mut pts: Vec<Pos2> = ring.iter().map(|q| tr.pt(*q)).collect();
+    if let Some(first) = pts.first().copied() {
+        pts.push(first);
+    }
+    if dashed {
+        painter.extend(Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+    } else {
+        painter.add(Shape::line(pts, stroke));
+    }
+}
+
 fn nice_step(grid: f64, scale: f64) -> f64 {
     let mut step = grid.max(0.01);
     for k in [2.0, 2.5, 2.0, 2.0, 2.5, 2.0, 2.0, 2.5, 2.0] {
@@ -161,7 +202,35 @@ impl App {
 
     /// Picks what's under a point, in the order a click should reach things.
     pub fn pick(&self, q: P, tol: f64) -> Option<Sel> {
+        self.pick_with(q, tol, true)
+    }
+
+    /// As `pick`; `inside_pours` lets a point inside a pour's copper pick
+    /// the pour (a click does; a drag there draws a box instead).
+    pub fn pick_with(&self, q: P, tol: f64, inside_pours: bool) -> Option<Sel> {
         let mut hits: Vec<(u8, f64, Sel)> = Vec::new();
+        for fl in &self.doc.fills {
+            if !self.shows(Layer::Cu(fl.layer)) {
+                continue;
+            }
+            let near = fl.layer == self.layer;
+            if point_in_ring(q, &fl.pts) {
+                hits.push((if near { 2 } else { 5 }, 0.0, Sel::Fill(fl.id)));
+            } else if edge_dist(q, &fl.pts) <= tol {
+                hits.push((if near { 2 } else { 5 }, edge_dist(q, &fl.pts), Sel::Fill(fl.id)));
+            }
+        }
+        for po in &self.doc.pours {
+            if !self.shows(Layer::Cu(po.layer)) {
+                continue;
+            }
+            let near = po.layer == self.layer;
+            if po.outline.len() >= 3 && edge_dist(q, &po.outline) <= tol {
+                hits.push((if near { 1 } else { 4 }, edge_dist(q, &po.outline), Sel::Pour(po.id)));
+            } else if inside_pours && near && po.fill.iter().any(|i| in_island(q, i)) {
+                hits.push((7, 0.0, Sel::Pour(po.id)));
+            }
+        }
         let any_copper = self.doc.copper_layers().iter().any(|l| self.shows(Layer::Cu(*l)));
         if any_copper {
             for v in &self.doc.vias {
@@ -214,6 +283,17 @@ impl App {
                     net(t.net),
                     self.unit.len(t.length())
                 ))
+            }
+            Sel::Pour(id) => {
+                let v = self.doc.pour(id)?;
+                let what = if v.plane { "Plane" } else { "Pour" };
+                let area = v.copper_area();
+                let pieces = if v.fill.len() == 1 { String::new() } else { format!(" in {} pieces", v.fill.len()) };
+                Some(format!("{what} {} on {} · {area:.1} mm²{pieces}", net(v.net), Layer::Cu(v.layer).name().to_lowercase()))
+            }
+            Sel::Fill(id) => {
+                let v = self.doc.fill(id)?;
+                Some(format!("Fill {} on {}", net(v.net), Layer::Cu(v.layer).name().to_lowercase()))
             }
             Sel::Fp(id) => {
                 let f = self.doc.fp(id)?;
@@ -342,7 +422,7 @@ impl App {
                             .filter_map(|i| match i {
                                 Item::Track(id) => Some(Sel::Track(id)),
                                 Item::Via(id) => Some(Sel::Via(id)),
-                                Item::Pad(..) => None,
+                                _ => None,
                             })
                             .collect();
                     }
@@ -403,6 +483,27 @@ impl App {
                     self.outline.pop();
                 }
             }
+            Tool::Pour => {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                let near_first = self.outline.len() >= 3 && tr.pt(self.outline[0]).distance(at) < 9.0;
+                if response.double_clicked() {
+                    self.close_pour();
+                } else if response.clicked() {
+                    if near_first {
+                        self.close_pour();
+                    } else {
+                        let c = q.snap(self.grid);
+                        if !self.outline.last().is_some_and(|l| l.same(c)) {
+                            self.outline.push(c);
+                        }
+                    }
+                }
+                if response.secondary_clicked() {
+                    if self.outline.pop().is_none() {
+                        self.set_tool(Tool::Select);
+                    }
+                }
+            }
             Tool::Place => {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
                 if let Some((f, _)) = &mut self.placing {
@@ -420,7 +521,7 @@ impl App {
     }
 
     fn begin_drag(&mut self, q0: P, tol: f64, shift: bool, origin: Pos2) {
-        let hit = self.pick(q0, tol);
+        let hit = self.pick_with(q0, tol, false);
         let Some(hit) = hit else {
             self.box_from = Some(origin);
             return;
@@ -459,6 +560,8 @@ impl App {
             Sel::Fp(id) => self.doc.fp(id).map(|f| f.at),
             Sel::Via(id) => self.doc.via(id).map(|v| v.at),
             Sel::Track(id) => self.doc.track(id).map(|t| if t.a.dist(q0) < t.b.dist(q0) { t.a } else { t.b }),
+            Sel::Pour(id) => self.doc.pour(id).and_then(|v| v.outline.first().copied()),
+            Sel::Fill(id) => self.doc.fill(id).and_then(|v| v.pts.first().copied()),
         }
         .unwrap_or(q0);
         self.drag = Some(Drag {
@@ -602,6 +705,8 @@ impl App {
                     Sel::Fp(id) => doc.fp(id).is_some(),
                     Sel::Track(id) => doc.track(id).is_some(),
                     Sel::Via(id) => doc.via(id).is_some(),
+                    Sel::Pour(id) => doc.pour(id).is_some(),
+                    Sel::Fill(id) => doc.fill(id).is_some(),
                 });
                 self.remember(drag.before);
             } else {
@@ -630,6 +735,19 @@ impl App {
             for v in &self.doc.vias {
                 if take(v.blob().bbox()) {
                     sel.push(Sel::Via(v.id));
+                }
+            }
+            for v in self.doc.fills.iter().filter(|v| self.shows(Layer::Cu(v.layer))) {
+                if take(BBox::of(&v.pts)) {
+                    sel.push(Sel::Fill(v.id));
+                }
+            }
+            // A pour only when wholly inside, either way round: touching
+            // one is too easy on a board covered in them.
+            for v in self.doc.pours.iter().filter(|v| v.outline.len() >= 3 && self.shows(Layer::Cu(v.layer))) {
+                let bb = BBox::of(&v.outline);
+                if area.contains(bb.min) && area.contains(bb.max) {
+                    sel.push(Sel::Pour(v.id));
                 }
             }
             self.sel = sel;
@@ -703,6 +821,21 @@ impl App {
             };
             match layer {
                 Layer::Cu(l) => {
+                    // Pours and fills first, a shade darker than tracks so these stand out on them.
+                    for v in doc.pours.iter().filter(|v| v.layer == l) {
+                        let c = fade(base, strength * 0.72 * keep(v.net));
+                        for island in &v.fill {
+                            tri_mesh(painter, tr, &island.tris, c);
+                        }
+                        if layer == active && v.outline.len() >= 3 {
+                            closed_line(painter, tr, &v.outline, Stroke::new(1.0, fade(base, 0.8)), true);
+                        }
+                    }
+                    for v in doc.fills.iter().filter(|v| v.layer == l) {
+                        let c = fade(base, strength * keep(v.net));
+                        let tris: Vec<[P; 3]> = v.pieces().iter().flat_map(|piece| (1..piece.len() - 1).map(move |k| [piece[0], piece[k], piece[k + 1]])).collect();
+                        tri_mesh(painter, tr, &tris, c);
+                    }
                     for t in doc.tracks.iter().filter(|t| t.layer == l && !pushed.contains(&t.id)) {
                         for part in t.blobs() {
                             fill_blob(painter, tr, &part, fade(base, strength * keep(t.net)));
@@ -835,6 +968,26 @@ impl App {
                     stroke_blob(painter, tr, &v.blob(), stroke);
                 }
             }
+            Sel::Pour(id) => {
+                if let Some(v) = doc.pour(id) {
+                    if v.outline.len() >= 3 {
+                        closed_line(painter, tr, &v.outline, stroke, false);
+                        if fill.is_some() {
+                            for q in &v.outline {
+                                painter.circle_filled(tr.pt(*q), 3.0, stroke.color);
+                            }
+                        }
+                    }
+                    for island in &v.fill {
+                        closed_line(painter, tr, &island.rings[0], Stroke::new(stroke.width * 0.6, stroke.color.gamma_multiply(0.6)), false);
+                    }
+                }
+            }
+            Sel::Fill(id) => {
+                if let Some(v) = doc.fill(id) {
+                    closed_line(painter, tr, &v.pts, stroke, false);
+                }
+            }
         };
         for s in &self.sel {
             mark(*s, Stroke::new(1.6, ACCENT), Some(Color32::from_rgba_unmultiplied(117, 171, 255, 22)));
@@ -887,6 +1040,30 @@ impl App {
             for (i, q) in pts.iter().enumerate() {
                 let first = i == 0 && self.outline.len() >= 3;
                 painter.circle_filled(*q, if first { 5.0 } else { 3.0 }, EDGE);
+            }
+        }
+
+        // A pour being drawn.
+        if self.tool == Tool::Pour && (!self.outline.is_empty() || self.cursor.is_some()) {
+            let c = layer_color(Layer::Cu(self.layer));
+            let mut pts: Vec<Pos2> = self.outline.iter().map(|q| tr.pt(*q)).collect();
+            if let Some(q) = self.cursor {
+                pts.push(tr.pt(q));
+            }
+            if pts.len() >= 3 {
+                let ring: Vec<P> = self.outline.iter().copied().chain(self.cursor).collect();
+                let idx = triangulate(&ring);
+                let mut mesh = egui::Mesh::default();
+                for q in &ring {
+                    mesh.colored_vertex(tr.pt(*q), c.gamma_multiply(0.18));
+                }
+                mesh.indices = idx;
+                painter.add(Shape::mesh(mesh));
+            }
+            painter.add(Shape::line(pts.clone(), Stroke::new(1.6, c)));
+            for (i, q) in pts.iter().enumerate() {
+                let first = i == 0 && self.outline.len() >= 3;
+                painter.circle_filled(*q, if first { 5.0 } else { 3.0 }, c);
             }
         }
 
@@ -1102,6 +1279,7 @@ impl App {
                             (Tool::Route, Icon::Route, "Route", "Click a pad to start a track, click to turn, V for a via (W)"),
                             (Tool::Via, Icon::Via, "Via", "Click to drop a via (V)"),
                             (Tool::Outline, Icon::Outline, "Outline", "Click the board's corners; click the first one to close (O)"),
+                            (Tool::Pour, Icon::Pour, "Pour", "Click a copper pour's corners on the layer in use; click the first one to close (P)"),
                         ];
                         for (tool, icon, label, tip) in tools {
                             if segmented_tool(ui, icon, label, self.tool == tool).on_hover_text(tip).clicked() {

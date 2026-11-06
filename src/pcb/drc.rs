@@ -27,6 +27,11 @@ pub fn describe(board: &Board, item: Item) -> String {
         },
         Item::Track(_) => "track".into(),
         Item::Via(_) => "via".into(),
+        Item::Pour(id, _) => match board.pour(id) {
+            Some(p) if p.plane => "plane".into(),
+            _ => "pour".into(),
+        },
+        Item::Fill(_) => "fill".into(),
     }
 }
 
@@ -35,12 +40,20 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
     let mut out = Vec::new();
     let items = &copper.items;
 
-    // Copper of different nets too close together.
-    for (i, j) in crate::pcb::copper::near_pairs(items, r.clearance) {
+    // Copper of different nets too close together. Pours may keep a wider gap.
+    let widest = items.iter().filter_map(|c| c.keeps.map(|k| k.0)).fold(r.clearance, f64::max);
+    for (i, j) in crate::pcb::copper::near_pairs(items, widest) {
         let (a, b) = (&items[i], &items[j]);
         if !a.on.shares(b.on) || (a.net == b.net && a.net != 0) {
             continue;
         }
+        // Two pieces of one pour never clash with each other.
+        if let (Item::Pour(x, _), Item::Pour(y, _)) = (a.item, b.item)
+            && x == y
+        {
+            continue;
+        }
+        let need = [a.keeps, b.keeps].iter().flatten().map(|k| k.0).fold(r.clearance, f64::max);
         // Pads of one part with no nets are its own business.
         if let (Item::Pad(fa, _), Item::Pad(fb, _)) = (a.item, b.item)
             && fa == fb
@@ -49,8 +62,8 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
         {
             continue;
         }
-        let (gap, pa, pb) = a.gap(b);
-        if gap < r.clearance - 1e-6 {
+        let (gap, pa, pb) = a.gap_within(b, need);
+        if gap < need - 1e-6 {
             let (what, sev) = if gap <= 1e-6 { ("Short circuit", Severity::Error) } else { ("Too close", Severity::Error) };
             out.push(Problem {
                 severity: sev,
@@ -62,7 +75,7 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
                     describe(board, b.item),
                     board.net_name(b.net),
                     gap.max(0.0),
-                    r.clearance
+                    need
                 ),
                 at: pa.lerp(pb, 0.5),
                 items: vec![a.item, b.item],
@@ -130,10 +143,16 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
     if edge.len() >= 3 {
         let n = edge.len();
         for cu in items {
+            let need = cu.keeps.map(|k| k.1).unwrap_or(r.edge_clearance);
             let mut worst: Option<(f64, P)> = None;
             for k in 0..n {
                 let (a, b) = (edge[k], edge[(k + 1) % n]);
-                for part in &cu.parts {
+                let seg = BBox::of(&[a, b]);
+                for (part, bb) in cu.parts.iter().zip(&cu.boxes) {
+                    // Far pieces of a big pour needn't be measured.
+                    if cu.parts.len() > 1 && box_gap(bb, &seg) > need + 0.01 && worst.is_some() {
+                        continue;
+                    }
                     let (d, pa, _) = core_dist(&part.core, &[a, b]);
                     let gap = d - part.r;
                     if worst.is_none_or(|w| gap < w.0) {
@@ -141,15 +160,17 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
                     }
                 }
             }
-            let inside = cu.parts.iter().all(|part| point_in_ring(part.center(), edge));
+            // Each piece's middle (its corners' mean, inside it as it's convex).
+            let mid = |b: &Blob| b.core.iter().fold(P::default(), |s, q| s.add(*q)).scale(1.0 / b.core.len().max(1) as f64);
+            let inside = cu.parts.iter().all(|part| point_in_ring(mid(part), edge));
             if let Some((gap, at)) = worst
-                && (!inside || gap < r.edge_clearance - 1e-6)
+                && (!inside || gap < need - 1e-6)
             {
                 out.push(Problem {
                     severity: Severity::Error,
                     title: if inside { "Too close to the edge".into() } else { "Off the board".into() },
                     detail: if inside {
-                        format!("{}: {:.3} mm from the edge, needs {:.3}", describe(board, cu.item), gap.max(0.0), r.edge_clearance)
+                        format!("{}: {:.3} mm from the edge, needs {:.3}", describe(board, cu.item), gap.max(0.0), need)
                     } else {
                         format!("{} is outside the board outline", describe(board, cu.item))
                     },

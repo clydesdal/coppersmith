@@ -141,6 +141,26 @@ fn print_board(got: &pcb::altium::pcbdoc::ImportedBoard) {
         "  rules: clearance {} mm, track {} mm (least {}), via {}/{} mm, hole least {}, ring least {}",
         r.clearance, r.track, r.min_track, r.via_dia, r.via_drill, r.min_drill, r.min_ring
     );
+    for v in &b.pours {
+        let what = if v.plane { "plane" } else { "pour" };
+        let conn = match v.connect {
+            model::Connect::Direct => "solid".to_string(),
+            model::Connect::Relief => format!("relief {}/{} mm", v.spoke, v.gap),
+        };
+        println!(
+            "  {what} {} on {}: {:.1} mm² in {} piece{}, clearance {} mm, edge {} mm, pads {conn}",
+            b.net_name(v.net),
+            model::Layer::Cu(v.layer).name().to_lowercase(),
+            v.copper_area(),
+            v.fill.len(),
+            if v.fill.len() == 1 { "" } else { "s" },
+            v.clearance,
+            v.edge
+        );
+    }
+    if !b.fills.is_empty() {
+        println!("  {} fill{}", b.fills.len(), if b.fills.len() == 1 { "" } else { "s" });
+    }
     for n in &got.notes {
         println!("  {n}");
     }

@@ -164,6 +164,8 @@ impl App {
                         let at = if on.0 < 1e-6 { q.snap(self.grid) } else { dist_to_segment(q, a, b).1.rounded() };
                         return (at, Some(cu.item));
                     }
+                    // Onto a pour or fill anywhere: it's joined there.
+                    Item::Pour(..) | Item::Fill(_) => return (q.snap(self.grid), Some(cu.item)),
                 }
             }
         }
@@ -306,7 +308,7 @@ impl App {
         if fresh.is_empty() {
             return None;
         }
-        let found = drc::check(&b, &copper::analyse(&b));
+        let found = drc::check(&b, &copper::analyse_fixed(&b));
         found
             .into_iter()
             .find(|p| CLEARANCE.contains(&p.title.as_str()) && p.items.iter().any(|i| fresh.contains(i)))
@@ -325,18 +327,19 @@ impl App {
             Item::Pad(f, _) => before.fp(f).is_none_or(|o| {
                 self.doc.fp(f).is_some_and(|n| !n.at.same(o.at) || n.rot != o.rot || n.side != o.side)
             }),
+            Item::Pour(..) | Item::Fill(_) => false,
         };
         let key = |p: &drc::Problem| {
             let mut items = p.items.clone();
             items.sort();
             (p.title.clone(), items)
         };
-        let was: std::collections::HashSet<(String, Vec<Item>)> = drc::check(before, &copper::analyse(before))
+        let was: std::collections::HashSet<(String, Vec<Item>)> = drc::check(before, &copper::analyse_fixed(before))
             .iter()
             .filter(|p| CLEARANCE.contains(&p.title.as_str()))
             .map(key)
             .collect();
-        drc::check(&self.doc, &copper::analyse(&self.doc))
+        drc::check(&self.doc, &copper::analyse_fixed(&self.doc))
             .into_iter()
             .filter(|p| CLEARANCE.contains(&p.title.as_str()))
             .filter(|p| !(p.items.len() == 2 && p.items.iter().all(moved)))
@@ -365,8 +368,8 @@ impl App {
             (p.title.clone(), items)
         };
         let was: std::collections::HashSet<(String, Vec<Item>)> =
-            drc::check(&before, &copper::analyse(&before)).iter().filter(|p| CLEARANCE.contains(&p.title.as_str())).map(key).collect();
-        drc::check(&after, &copper::analyse(&after))
+            drc::check(&before, &copper::analyse_fixed(&before)).iter().filter(|p| CLEARANCE.contains(&p.title.as_str())).map(key).collect();
+        drc::check(&after, &copper::analyse_fixed(&after))
             .into_iter()
             .filter(|p| CLEARANCE.contains(&p.title.as_str()))
             .find(|p| !was.contains(&key(p)))
@@ -529,7 +532,7 @@ impl App {
             .copper
             .items
             .iter()
-            .filter(|c| c.net == r.net && c.on.has(r.layer) && !joined.contains(&c.item))
+            .filter(|c| c.net == r.net && c.on.has(r.layer) && !c.item.poured() && !joined.contains(&c.item))
             .flat_map(|c| c.anchors.iter().map(move |a| (*a, c.item)))
             .min_by(|a, b| a.0.dist(r.from).total_cmp(&b.0.dist(r.from)));
         let Some((to, item)) = target else {

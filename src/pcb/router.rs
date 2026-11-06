@@ -175,7 +175,7 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
     let mut out: Vec<Obstacle> = copper
         .items
         .iter()
-        .filter(|c| c.on.has(layer))
+        .filter(|c| c.on.has(layer) && !c.item.poured())
         .flat_map(|c| {
             // Tracks can be pushed, arcs included (see Scene::new for the exceptions).
             let movable = matches!(c.item, Item::Track(_));
@@ -1141,7 +1141,7 @@ pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Li
     // Pads and vias pin a run's end, whatever the net.
     let mut pinned: HashSet<(i64, i64)> = HashSet::new();
     for c in &copper.items {
-        if !matches!(c.item, Item::Track(_)) {
+        if matches!(c.item, Item::Pad(..) | Item::Via(_)) {
             pinned.insert(key(c.anchors[0]));
         }
     }
@@ -1626,7 +1626,7 @@ pub fn net_groups(board: &Board, net: u32, without: Option<u32>) -> Vec<usize> {
         .items
         .iter()
         .enumerate()
-        .filter(|(_, cu)| cu.net == net && !matches!(cu.item, Item::Track(_)))
+        .filter(|(_, cu)| cu.net == net && matches!(cu.item, Item::Pad(..) | Item::Via(_)))
         .map(|(i, _)| i)
         .collect();
     ends.iter()

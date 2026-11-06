@@ -65,9 +65,10 @@ both. Next: write PcbLib/SchLib that Circuit Studio opens (needs checking in
 Circuit Studio).
 
 0.3.14 reads boards (PcbDoc/CSPcbDoc: parts, nets, copper, rules) and
-schematics (SchDoc, PrjPcb netlists checked against the board). Still to
-come from them: pours and fills, plane layers, designator text positions,
-and schematic drawing once there's a schematic editor.
+schematics (SchDoc, PrjPcb netlists checked against the board). 0.3.15
+brings their pours, fills and plane layers in. Still to come from them:
+pour cutouts, designator text positions, and schematic drawing once there's
+a schematic editor.
 
 
 - Footprint editor: pads (shape, size, drill, turn, numbering), pad arrays, silkscreen, courtyard and assembly drawing, IPC-7351 wizards for the package families already generated.
@@ -85,8 +86,12 @@ and schematic drawing once there's a schematic editor.
 
 ## 4. Copper pours
 
-- Polygons with clearance, thermal reliefs, island removal, priority — needs a polygon boolean engine (i_overlay or a Clipper2 port).
-- Keep-out areas.
+Done in 0.3.15 (on i_overlay): pours with their own clearance and edge gap,
+solid or thermal-relief joins, island, small-piece and neck removal, pour
+order, power planes (whole-board or split, cleared from holes), fills;
+poured again after every change, checked, drawn, written to Gerbers.
+
+- Still to do: editing a pour's corners in place, pour cutouts and keep-out areas, hatched pours, per-net clearance rules.
 
 ## 5. Routing
 

@@ -333,6 +333,132 @@ impl Via {
     }
 }
 
+/// How a pour meets the pads of its own net.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub enum Connect {
+    /// Thermal relief: a gap round the pad, crossed by four spokes, so the
+    /// pad can be soldered without the pour soaking up the heat.
+    #[default]
+    Relief,
+    /// Poured solid right up to the pad.
+    Direct,
+}
+
+/// A copper pour: an area of copper on one layer that fills itself in round
+/// everything of other nets, keeping its clearance. A plane is a pour that
+/// covers a whole inner layer (or, split, a part of one).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Pour {
+    pub id: u32,
+    pub layer: u8,
+    #[serde(default)]
+    pub net: u32,
+    /// Where it may pour, counter-clockwise. Empty: the whole board.
+    #[serde(default)]
+    pub outline: Vec<P>,
+    /// A power plane rather than a pour: kept clear of other nets' holes by
+    /// `clearance` measured from the hole, and never trimmed of islands.
+    #[serde(default)]
+    pub plane: bool,
+    /// Poured in this order; each keeps clear of those poured before it.
+    #[serde(default)]
+    pub order: u32,
+    /// How far it keeps from copper of other nets.
+    pub clearance: f64,
+    /// How far it keeps back from the board's edge.
+    pub edge: f64,
+    #[serde(default)]
+    pub connect: Connect,
+    /// Thermal relief spoke width and the gap round the pad.
+    pub spoke: f64,
+    pub gap: f64,
+    /// Takes out pieces that don't touch anything of its net.
+    #[serde(default = "yes")]
+    pub remove_islands: bool,
+    /// Pieces smaller than this (mm²) are taken out.
+    #[serde(default)]
+    pub min_area: f64,
+    /// Necks narrower than this are taken out.
+    #[serde(default)]
+    pub neck: f64,
+    /// What it poured into: worked out from the board, not saved.
+    #[serde(skip)]
+    pub fill: Vec<Island>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// One piece of poured copper: its outline and holes (outline
+/// counter-clockwise, holes clockwise) and the same cut into small
+/// triangles for drawing and for checking.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Island {
+    pub rings: Vec<Vec<P>>,
+    pub tris: Vec<[P; 3]>,
+    pub area: f64,
+}
+
+impl Pour {
+    pub fn new(id: u32, layer: u8, net: u32, outline: Vec<P>, rules: &Rules) -> Pour {
+        Pour {
+            id,
+            layer,
+            net,
+            outline,
+            plane: false,
+            order: id,
+            clearance: rules.clearance.max(0.25),
+            edge: rules.edge_clearance,
+            connect: Connect::Relief,
+            spoke: rules.track.max(rules.min_track),
+            gap: rules.clearance.max(0.25),
+            remove_islands: true,
+            min_area: 0.0,
+            neck: 0.0,
+            fill: Vec::new(),
+        }
+    }
+
+    /// Where it may pour: its own outline, or for an outline-less plane the board's.
+    pub fn area<'a>(&'a self, board: &'a Board) -> &'a [P] {
+        if self.outline.len() >= 3 { &self.outline } else { &board.outline }
+    }
+
+    pub fn copper_area(&self) -> f64 {
+        self.fill.iter().map(|i| i.area).sum()
+    }
+}
+
+/// Solid copper of a fixed shape: an Altium fill or copper region.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Fill {
+    pub id: u32,
+    pub layer: u8,
+    #[serde(default)]
+    pub net: u32,
+    /// Counter-clockwise.
+    pub pts: Vec<P>,
+}
+
+impl Fill {
+    /// The shape as convex pieces: itself if it's convex, or triangles.
+    pub fn pieces(&self) -> Vec<Vec<P>> {
+        if is_convex(&self.pts) {
+            return vec![self.pts.clone()];
+        }
+        let idx = triangulate(&self.pts);
+        idx.chunks(3).map(|t| {
+            let mut tri = vec![self.pts[t[0] as usize], self.pts[t[1] as usize], self.pts[t[2] as usize]];
+            if ring_area(&tri) < 0.0 {
+                tri.reverse();
+            }
+            tri
+        }).collect()
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Net {
     pub id: u32,
@@ -393,6 +519,10 @@ pub struct Board {
     pub footprints: Vec<Footprint>,
     pub tracks: Vec<Track>,
     pub vias: Vec<Via>,
+    #[serde(default)]
+    pub pours: Vec<Pour>,
+    #[serde(default)]
+    pub fills: Vec<Fill>,
     /// Net 0 is "not connected"; it's never stored here.
     pub nets: Vec<Net>,
     pub rules: Rules,
@@ -409,6 +539,8 @@ impl Default for Board {
             footprints: Vec::new(),
             tracks: Vec::new(),
             vias: Vec::new(),
+            pours: Vec::new(),
+            fills: Vec::new(),
             nets: Vec::new(),
             rules: Rules::default(),
             next_id: 1,
@@ -467,6 +599,17 @@ impl Board {
     pub fn via(&self, id: u32) -> Option<&Via> {
         self.vias.iter().find(|v| v.id == id)
     }
+    pub fn pour(&self, id: u32) -> Option<&Pour> {
+        self.pours.iter().find(|v| v.id == id)
+    }
+    pub fn fill(&self, id: u32) -> Option<&Fill> {
+        self.fills.iter().find(|v| v.id == id)
+    }
+
+    /// Pours every pour afresh from the board as it is.
+    pub fn repour(&mut self) {
+        crate::pcb::pour::repour(self);
+    }
 
     pub fn outline_bbox(&self) -> BBox {
         BBox::of(&self.outline)
@@ -480,6 +623,9 @@ impl Board {
         }
         for t in &self.tracks {
             b.union(&t.bbox());
+        }
+        for f in &self.fills {
+            b.union(&BBox::of(&f.pts));
         }
         if b.is_empty() {
             b = BBox::of(&[p(0.0, 0.0), p(50.0, 40.0)]);
@@ -505,9 +651,12 @@ impl Board {
             .map(|f| f.id)
             .chain(b.tracks.iter().map(|t| t.id))
             .chain(b.vias.iter().map(|v| v.id))
+            .chain(b.pours.iter().map(|v| v.id))
+            .chain(b.fills.iter().map(|v| v.id))
             .max()
             .unwrap_or(0);
         b.next_id = b.next_id.max(top + 1);
+        b.repour();
         Ok(b)
     }
 }

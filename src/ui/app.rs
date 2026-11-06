@@ -20,6 +20,7 @@ pub enum Tool {
     Route,
     Via,
     Outline,
+    Pour,
     Place,
 }
 
@@ -28,6 +29,8 @@ pub enum Sel {
     Fp(u32),
     Track(u32),
     Via(u32),
+    Pour(u32),
+    Fill(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,6 +142,8 @@ pub struct App {
     pub rev: u64,
     pub copper: Copper,
     copper_rev: u64,
+    /// The board change the pours were last poured for.
+    poured_rev: u64,
     pub problems: Vec<Problem>,
     pub lib: Library,
     pub lib_filter: String,
@@ -225,6 +230,7 @@ impl App {
             rev: 1,
             copper: Copper::default(),
             copper_rev: 0,
+            poured_rev: u64::MAX,
             problems: Vec::new(),
             lib: Library::load(),
             lib_filter: String::new(),
@@ -295,7 +301,17 @@ impl App {
 
     /// Brings the copper groups and the checks up to date with the board.
     pub fn refresh(&mut self) {
-        if self.copper_rev != self.rev {
+        // Pours pour again once a change is finished, not on every step of
+        // a drag or route; until then they keep their old shape.
+        let busy = self.drag.is_some() || self.route.is_some() || self.placing.is_some();
+        let repour = !busy && self.poured_rev != self.rev;
+        if repour {
+            let started = std::time::Instant::now();
+            self.doc.repour();
+            self.poured_rev = self.rev;
+            note_slow("pouring", started);
+        }
+        if self.copper_rev != self.rev || repour {
             let started = std::time::Instant::now();
             self.copper = copper::analyse(&self.doc);
             self.problems = drc::check(&self.doc, &self.copper);
@@ -367,6 +383,8 @@ impl App {
             Sel::Fp(id) => doc.fp(id).is_some(),
             Sel::Track(id) => doc.track(id).is_some(),
             Sel::Via(id) => doc.via(id).is_some(),
+            Sel::Pour(id) => doc.pour(id).is_some(),
+            Sel::Fill(id) => doc.fill(id).is_some(),
         });
     }
 
@@ -447,6 +465,18 @@ impl App {
         for v in board.vias.iter_mut().filter(|v| picked.contains(&Sel::Via(v.id))) {
             anchors.push(v.at);
             v.at = v.at.add(d).rounded();
+        }
+        // Pours and fills move whole; a pour's copper moves with it until it pours again.
+        let shift = |q: &P| q.add(d).rounded();
+        for v in board.pours.iter_mut().filter(|v| picked.contains(&Sel::Pour(v.id)) && v.outline.len() >= 3) {
+            v.outline = v.outline.iter().map(shift).collect();
+            for island in &mut v.fill {
+                island.rings = island.rings.iter().map(|r| r.iter().map(|q| q.add(d)).collect()).collect();
+                island.tris = island.tris.iter().map(|t| t.map(|q| q.add(d))).collect();
+            }
+        }
+        for v in board.fills.iter_mut().filter(|v| picked.contains(&Sel::Fill(v.id))) {
+            v.pts = v.pts.iter().map(shift).collect();
         }
         for t in board.tracks.iter_mut().filter(|t| picked.contains(&Sel::Track(t.id))) {
             anchors.push(t.a);
@@ -578,6 +608,8 @@ impl App {
             b.footprints.retain(|f| !sel.contains(&Sel::Fp(f.id)) || f.locked);
             b.tracks.retain(|t| !sel.contains(&Sel::Track(t.id)));
             b.vias.retain(|v| !sel.contains(&Sel::Via(v.id)));
+            b.pours.retain(|v| !sel.contains(&Sel::Pour(v.id)));
+            b.fills.retain(|v| !sel.contains(&Sel::Fill(v.id)));
         });
     }
 
@@ -613,6 +645,21 @@ impl App {
                         made.push(Sel::Via(v.id));
                         b.vias.push(v);
                     }
+                    Sel::Pour(id) => {
+                        let Some(mut v) = b.pour(id).cloned() else { continue };
+                        v.id = b.new_id();
+                        v.order = v.id;
+                        v.outline = v.outline.iter().map(|q| q.add(p(step, -step)).rounded()).collect();
+                        made.push(Sel::Pour(v.id));
+                        b.pours.push(v);
+                    }
+                    Sel::Fill(id) => {
+                        let Some(mut v) = b.fill(id).cloned() else { continue };
+                        v.id = b.new_id();
+                        v.pts = v.pts.iter().map(|q| q.add(p(step, -step)).rounded()).collect();
+                        made.push(Sel::Fill(v.id));
+                        b.fills.push(v);
+                    }
                 }
             }
         });
@@ -638,8 +685,10 @@ impl App {
         for layer in self.doc.copper_layers() {
             if let Some(cu) = self.copper.at(q, layer, tol).first() {
                 net = cu.net;
-                if !matches!(cu.item, Item::Track(_)) {
+                if matches!(cu.item, Item::Pad(..) | Item::Via(_)) {
                     at = cu.anchors[0];
+                } else if !matches!(cu.item, Item::Track(_)) {
+                    // A via dropped on a pour or fill joins it where it lands.
                 } else {
                     at = dist_to_segment(q, cu.anchors[0], cu.anchors[1]).1.rounded();
                 }
@@ -663,6 +712,32 @@ impl App {
         self.edit(|b| {
             add(b);
         });
+    }
+
+    /// Makes a pour of the corners clicked, on the layer in use. Its net is
+    /// the lit-up one, or the net of what's under its first corner, or GND.
+    pub fn close_pour(&mut self) {
+        if self.outline.len() < 3 {
+            self.notice = Some("A pour needs three corners or more.".into());
+            return;
+        }
+        let mut ring = std::mem::take(&mut self.outline);
+        if ring_area(&ring) < 0.0 {
+            ring.reverse();
+        }
+        let layer = self.layer;
+        let under = self.copper.at(ring[0], layer, 0.0).into_iter().map(|c| c.net).find(|n| *n != 0);
+        let net = self.highlight.or(under).or(self.doc.net_by_name("GND")).unwrap_or(0);
+        let mut made = 0;
+        self.edit(|b| {
+            let id = b.new_id();
+            let pour = Pour::new(id, layer, net, ring, &b.rules);
+            b.pours.push(pour);
+            made = id;
+        });
+        self.sel = vec![Sel::Pour(made)];
+        let name = self.doc.net_name(net).to_string();
+        self.notice = Some(format!("Poured {name} on {}; change its net and settings on the right", Layer::Cu(layer).name().to_lowercase()));
     }
 
     pub fn close_outline(&mut self) {
@@ -1124,6 +1199,8 @@ impl App {
         if pressed(Key::Enter) {
             if self.tool == Tool::Outline {
                 self.close_outline();
+            } else if self.tool == Tool::Pour {
+                self.close_pour();
             }
         }
         if pressed(Key::Backspace) {
@@ -1149,6 +1226,9 @@ impl App {
         }
         if pressed(Key::O) {
             self.set_tool(Tool::Outline);
+        }
+        if pressed(Key::P) {
+            self.set_tool(Tool::Pour);
         }
         // Space turns a part being dragged or placed, as R does.
         if hit(Key::Space, false) || hit(Key::Space, true) {
@@ -1210,6 +1290,8 @@ impl App {
         match self.hover? {
             Sel::Track(id) => net(Item::Track(id)),
             Sel::Via(id) => net(Item::Via(id)),
+            Sel::Pour(id) => self.doc.pour(id).map(|p| p.net),
+            Sel::Fill(id) => self.doc.fill(id).map(|p| p.net),
             Sel::Fp(id) => {
                 let q = self.hover_q?;
                 let f = self.doc.fp(id)?;

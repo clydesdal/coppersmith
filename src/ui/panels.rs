@@ -331,6 +331,7 @@ impl App {
                         Tool::Route => "Click a pad or track to start · + − PgUp PgDn change layer · 3 width · Ctrl+W clearance",
                         Tool::Via => "Click to drop a via; it joins the net under it · Right-click stops",
                         Tool::Outline => "Click each corner · Click the first one or Enter to close · Backspace takes one back",
+                        Tool::Pour => "Click each corner of the pour · Click the first one or Enter to close · It takes the lit-up net, or the net under its first corner",
                         Tool::Place => "Click to place · R turn · L other side · Esc or right-click stops",
                     };
                     ui.add(egui::Label::new(RichText::new(hint).size(12.5).color(FAINT)).truncate());
@@ -513,6 +514,8 @@ impl App {
                 [Sel::Fp(id)] => self.footprint_card(ui, *id),
                 [Sel::Track(id)] => self.track_card(ui, *id),
                 [Sel::Via(id)] => self.via_card(ui, *id),
+                [Sel::Pour(id)] => self.pour_card(ui, *id),
+                [Sel::Fill(id)] => self.fill_card(ui, *id),
                 many => self.many_card(ui, many.len()),
             }
             self.checks_card(ui);
@@ -697,6 +700,94 @@ impl App {
             field(ui, "Hole", |ui| length(ui, u, &mut v.drill));
             field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("via-net", id), &mut v.net));
         });
+    }
+
+    fn pour_card(&mut self, ui: &mut Ui, id: u32) {
+        let u = self.unit;
+        let layers = self.doc.copper_layers();
+        let doc_nets = self.doc.clone();
+        let board_outline = self.doc.outline.clone();
+        let mut act = None;
+        let Some(v) = self.doc.pours.iter_mut().find(|v| v.id == id) else { return };
+        card(ui, |ui| {
+            heading(ui, if v.plane { "Power plane" } else { "Copper pour" });
+            field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("pour-net", id), &mut v.net));
+            field(ui, "Layer", |ui| {
+                egui::ComboBox::from_id_salt(("pour-layer", id)).selected_text(Layer::Cu(v.layer).name()).show_ui(ui, |ui| {
+                    for l in layers {
+                        ui.selectable_value(&mut v.layer, l, Layer::Cu(l).name());
+                    }
+                });
+            });
+            let mut whole = v.outline.len() < 3;
+            if ui.checkbox(&mut whole, "Covers the whole board").on_hover_text("Follows the board's outline, wherever it goes").changed() {
+                v.outline = if whole { Vec::new() } else { board_outline.clone() };
+            }
+            ui.checkbox(&mut v.plane, "Power plane").on_hover_text(
+                "Keeps clear of other nets' holes by the clearance, measured from the hole, and keeps every piece",
+            );
+            field(ui, if v.plane { "Clear of holes" } else { "Clearance" }, |ui| length(ui, u, &mut v.clearance));
+            field(ui, "From the edge", |ui| length(ui, u, &mut v.edge));
+            field(ui, "Pads join", |ui| segmented(ui, &mut v.connect, &[(Connect::Direct, "Solid"), (Connect::Relief, "Relief")]));
+            if v.connect == Connect::Relief {
+                field(ui, "Spoke width", |ui| length(ui, u, &mut v.spoke));
+                field(ui, "Relief gap", |ui| length(ui, u, &mut v.gap));
+            }
+            if !v.plane {
+                ui.checkbox(&mut v.remove_islands, "Take out pieces joined to nothing");
+                field(ui, "Narrowest neck", |ui| length(ui, u, &mut v.neck));
+                field(ui, "Smallest piece", |ui| {
+                    let r = ui.add(egui::DragValue::new(&mut v.min_area).speed(0.05).range(0.0..=1000.0).max_decimals(2).suffix(" mm²"));
+                    r.changed()
+                });
+            }
+            field(ui, "Pour order", |ui| ui.add(egui::DragValue::new(&mut v.order).speed(0.2)))
+                .on_hover_text("Lower pours first; later pours keep clear of earlier ones");
+            row(ui, "Copper", &format!("{:.1} mm² in {} piece{}", v.copper_area(), v.fill.len(), if v.fill.len() == 1 { "" } else { "s" }));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if tool_button(ui, Icon::Copy, "Copy", true).clicked() {
+                    act = Some('d');
+                }
+                if tool_button(ui, Icon::Trash, "Remove", true).clicked() {
+                    act = Some('x');
+                }
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new("Pours again by itself after every change.").size(12.0).color(FAINT));
+        });
+        match act {
+            Some('d') => self.duplicate_selection(),
+            Some('x') => self.delete_selection(),
+            _ => {}
+        }
+    }
+
+    fn fill_card(&mut self, ui: &mut Ui, id: u32) {
+        let layers = self.doc.copper_layers();
+        let doc_nets = self.doc.clone();
+        let mut remove = false;
+        let Some(v) = self.doc.fills.iter_mut().find(|v| v.id == id) else { return };
+        card(ui, |ui| {
+            heading(ui, "Fill");
+            field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("fill-net", id), &mut v.net));
+            field(ui, "Layer", |ui| {
+                egui::ComboBox::from_id_salt(("fill-layer", id)).selected_text(Layer::Cu(v.layer).name()).show_ui(ui, |ui| {
+                    for l in layers {
+                        ui.selectable_value(&mut v.layer, l, Layer::Cu(l).name());
+                    }
+                });
+            });
+            row(ui, "Area", &format!("{:.2} mm²", ring_area(&v.pts).abs()));
+            row(ui, "Corners", &v.pts.len().to_string());
+            ui.add_space(4.0);
+            if tool_button(ui, Icon::Trash, "Remove", true).clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            self.delete_selection();
+        }
     }
 
     fn many_card(&mut self, ui: &mut Ui, n: usize) {

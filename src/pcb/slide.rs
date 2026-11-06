@@ -201,7 +201,7 @@ fn push_layers(before: &Board, after: Board, via_push: bool) -> Option<Board> {
         Some(Item::Track(id)) => changed.contains(&id),
         Some(Item::Via(id)) => moved_vias.contains(&id),
         Some(Item::Pad(f, _)) => moved_fps.contains(&f),
-        None => false,
+        Some(Item::Pour(..) | Item::Fill(_)) | None => false,
     };
     let mut b = after;
     for layer in b.copper_layers() {
