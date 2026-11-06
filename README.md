@@ -27,7 +27,12 @@ On a board laid at 45°, moving things doesn't leave tracks at odd angles:
 
 - Drag one straight track and it slides sideways, keeping its direction.
   Its neighbours keep theirs too, growing or shrinking to meet it; where the
-  track ends on a pad or via, a short 45° leg joins it back.
+  track ends on a pad or via, a short 45° leg joins it back. Other nets'
+  tracks it runs into are pushed aside (and their vias, with Push vias too
+  on), cascading and springing back as in routing. It won't come closer than
+  the clearance to pads, holes or the edge: it stops as close as it can get,
+  and the status bar says why. When you let go, the rule check runs, and if
+  it finds anything new too close the slide is taken back.
 - Move a part, a via, or a group, and each track joined to it keeps its
   direction while the next corner slides along the following track; a track
   with nowhere to slide is re-laid as a straight leg and a 45° leg.

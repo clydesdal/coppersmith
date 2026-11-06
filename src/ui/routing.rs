@@ -248,6 +248,25 @@ impl App {
             .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
     }
 
+    /// A clearance problem on the board now that wasn't there in `before`.
+    pub fn new_clearance_problem(&self, before: &Board) -> Option<String> {
+        let key = |p: &drc::Problem| {
+            let mut items = p.items.clone();
+            items.sort();
+            (p.title.clone(), items)
+        };
+        let was: std::collections::HashSet<(String, Vec<Item>)> = drc::check(before, &copper::analyse(before))
+            .iter()
+            .filter(|p| CLEARANCE.contains(&p.title.as_str()))
+            .map(key)
+            .collect();
+        drc::check(&self.doc, &copper::analyse(&self.doc))
+            .into_iter()
+            .filter(|p| CLEARANCE.contains(&p.title.as_str()))
+            .find(|p| !was.contains(&key(p)))
+            .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
+    }
+
     /// The rule check on the route so far plus `segs` and `vias`, with
     /// pushes made, all as `net`.
     #[allow(clippy::too_many_arguments)]

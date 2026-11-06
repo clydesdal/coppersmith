@@ -38,9 +38,12 @@ Done in 0.3.3: moving keeps corners — sliding a track keeps its and its
 neighbours' directions, moving parts and vias brings tracks along at 45°,
 corner drags re-lay in 45° legs; pushes are tested to stay at 45°.
 
+Done in 0.3.4: sliding pushes what it runs into (cascading, vias too),
+stops at what can't move, and is checked by the rule check on release.
+
 Next:
-- Sliding that also pushes what the slid track runs into, and keeps arc
-  corners tangent while sliding.
+- Keep arc corners tangent while sliding.
+- Moving parts and vias with pushing, not just sliding tracks.
 - Push arcs (today an existing arc is fixed when pushing).
 - Pushing on other layers when a moved via's tracks there run into things
   (today they bend round, but don't push).

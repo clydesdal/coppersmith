@@ -253,7 +253,6 @@ pub fn clear_arc(obs: &[Obstacle], a: P, m: P, b: P, w: f64) -> bool {
 }
 
 /// Every piece of a path, straight or arc, is clear.
-#[cfg(test)]
 pub fn clear_pieces(obs: &[Obstacle], pieces: &[(P, P, Option<P>)], w: f64) -> bool {
     pieces.iter().all(|(a, b, m)| match m {
         Some(m) => clear_arc(obs, *a, *m, *b, w),
@@ -701,7 +700,7 @@ impl Scene {
     }
 
     /// Can this be moved by a push?
-    fn movable(&self, o: &Obstacle) -> bool {
+    pub fn movable(&self, o: &Obstacle) -> bool {
         o.movable || (self.via_push && matches!(o.item, Some(Item::Via(_))))
     }
 }

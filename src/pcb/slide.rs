@@ -9,7 +9,8 @@
 
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
-use crate::pcb::router::{Corner, legs};
+use crate::pcb::copper::{Item, analyse};
+use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, as_steps, clear_pieces, legs, shove};
 use std::collections::HashSet;
 
 /// Runs at a multiple of 45°.
@@ -136,6 +137,51 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
     tidy(&mut work);
     *board = work;
     true
+}
+
+/// Slides a track as `slide` does, and pushes other nets' tracks (and vias,
+/// if `via_push`) out of the way of the slid track and its neighbours. None
+/// when it can't: the slid tracks would come too close to something that
+/// can't move, or what's in the way can't give way. Then the slide should
+/// stop where it last could.
+pub fn slide_push(board: &Board, id: u32, delta: P, via_push: bool) -> Option<Board> {
+    let t = board.track(id)?.clone();
+    let mut b = board.clone();
+    if !slide(&mut b, id, delta) {
+        return None;
+    }
+    let (net, layer) = (t.net, t.layer);
+    // The slid net's tracks on this layer push; with no net, just what changed.
+    let ours: Vec<Track> = b
+        .tracks
+        .iter()
+        .filter(|x| x.layer == layer && if net != 0 { x.net == net } else { board.track(x.id) != Some(*x) })
+        .cloned()
+        .collect();
+    let our_ids: HashSet<u32> = ours.iter().map(|x| x.id).collect();
+    let mut scene = Scene::new(&b, &analyse(&b), layer, net);
+    scene.via_push = via_push;
+    scene.lines.retain(|l| !l.ids.iter().any(|i| our_ids.contains(i)));
+    // They can't come close to what won't move.
+    let fixed: Vec<Obstacle> = scene
+        .own
+        .iter()
+        .filter(|o| !scene.movable(o) && !matches!(o.item, Some(Item::Track(i)) if our_ids.contains(&i)))
+        .cloned()
+        .collect();
+    let mut steps = Vec::new();
+    let mut width: f64 = 0.0;
+    for x in &ours {
+        let piece = [(x.a, x.b, x.mid)];
+        if !clear_pieces(&fixed, &piece, x.w) {
+            return None;
+        }
+        steps.extend(as_steps(&piece));
+        width = width.max(x.w + if x.mid.is_some() { 2.0 * ARC_ERROR } else { 0.0 });
+    }
+    let (runs, vias) = shove(&scene, &steps, width)?;
+    apply_pushed(&mut b, &runs, &vias);
+    Some(b)
 }
 
 /// Re-lays a track from its far end `from` to `to` as a straight leg and a
@@ -318,5 +364,98 @@ mod tests {
         assert!(all_45(&b), "{:?}", b.tracks);
         assert_eq!(joined(&b, p(0.0, 0.0)), 1);
         assert_eq!(joined(&b, p(6.0, 2.0)), 1);
+    }
+}
+
+#[cfg(test)]
+mod pushing_while_sliding {
+    use super::*;
+    use crate::pcb::drc;
+
+    fn tp(b: &mut Board, at: P, net: u32) {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+    }
+
+    /// Net A: pad, up at 45°, along at y = 2, down at 45°, pad. Net B: a
+    /// straight run along y = 3, pad to pad, just above A's middle.
+    fn board() -> (Board, u32, u32) {
+        let mut b = Board { outline: rect_outline(p(-5.0, -5.0), p(25.0, 12.0)), ..Board::default() };
+        let (a, n) = (b.net("A"), b.net("B"));
+        tp(&mut b, p(0.0, 0.0), a);
+        tp(&mut b, p(14.0, 0.0), a);
+        tp(&mut b, p(-3.0, 3.0), n);
+        tp(&mut b, p(17.0, 3.0), n);
+        let add = |b: &mut Board, s: (f64, f64), e: (f64, f64), net: u32| {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: p(s.0, s.1), b: p(e.0, e.1), w: 0.25, layer: TOP, net });
+            id
+        };
+        add(&mut b, (0.0, 0.0), (2.0, 2.0), a);
+        let mid = add(&mut b, (2.0, 2.0), (12.0, 2.0), a);
+        add(&mut b, (12.0, 2.0), (14.0, 0.0), a);
+        add(&mut b, (-3.0, 3.0), (17.0, 3.0), n);
+        (b, a, mid)
+    }
+
+    fn clearance_problems(b: &Board) -> Vec<String> {
+        drc::check(b, &analyse(b))
+            .into_iter()
+            .filter(|p| ["Too close", "Short circuit", "Too close to the edge", "Off the board"].contains(&p.title.as_str()))
+            .map(|p| p.detail)
+            .collect()
+    }
+
+    #[test]
+    fn sliding_into_a_track_pushes_it() {
+        let (b, _, mid) = board();
+        assert!(clearance_problems(&b).is_empty());
+        let after = slide_push(&b, mid, p(0.0, 1.0), true).expect("B gives way");
+        let m = after.track(mid).unwrap();
+        assert!((m.a.y - 3.0).abs() < 1e-9, "slid to y = 3: {m:?}");
+        assert!(clearance_problems(&after).is_empty(), "{:?}", clearance_problems(&after));
+        let n = after.net_by_name("B").unwrap();
+        let bs: Vec<&Track> = after.tracks.iter().filter(|t| t.net == n).collect();
+        assert!(bs.len() > 1, "B was bent out of the way");
+        assert!(bs.iter().all(|t| octilinear(t.b.sub(t.a))), "and kept 45°");
+    }
+
+    #[test]
+    fn pushes_carry_on_when_sliding() {
+        let (mut b, _, mid) = board();
+        // A third net, C, just above B.
+        let c = b.net("C");
+        tp(&mut b, p(-3.0, 4.6), c);
+        tp(&mut b, p(17.0, 4.6), c);
+        let id = b.new_id();
+        b.tracks.push(Track { mid: None, id, a: p(-3.0, 4.6), b: p(17.0, 4.6), w: 0.25, layer: TOP, net: c });
+        assert!(clearance_problems(&b).is_empty());
+        let after = slide_push(&b, mid, p(0.0, 3.0), true).expect("B and C give way");
+        assert!(clearance_problems(&after).is_empty(), "{:?}", clearance_problems(&after));
+        let cs: Vec<&Track> = after.tracks.iter().filter(|t| t.net == c).collect();
+        assert!(cs.len() > 1, "C was pushed too");
+        assert!(after.tracks.iter().all(|t| octilinear(t.b.sub(t.a))));
+    }
+
+    #[test]
+    fn sliding_stops_at_what_cant_move() {
+        let (mut b, _, mid) = board();
+        // A pad of another net sits above A's middle.
+        let w = b.net("W");
+        tp(&mut b, p(7.0, 3.6), w);
+        assert!(slide_push(&b, mid, p(0.0, 0.5), true).is_some(), "a little is fine");
+        assert!(slide_push(&b, mid, p(0.0, 1.5), true).is_none(), "into the pad isn't");
     }
 }
