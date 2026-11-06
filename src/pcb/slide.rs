@@ -166,6 +166,22 @@ pub fn slide_push(board: &Board, id: u32, delta: P, via_push: bool) -> Option<Bo
 /// the clearance of what can't be pushed (other parts' pads, holes, the edge,
 /// or a via with via pushing off), or what's in the way can't give way.
 pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<Board> {
+    let mut b = after;
+    // Pushing on one layer can move vias, whose tracks and selves then push
+    // on the other layers, and so on: go round the layers until it settles.
+    for _ in 0..4 {
+        let start = b.clone();
+        b = push_layers(before, b, via_push)?;
+        if b == start {
+            break;
+        }
+    }
+    Some(b)
+}
+
+/// One go round the copper layers, pushing out of the way of everything
+/// that differs from `before`.
+fn push_layers(before: &Board, after: Board, via_push: bool) -> Option<Board> {
     let changed: HashSet<u32> = after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect();
     let moved_vias: HashSet<u32> =
         after.vias.iter().filter(|v| before.via(v.id).is_none_or(|old| !old.at.same(v.at))).map(|v| v.id).collect();
@@ -1046,5 +1062,74 @@ mod moving_parts_keeps_arcs {
         follow_moves(&mut b, &[(p(0.0, 0.0), p(1.0, 0.0))], &HashSet::new());
         assert!(tangent(&b, 2.0), "{:?}", b.tracks);
         assert!(b.tracks.iter().all(|t| t.mid.is_some() || octilinear(t.b.sub(t.a))));
+    }
+}
+
+#[cfg(test)]
+mod vias_push_on_other_layers {
+    use super::*;
+    use crate::pcb::drc;
+    use crate::pcb::router::{Conflict, plan};
+
+    fn pad(b: &mut Board, at: P, net: u32) {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TH".into(),
+            refdes: format!("P{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.5, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+        });
+    }
+
+    fn track(b: &mut Board, s: (f64, f64), e: (f64, f64), layer: u8, net: u32) {
+        let id = b.new_id();
+        b.tracks.push(Track { mid: None, id, a: p(s.0, s.1), b: p(e.0, e.1), w: 0.25, layer, net });
+    }
+
+    #[test]
+    fn a_via_pushed_on_top_pushes_tracks_on_the_bottom() {
+        // Net B: along the top to a via, on along the bottom. Net C runs along
+        // the bottom just above the via, with room for it but no more.
+        let mut b = Board { outline: rect_outline(p(-8.0, -8.0), p(28.0, 8.0)), ..Board::default() };
+        let (a, nb, nc) = (b.net("A"), b.net("B"), b.net("C"));
+        pad(&mut b, p(0.0, 0.0), nb);
+        pad(&mut b, p(20.0, 0.0), nb);
+        pad(&mut b, p(-4.0, 0.95), nc);
+        pad(&mut b, p(24.0, 0.95), nc);
+        track(&mut b, (0.0, 0.0), (10.0, 0.0), TOP, nb);
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(10.0, 0.0), dia: 0.6, drill: 0.3, net: nb });
+        track(&mut b, (10.0, 0.0), (20.0, 0.0), BOTTOM, nb);
+        track(&mut b, (-4.0, 0.95), (24.0, 0.95), BOTTOM, nc);
+        let clean = |b: &Board| {
+            drc::check(b, &analyse(b)).into_iter().filter(|p| ["Too close", "Short circuit"].contains(&p.title.as_str())).map(|p| p.detail).collect::<Vec<_>>()
+        };
+        assert!(clean(&b).is_empty());
+        // A route on the top comes up at the via from below.
+        let mut scene = Scene::new(&b, &analyse(&b), TOP, a);
+        scene.via_push = true;
+        let head = plan(&scene, p(10.0, -6.0), p(10.0, -0.25), 0.25, Corner::D45, false, Conflict::Push, b.outline_bbox(), &[]);
+        assert_eq!(head.vias.len(), 1, "the via is pushed: {head:?}");
+        // Settle: the route stands in as fixed while the other layers make room.
+        let mut after = b.clone();
+        apply_pushed(&mut after, &head.pushed, &head.vias);
+        let first = after.next_id;
+        for s in head.pts.windows(2) {
+            let id = after.new_id();
+            after.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: 0.25, layer: TOP, net: a });
+        }
+        let settled = push_after_move(&b, after, true).expect("the bottom makes room");
+        assert!(clean(&settled).is_empty(), "{:?}", clean(&settled));
+        let moved_to = settled.via(v).unwrap().at;
+        assert!(moved_to.y > 0.0, "the via went up, towards C: {moved_to:?}");
+        assert!(settled.tracks.iter().filter(|t| t.net == nc).count() > 1, "C was pushed on the bottom");
+        assert!(settled.tracks.iter().filter(|t| t.id < first).all(|t| t.mid.is_some() || octilinear(t.b.sub(t.a))));
     }
 }

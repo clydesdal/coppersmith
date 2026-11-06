@@ -110,6 +110,10 @@ pub struct PlanCache {
     pub plan: Plan,
     pub to: P,
     pub item: Option<Item>,
+    /// When the plan moves vias: the whole board once every layer has been
+    /// pushed out of their way (and that of their tracks), for showing and
+    /// placing.
+    pub settled: Option<Board>,
 }
 
 #[derive(Default)]
@@ -231,8 +235,49 @@ impl App {
         self.obstacles.scene.via_push = m.via_push;
         self.obstacles.scene.arc_radius = m.arc_radius;
         self.obstacles.scene.lead = App::lead(&r);
-        let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
-        self.plan = Some(PlanCache { key, plan, to, item });
+        let mut plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
+        let mut settled = None;
+        if !plan.vias.is_empty() {
+            let pieces: Vec<(P, P, u8, Option<P>)> = plan.pieces().into_iter().map(|(a, b, mid)| (a, b, r.layer, mid)).collect();
+            settled = self.settle(&r, &pieces, &plan.pushed, &plan.vias);
+            if settled.is_none() {
+                // Another layer can't make room: keep the vias still.
+                self.obstacles.scene.via_push = false;
+                plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
+                self.obstacles.scene.via_push = m.via_push;
+            }
+        }
+        self.plan = Some(PlanCache { key, plan, to, item, settled });
+    }
+
+    /// The board with these pushes made and every other layer pushed out of
+    /// the way of the vias they moved (and of the tracks that followed them).
+    /// The route so far and `pieces` stand in as fixed for that, then come
+    /// out again. None when another layer can't make room.
+    fn settle(&self, r: &Route, pieces: &[(P, P, u8, Option<P>)], pushed: &[router::Moved], moved: &[(u32, P)]) -> Option<Board> {
+        let mut b = self.doc.clone();
+        router::apply_pushed(&mut b, pushed, moved);
+        if moved.is_empty() {
+            return Some(b);
+        }
+        // Just these come out again afterwards: tracks the pushes re-lay get
+        // new ids too, and stay.
+        let mut temp = std::collections::HashSet::new();
+        for (a, e, layer, mid) in r.segs.iter().chain(pieces) {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: *mid, id, a: *a, b: *e, w: r.width, layer: *layer, net: r.net });
+            temp.insert(id);
+        }
+        let mut temp_vias = std::collections::HashSet::new();
+        for at in &r.vias {
+            let id = b.new_id();
+            b.vias.push(Via { id, at: *at, dia: self.doc.rules.via_dia, drill: self.doc.rules.via_drill, net: r.net });
+            temp_vias.insert(id);
+        }
+        let mut out = crate::pcb::slide::push_after_move(&self.doc, b, self.route_mode.via_push)?;
+        out.tracks.retain(|t| !temp.contains(&t.id));
+        out.vias.retain(|v| !temp_vias.contains(&v.id));
+        Some(out)
     }
 
     /// Does arriving here finish the route? A pad, via or track of its own
@@ -272,6 +317,35 @@ impl App {
             .map(key)
             .collect();
         drc::check(&self.doc, &copper::analyse(&self.doc))
+            .into_iter()
+            .filter(|p| CLEARANCE.contains(&p.title.as_str()))
+            .find(|p| !was.contains(&key(p)))
+            .map(|p| format!("{} — {}", p.title.to_lowercase(), p.detail))
+    }
+
+    /// The rule check on a settled board with the route so far and `segs`
+    /// added: anything new too close to what was there before.
+    fn board_clash(&self, r: &Route, net: u32, segs: &[(P, P, u8, Option<P>)], settled: &Board) -> Option<String> {
+        let before = self.doc.clone();
+        let mut after = settled.clone();
+        for (a, e, layer, mid) in r.segs.iter().chain(segs) {
+            let id = after.new_id();
+            after.tracks.push(Track { mid: *mid, id, a: *a, b: *e, w: r.width, layer: *layer, net });
+        }
+        for at in &r.vias {
+            if !after.vias.iter().any(|v| v.at.same(*at)) {
+                let id = after.new_id();
+                after.vias.push(Via { id, at: *at, dia: before.rules.via_dia, drill: before.rules.via_drill, net });
+            }
+        }
+        let key = |p: &drc::Problem| {
+            let mut items = p.items.clone();
+            items.sort();
+            (p.title.clone(), items)
+        };
+        let was: std::collections::HashSet<(String, Vec<Item>)> =
+            drc::check(&before, &copper::analyse(&before)).iter().filter(|p| CLEARANCE.contains(&p.title.as_str())).map(key).collect();
+        drc::check(&after, &copper::analyse(&after))
             .into_iter()
             .filter(|p| CLEARANCE.contains(&p.title.as_str()))
             .find(|p| !was.contains(&key(p)))
@@ -367,7 +441,24 @@ impl App {
             .filter(|(_, s)| !s[0].same(s[1]))
             .map(|(i, s)| (s[0], s[1], r.layer, mids[i]))
             .collect();
-        if let Some(why) = self.route_clash(&r, net, &segs, &[], &pushed, &moved) {
+        // Vias that moved push the other layers too; what's placed is the
+        // settled board.
+        let settled = if moved.is_empty() {
+            None
+        } else {
+            match (upto == pts.len() && !cut).then(|| c.settled.clone()).flatten().or_else(|| self.settle(&r, &segs, &pushed, &moved)) {
+                Some(b) => Some(b),
+                None => {
+                    self.notice = Some("Not placed: another layer can't make room for the vias this pushes.".into());
+                    return;
+                }
+            }
+        };
+        let clash = match &settled {
+            Some(board) => self.board_clash(&r, net, &segs, board),
+            None => self.route_clash(&r, net, &segs, &[], &pushed, &moved),
+        };
+        if let Some(why) = clash {
             self.notice = Some(format!("Not placed: {why}"));
             return;
         }
@@ -378,7 +469,12 @@ impl App {
         }
         let doc_before = (!pushed.is_empty() || !moved.is_empty()).then(|| self.doc.clone());
         if doc_before.is_some() {
-            router::apply_pushed(&mut self.doc, &pushed, &moved);
+            match settled {
+                Some(board) => self.doc = board,
+                None => {
+                    router::apply_pushed(&mut self.doc, &pushed, &moved);
+                }
+            }
             self.touch();
         }
         let Some(route) = &mut self.route else { return };
@@ -426,7 +522,7 @@ impl App {
             self.notice = Some("There's no clear way to finish this on this layer.".into());
             return;
         }
-        self.plan = Some(PlanCache { key: String::new(), plan, to, item: Some(item) });
+        self.plan = Some(PlanCache { key: String::new(), plan, to, item: Some(item), settled: None });
         let look = self.route_mode.look_ahead;
         self.route_mode.look_ahead = false;
         self.route_click();

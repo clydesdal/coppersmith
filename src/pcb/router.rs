@@ -857,7 +857,20 @@ impl Scene {
             .copper_layers()
             .into_iter()
             .filter(|l| *l != layer)
-            .map(|l| (l, obstacles_all(board, copper, l), lines(board, copper, l, 0)))
+            .map(|l| {
+                let mut all = obstacles_all(board, copper, l);
+                let runs = lines(board, copper, l, 0);
+                // As on the routing layer: tracks in runs can be pushed, others can't.
+                let in_runs: std::collections::HashSet<u32> = runs.iter().flat_map(|r| r.ids.iter().copied()).collect();
+                for o in &mut all {
+                    if let Some(Item::Track(id)) = o.item
+                        && !in_runs.contains(&id)
+                    {
+                        o.movable = false;
+                    }
+                }
+                (l, all, runs)
+            })
             .collect();
         let lines = lines(board, copper, layer, net);
         // A track that isn't in any run (an arc that can't be bent) can't move.
@@ -1425,7 +1438,7 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
     for ((slot, j), pts) in followed {
         let (layer, all, lines) = &scene.others[slot];
         let l = &lines[j];
-        let obs: Vec<Obstacle> = all.iter().filter(|o| (o.net != l.net || l.net == 0) && !l.ids.iter().any(|id| o.item == Some(Item::Track(*id)))).cloned().collect();
+        let obs: Vec<Obstacle> = all.iter().filter(|o| (o.net != l.net || l.net == 0) && !o.movable).cloned().collect();
         let shape = round(l, &obs, &pts);
         out.push(as_moved(l, &shape, *layer));
     }
@@ -1456,8 +1469,10 @@ fn move_via(
     // What the via itself must keep clear of, on every layer.
     let mut walls: Vec<Obstacle> = scene.all.iter().filter(|o| o.item != me && other_net(o.net) && !o.movable).cloned().collect();
     walls.extend(pushers.iter().filter(|p| p.owner != Owner::Via(k) && other_net(p.net)).map(|p| as_obstacle(p, c)));
+    // On the other layers only what can't be pushed is in the way: tracks
+    // there are pushed aside once the via has moved.
     for (_, all, _) in &scene.others {
-        walls.extend(all.iter().filter(|o| o.item != me && other_net(o.net)).cloned());
+        walls.extend(all.iter().filter(|o| o.item != me && other_net(o.net) && !o.movable).cloned());
     }
     let ok = |q: P| {
         let blob = Blob::dot(q, dia);
@@ -1515,7 +1530,7 @@ fn move_via(
                 if l.net != net || !(run[0].same(from) || run.last().unwrap().same(from)) {
                     continue;
                 }
-                let obs: Vec<Obstacle> = all.iter().filter(|o| other_net(o.net)).cloned().collect();
+                let obs: Vec<Obstacle> = all.iter().filter(|o| other_net(o.net) && !o.movable).cloned().collect();
                 match follow(&obs, &run, from, to, l.w, if l.radius > 0.0 { 0.0 } else { scene.min_diag }) {
                     Some(pts) => there.push(((slot, j), pts)),
                     None => {

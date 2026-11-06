@@ -124,8 +124,12 @@ would have to go the long way round) the route walks round instead and the
 routing chip says so. Backspace and Ctrl+Z put pushed tracks back too.
 
 With **Push vias too** on (it is by default), a via in the way moves the
-least it can to a spot that's clear on every layer, and its tracks on every
-layer follow it with a short jog; a moved via pushes in turn. Only the
+least it can to a spot that's clear of what can't move on every layer, and
+its tracks on every layer follow it with a short jog. On the other layers the
+moved via and the tracks that followed it push those layers' tracks aside in
+turn, layer after layer until everything settles; the route being laid shows
+the board as it would be left, every layer included. If another layer can't
+make room, the via stays put and the route goes round or pushes otherwise. Only the
 stretch of a pushed track near the trouble changes; the rest stays exactly
 where it was.
 

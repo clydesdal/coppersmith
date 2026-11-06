@@ -154,6 +154,11 @@ impl App {
         !self.hidden.contains(&layer)
     }
 
+    /// The board as it is, or as the route being laid would leave it.
+    fn shown(&self) -> &Board {
+        self.plan.as_ref().and_then(|c| c.settled.as_ref()).unwrap_or(&self.doc)
+    }
+
     /// Picks what's under a point, in the order a click should reach things.
     pub fn pick(&self, q: P, tol: f64) -> Option<Sel> {
         let mut hits: Vec<(u8, f64, Sel)> = Vec::new();
@@ -627,7 +632,8 @@ impl App {
     }
 
     fn draw_board(&self, painter: &Painter, tr: &Tr) {
-        let doc = &self.doc;
+        // While a route's pushes move vias, show the board as they'd leave it.
+        let doc = self.shown();
         // The board itself.
         if doc.outline.len() >= 3 {
             let idx = triangulate(&doc.outline);
@@ -703,7 +709,8 @@ impl App {
     }
 
     fn draw_through(&self, painter: &Painter, tr: &Tr, keep: &dyn Fn(u32) -> f32) {
-        let doc = &self.doc;
+        // While a route's pushes move vias, show the board as they'd leave it.
+        let doc = self.shown();
         for f in &doc.footprints {
             for (i, pad) in f.pads.iter().enumerate() {
                 if pad.through() {

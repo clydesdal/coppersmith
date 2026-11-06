@@ -18,6 +18,8 @@ pub enum Step {
     Key(Key, Modifiers),
     /// Keys held down until let go, like Ctrl for Ctrl+click.
     Hold(Modifiers),
+    /// Saves the board to a file, for checks to read back.
+    SaveBoard(String),
     Wait,
 }
 
@@ -80,6 +82,11 @@ pub fn parse(text: &str) -> Vec<Step> {
             Some("hold") => {
                 let m = words.get(1).and_then(|k| key_of(&format!("{k}+A"))).map(|(_, m)| m).unwrap_or(Modifiers::NONE);
                 steps.extend([Step::Hold(m), Step::Wait]);
+            }
+            Some("saveboard") => {
+                if let Some(path) = words.get(1) {
+                    steps.extend([Step::SaveBoard(path.to_string()), Step::Wait]);
+                }
             }
             Some("release") => steps.extend([Step::Hold(Modifiers::NONE), Step::Wait]),
             Some("wait") => steps.extend(std::iter::repeat_n(Step::Wait, x as usize)),
@@ -152,6 +159,9 @@ impl App {
                 raw.events.push(Event::ModifiersChanged(Modifiers::NONE));
             }
             Step::Hold(m) => raw.events.push(Event::ModifiersChanged(m)),
+            Step::SaveBoard(path) => {
+                let _ = std::fs::write(&path, self.doc.save());
+            }
             Step::Wait => {}
         }
     }

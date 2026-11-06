@@ -49,11 +49,10 @@ square corners on 45° work.
 
 Done in 0.3.7: arc corners stay tangent while sliding, and dragging an arc
 changes its radius. 0.3.8: moving parts and vias keeps arc corners tangent.
-0.3.9: pushing moves arcs too, keeping them tangent.
+0.3.9: pushing moves arcs too, keeping them tangent. 0.3.10: vias pushed on
+one layer push on the others too.
 
 Next:
-- Pushing on other layers when a moved via's tracks there run into things
-  (today they bend round, but don't push).
 - Gloss: re-smooth the routed and neighbouring tracks after each click.
 - Interactive sliding of existing tracks, and dragging vias with the router.
 - Follow mode, the length gauge, differential pairs, length tuning.
