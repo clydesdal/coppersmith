@@ -74,19 +74,8 @@ impl Unit {
     }
 }
 
-/// A route being laid: the segments so far, and the vias on the way.
-#[derive(Clone, Debug)]
-pub struct Route {
-    pub segs: Vec<(P, P, u8)>,
-    pub vias: Vec<P>,
-    pub from: P,
-    pub layer: u8,
-    pub net: u32,
-    pub width: f64,
-    pub diagonal_first: bool,
-    /// What it started on, which doesn't count as arriving.
-    pub start: Option<Item>,
-}
+pub use crate::ui::routing::Route;
+use crate::ui::routing::{ObstacleCache, PlanCache, RouteMode};
 
 #[derive(Clone, Debug)]
 pub enum DragKind {
@@ -165,6 +154,11 @@ pub struct App {
     pub drag: Option<Drag>,
     pub box_from: Option<egui::Pos2>,
     pub route: Option<Route>,
+    pub route_mode: RouteMode,
+    pub plan: Option<PlanCache>,
+    pub obstacles: ObstacleCache,
+    /// Where the pointer lands in the route tool, for Enter to click there.
+    pub route_target: Option<(P, Option<Item>)>,
     pub outline: Vec<P>,
     pub placing: Option<(Footprint, String)>,
     pub grid: f64,
@@ -244,6 +238,10 @@ impl App {
             drag: None,
             box_from: None,
             route: None,
+            route_mode: RouteMode::default(),
+            plan: None,
+            obstacles: ObstacleCache::default(),
+            route_target: None,
             outline: Vec::new(),
             placing: None,
             grid: 0.25,
@@ -572,132 +570,6 @@ impl App {
             .collect();
     }
 
-    // -- Routing ---------------------------------------------------------------
-
-    /// The two legs from `a` to `b`: one straight, one at 45°.
-    pub fn legs(a: P, b: P, diagonal_first: bool) -> Vec<P> {
-        let d = b.sub(a);
-        let (ax, ay) = (d.x.abs(), d.y.abs());
-        if ax < 1e-9 || ay < 1e-9 || (ax - ay).abs() < 1e-9 {
-            return vec![a, b];
-        }
-        let m = ax.min(ay);
-        let diag = p(m * d.x.signum(), m * d.y.signum());
-        let corner = if diagonal_first { a.add(diag) } else { b.sub(diag) };
-        vec![a, corner.rounded(), b]
-    }
-
-    /// Where a click in the route tool lands: a pad, via or track end of the
-    /// right sort under the pointer, or else the grid.
-    pub fn route_snap(&self, q: P, tol: f64) -> (P, Option<Item>) {
-        for cu in self.copper.at(q, self.layer, tol) {
-            match cu.item {
-                Item::Pad(..) | Item::Via(_) => return (cu.anchors[0], Some(cu.item)),
-                Item::Track(_) => {
-                    let (a, b) = (cu.anchors[0], cu.anchors[1]);
-                    for end in [a, b] {
-                        if end.dist(q) < tol.max(cu.blob.r * 1.5) {
-                            return (end, Some(cu.item));
-                        }
-                    }
-                    // Anywhere along a track, square to the grid where it can be.
-                    let on = dist_to_segment(q.snap(self.grid), a, b);
-                    let at = if on.0 < 1e-6 { q.snap(self.grid) } else { dist_to_segment(q, a, b).1.rounded() };
-                    return (at, Some(cu.item));
-                }
-            }
-        }
-        (q.snap(self.grid), None)
-    }
-
-    pub fn start_route(&mut self, q: P, tol: f64) {
-        let (at, item) = self.route_snap(q, tol);
-        let net = item.and_then(|i| self.copper.index.get(&i)).map(|&i| self.copper.items[i].net).unwrap_or(0);
-        self.route = Some(Route {
-            segs: Vec::new(),
-            vias: Vec::new(),
-            from: at,
-            layer: self.layer,
-            net,
-            width: self.width,
-            diagonal_first: false,
-            start: item,
-        });
-    }
-
-    /// Lays the legs to `to`. True when it arrived on its net, which ends it.
-    pub fn route_to(&mut self, to: P, item: Option<Item>) -> bool {
-        let net_of = |app: &App, i: Item| app.copper.index.get(&i).map(|&k| app.copper.items[k].net).unwrap_or(0);
-        let target = item.map(|i| net_of(self, i));
-        let Some(r) = &mut self.route else { return false };
-        let legs = App::legs(r.from, to, r.diagonal_first);
-        for w in legs.windows(2) {
-            if !w[0].same(w[1]) {
-                r.segs.push((w[0], w[1], r.layer));
-            }
-        }
-        r.from = to;
-        if r.net == 0
-            && let Some(n) = target
-        {
-            r.net = n;
-        }
-        let arrived = item.is_some() && item != r.start && target == Some(r.net) && r.net != 0 && !r.segs.is_empty();
-        if arrived {
-            self.finish_route();
-        }
-        arrived
-    }
-
-    pub fn route_via(&mut self) {
-        let other = |l: u8| if l == TOP { BOTTOM } else { TOP };
-        let Some(r) = &mut self.route else { return };
-        if r.vias.last().is_some_and(|v| v.same(r.from)) {
-            return;
-        }
-        r.vias.push(r.from);
-        r.layer = other(r.layer);
-        self.layer = r.layer;
-    }
-
-    pub fn route_back(&mut self) {
-        let Some(r) = &mut self.route else { return };
-        match r.segs.pop() {
-            Some((a, _, layer)) => {
-                r.from = a;
-                if r.vias.last().is_some_and(|v| v.same(a)) && layer != r.layer {
-                    r.vias.pop();
-                }
-                r.layer = layer;
-                self.layer = layer;
-            }
-            None => self.route = None,
-        }
-    }
-
-    /// Puts the route's tracks and vias on the board.
-    pub fn finish_route(&mut self) {
-        let Some(r) = self.route.take() else { return };
-        if r.segs.is_empty() {
-            return;
-        }
-        let rules = self.doc.rules.clone();
-        self.edit(|b| {
-            for (a, e, layer) in &r.segs {
-                let id = b.new_id();
-                b.tracks.push(Track { id, a: *a, b: *e, w: r.width, layer: *layer, net: r.net });
-            }
-            for v in &r.vias {
-                if b.vias.iter().any(|old| old.at.same(*v)) {
-                    continue;
-                }
-                let id = b.new_id();
-                b.vias.push(Via { id, at: *v, dia: rules.via_dia, drill: rules.via_drill, net: r.net });
-            }
-            merge_straight(b);
-        });
-    }
-
     pub fn place_via(&mut self, q: P, tol: f64) {
         let mut at = q.snap(self.grid);
         let mut net = 0;
@@ -769,14 +641,9 @@ impl App {
     }
 
     pub fn switch_layer(&mut self, layer: u8) {
+        // Changing layer mid-route drops a via where the route has got to.
         if self.route.as_ref().is_some_and(|r| r.layer != layer) {
-            // Changing layer mid-route drops a via where the route is.
-            if let Some(r) = &mut self.route {
-                if !r.vias.last().is_some_and(|v| v.same(r.from)) {
-                    r.vias.push(r.from);
-                }
-                r.layer = layer;
-            }
+            self.route_via(Some(layer));
         }
         self.layer = layer;
         self.hidden.remove(&Layer::Cu(layer));
@@ -995,6 +862,57 @@ impl App {
 
     // -- Keys ----------------------------------------------------------------
 
+    /// Altium's keys while the route tool is in hand. True when the key was
+    /// the router's, so nothing else acts on it.
+    fn routing_keys(&mut self, ctx: &egui::Context, presses: &[(Key, egui::Modifiers)]) -> bool {
+        let hit = |k: Key, shift: bool| presses.iter().any(|(key, m)| *key == k && !m.command && m.shift == shift);
+        let ctrl = |k: Key| presses.iter().any(|(key, m)| *key == k && m.command);
+        let routing = self.route.is_some();
+        let mut used = true;
+        if hit(Key::Space, true) {
+            self.route_mode.corner = self.route_mode.corner.next();
+            self.notice = Some(format!("Corners: {}", self.route_mode.corner.name()));
+        } else if hit(Key::Space, false) || hit(Key::Slash, false) {
+            if let Some(r) = &mut self.route {
+                r.flip = !r.flip;
+            }
+        } else if hit(Key::R, true) {
+            self.route_mode.conflict = self.route_mode.conflict.next();
+            self.notice = Some(format!("When something's in the way: {}", self.route_mode.conflict.name()));
+        } else if hit(Key::D, true) {
+            self.route_mode.remove_loops = !self.route_mode.remove_loops;
+            let on = if self.route_mode.remove_loops { "on" } else { "off" };
+            self.notice = Some(format!("Taking out old paths a new route replaces: {on}"));
+        } else if ctrl(Key::W) {
+            self.route_mode.show_clearance = !self.route_mode.show_clearance;
+        } else if routing && hit(Key::Num1, false) {
+            self.route_mode.look_ahead = !self.route_mode.look_ahead;
+            let on = if self.route_mode.look_ahead { "on" } else { "off" };
+            self.notice = Some(format!("Look-ahead segment: {on}"));
+        } else if routing && hit(Key::Num2, false) {
+            self.route_via(None);
+        } else if hit(Key::Num3, false) {
+            self.cycle_width_source();
+        } else if routing && (hit(Key::Enter, false)) {
+            if let Some((to, item)) = self.route_target {
+                self.update_plan(to, item);
+                self.route_click();
+            }
+        } else if routing && hit(Key::Backspace, false) {
+            self.route_back();
+        } else if routing && hit(Key::Escape, false) {
+            self.finish_route();
+        } else if routing && hit(Key::V, false) {
+            self.route_via_other_side();
+        } else if routing && (hit(Key::Num4, false) || hit(Key::Num5, false) || hit(Key::Num6, false)) {
+            // 1–3 are the router's while routing; layers go by + − PgUp PgDn.
+        } else {
+            used = false;
+        }
+        let _ = ctx;
+        used
+    }
+
     fn keys(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -1013,7 +931,12 @@ impl App {
         let command = presses.iter().any(|(_, m)| m.command);
         let shifted = presses.iter().any(|(_, m)| m.shift);
         let pressed = |k: Key| presses.iter().any(|(key, m)| *key == k && m.command == command);
+        // A key with Shift held or not, and no Ctrl.
+        let hit = |k: Key, shift: bool| presses.iter().any(|(key, m)| *key == k && !m.command && m.shift == shift);
         let m = egui::Modifiers { shift: shifted, command, ..Default::default() };
+        if self.tool == Tool::Route && self.routing_keys(ctx, &presses) {
+            return;
+        }
         if m.command {
             if pressed(Key::Z) {
                 if m.shift { self.redo() } else { self.undo() }
@@ -1056,9 +979,6 @@ impl App {
             }
         }
         if pressed(Key::Enter) {
-            if self.route.is_some() {
-                self.finish_route();
-            }
             if self.tool == Tool::Outline {
                 self.close_outline();
             }
@@ -1082,21 +1002,12 @@ impl App {
             self.set_tool(Tool::Route);
         }
         if pressed(Key::V) {
-            if self.route.is_some() {
-                self.route_via();
-            } else {
-                self.set_tool(Tool::Via);
-            }
+            self.set_tool(Tool::Via);
         }
         if pressed(Key::O) {
             self.set_tool(Tool::Outline);
         }
-        if pressed(Key::Slash) || pressed(Key::Space) {
-            if let Some(r) = &mut self.route {
-                r.diagonal_first = !r.diagonal_first;
-            }
-        }
-        if pressed(Key::R) {
+        if hit(Key::R, false) || hit(Key::R, true) {
             self.rotate_selection(if m.shift { -90.0 } else { 90.0 });
         }
         if pressed(Key::L) {
@@ -1177,7 +1088,7 @@ impl App {
 
 /// Joins a track to the next when they carry straight on, so a route laid in
 /// clicks doesn't leave a string of short pieces.
-fn merge_straight(b: &mut Board) {
+pub(crate) fn merge_straight(b: &mut Board) {
     loop {
         let mut joined = false;
         'outer: for i in 0..b.tracks.len() {
@@ -1259,9 +1170,10 @@ mod tests {
 
     #[test]
     fn legs_are_straight_then_diagonal() {
-        let legs = App::legs(p(0.0, 0.0), p(5.0, 2.0), false);
-        assert_eq!(legs, vec![p(0.0, 0.0), p(3.0, 0.0), p(5.0, 2.0)]);
-        let legs = App::legs(p(0.0, 0.0), p(5.0, 2.0), true);
+        use crate::pcb::router::{Corner, legs};
+        let legs2 = legs(p(0.0, 0.0), p(5.0, 2.0), Corner::D45, false);
+        assert_eq!(legs2, vec![p(0.0, 0.0), p(3.0, 0.0), p(5.0, 2.0)]);
+        let legs = legs(p(0.0, 0.0), p(5.0, 2.0), Corner::D45, true);
         assert_eq!(legs, vec![p(0.0, 0.0), p(2.0, 2.0), p(5.0, 2.0)]);
     }
 

@@ -6,5 +6,6 @@ pub mod app;
 pub mod icons;
 pub mod panels;
 pub mod play;
+pub mod routing;
 pub mod theme;
 pub mod view;

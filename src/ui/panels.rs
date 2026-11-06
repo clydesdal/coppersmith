@@ -326,9 +326,9 @@ impl App {
                         }
                         Tool::Select => "Click to pick · Drag to move or box · Right-drag to pan · Scroll to zoom",
                         Tool::Route if self.route.is_some() => {
-                            "Click to turn · V via · / swaps the corner · Backspace steps back · Esc or right-click finishes"
+                            "Click places all but the hollow segment · Space flips · Shift+Space corners · Shift+R walk/stop/ignore · V via · Ctrl+click finishes · Esc ends"
                         }
-                        Tool::Route => "Click a pad or track to start · 1–6 or + − changes layer",
+                        Tool::Route => "Click a pad or track to start · + − PgUp PgDn change layer · 3 width · Ctrl+W clearance",
                         Tool::Via => "Click to drop a via; it joins the net under it · Right-click stops",
                         Tool::Outline => "Click each corner · Click the first one or Enter to close · Backspace takes one back",
                         Tool::Place => "Click to place · R turn · L other side · Esc or right-click stops",

@@ -16,6 +16,8 @@ pub enum Step {
     Scroll(f32),
     Type(String),
     Key(Key, Modifiers),
+    /// Keys held down until let go, like Ctrl for Ctrl+click.
+    Hold(Modifiers),
     Wait,
 }
 
@@ -31,7 +33,8 @@ fn key_of(text: &str) -> Option<(Key, Modifiers)> {
         }
     }
     m.command = m.ctrl;
-    let key = Key::from_name(name).or_else(|| Key::from_name(&name.to_uppercase()))?;
+    let title: String = name.chars().take(1).flat_map(char::to_uppercase).chain(name.chars().skip(1)).collect();
+    let key = Key::from_name(name).or_else(|| Key::from_name(&name.to_uppercase())).or_else(|| Key::from_name(&title))?;
     Some((key, m))
 }
 
@@ -74,6 +77,11 @@ pub fn parse(text: &str) -> Vec<Step> {
                     steps.extend([Step::Key(key, m), Step::Wait]);
                 }
             }
+            Some("hold") => {
+                let m = words.get(1).and_then(|k| key_of(&format!("{k}+A"))).map(|(_, m)| m).unwrap_or(Modifiers::NONE);
+                steps.extend([Step::Hold(m), Step::Wait]);
+            }
+            Some("release") => steps.extend([Step::Hold(Modifiers::NONE), Step::Wait]),
             Some("wait") => steps.extend(std::iter::repeat_n(Step::Wait, x as usize)),
             _ => {}
         }
@@ -143,6 +151,7 @@ impl App {
                 }
                 raw.events.push(Event::ModifiersChanged(Modifiers::NONE));
             }
+            Step::Hold(m) => raw.events.push(Event::ModifiersChanged(m)),
             Step::Wait => {}
         }
     }

@@ -10,4 +10,5 @@ pub mod geom;
 pub mod gerber;
 pub mod library;
 pub mod model;
+pub mod router;
 pub mod sample;

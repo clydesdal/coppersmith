@@ -16,10 +16,40 @@ to it.
 | Tool | Key | What it does |
 |---|---|---|
 | Select | S | Click to pick, Shift-click to add, drag to move, drag on empty board to box (left→right takes what's inside, right→left anything touched). Grab a track near its end to move just that end. Double-click a track to pick up everything joined to it. |
-| Route | W | Click a pad, via or track to start, click to turn corners (45°), V drops a via and changes side, `/` swaps which leg is diagonal, Backspace steps back, Esc or right-click finishes. Arriving on a pad of the same net finishes by itself. |
+| Route | W | Click a pad, via or track to start. Routing works like Altium's: see below. |
 | Via | V | Click to drop a via; it takes the net of what it lands on. |
 | Outline | O | Click the board's corners; click the first corner (or Enter) to close. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
+
+### Routing
+
+While routing, the router shows what a click would lay from the route's end
+to the pointer. A click places everything except the last, hollow segment
+(the look-ahead), so you set where a corner goes without committing to what
+comes after it. Landing on a pad, via or track of the same net places the lot
+and ends the route.
+
+| Key | While routing |
+|---|---|
+| Shift+Space | Corners: 45°, 90°, any angle |
+| Space (or /) | Flip which way the corner goes |
+| Shift+R | When something's in the way: walk around it, stop at it, or ignore it (the rule check then shows the clash; what it runs over is outlined red) |
+| Ctrl+click | Finish the connection by itself, round whatever is in the way |
+| Ctrl | Hold to stop the pointer snapping to pad centres |
+| V | Via, and carry on on the other side |
+| 2 | Via here, same layer |
+| + − PgUp PgDn | Change layer, dropping a via |
+| 1 | Look-ahead segment on or off |
+| 3 | Width from: your choice → rule minimum → rule preferred |
+| Shift+D | Take out old paths a new route replaces (on by default) |
+| Ctrl+W | Shade the clearance round other nets |
+| Backspace | Take back the last click |
+| Enter | Same as a click |
+| Esc, right-click, double-click | End the route, keeping what's placed |
+
+The same settings are in the routing pill on the toolbar. Walking round is
+an A* search on a fine grid kept clear of other nets and the board edge,
+then pulled straight wherever an exact clearance check allows.
 
 Anywhere: R turn 90° (Shift+R the other way), L other side, Delete remove,
 Ctrl+D copy, Ctrl+A everything, N light up the net under the pointer, 1–6 or
@@ -89,11 +119,13 @@ What each computer needs besides Rust:
         library.rs     built-in footprints and your footprint files
         copper.rs      what touches what, and the still-to-connect lines
         drc.rs         the rule check
+        router.rs      the interactive router: corner styles, walk round, stop, loops
         gerber.rs      Gerber and Excellon output
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board
       ui/            the window
         app.rs         editor state, undo, edits, files, keys
+        routing.rs     laying a route: clicks, look-ahead, vias, auto-complete
         view.rs        drawing the board and what the mouse does
         panels.rs      top bar, side panels, status bar
         theme.rs       Copperview's colours and fonts
@@ -114,7 +146,9 @@ and `ui/` stay the same on every computer.
     coppersmith --screenshot out.png --zoom 25,18,30 --play 'key w; bclick 27.475 16.095; bclick 29 9.0875'
 
 `--play` acts out mouse and key steps; `bclick X Y` and friends take board
-millimetres, so scripts keep working whatever size the window is.
+millimetres, so scripts keep working whatever size the window is. Plain
+`click X Y` takes window points (screenshot pixels divided by the display
+scale). `hold ctrl` … `release` holds a key across clicks.
 
 Figtree and JetBrains Mono are included under the SIL Open Font License
 (see assets/fonts/OFL.txt and assets/fonts/OFL-JetBrainsMono.txt).

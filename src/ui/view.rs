@@ -348,12 +348,21 @@ impl App {
             Tool::Route => {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
                 self.hover = None;
+                // Ctrl stops the pointer snapping to copper; Ctrl+click finishes
+                // the connection by itself.
+                let ctrl = ui.input(|i| i.modifiers.command);
+                let (to, item) = self.route_snap(q, tol, !ctrl);
+                self.route_target = Some((to, item));
+                if self.route.is_some() {
+                    self.update_plan(to, item);
+                }
                 if response.clicked() {
                     if self.route.is_none() {
                         self.start_route(q, tol);
+                    } else if ctrl {
+                        self.route_autocomplete();
                     } else {
-                        let (to, item) = self.route_snap(q, tol);
-                        self.route_to(to, item);
+                        self.route_click();
                     }
                 }
                 if response.double_clicked() || response.secondary_clicked() {
@@ -712,34 +721,10 @@ impl App {
 
         // The route being laid.
         if let Some(r) = &self.route {
-            let ghost = |layer: u8| {
-                let c = layer_color(Layer::Cu(layer));
-                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 200)
-            };
-            for (a, b, layer) in &r.segs {
-                fill_blob(painter, tr, &Blob::line(*a, *b, r.width), ghost(*layer));
-            }
-            if let Some(q) = self.hover_q {
-                let (to, _) = self.route_snap(q, 4.0 / self.scale);
-                let legs = App::legs(r.from, to, r.diagonal_first);
-                for w in legs.windows(2) {
-                    fill_blob(painter, tr, &Blob::line(w[0], w[1], r.width), ghost(r.layer).gamma_multiply(0.6));
-                }
-                let c = &self.doc.rules;
-                // The clearance this track needs, as a faint halo.
-                for w in legs.windows(2) {
-                    stroke_blob(painter, tr, &Blob::line(w[0], w[1], r.width + 2.0 * c.clearance), Stroke::new(1.0, Color32::from_white_alpha(40)));
-                }
-                painter.circle_stroke(tr.pt(to), 5.0, Stroke::new(1.2, FG));
-            }
-            for v in &r.vias {
-                fill_blob(painter, tr, &Blob::dot(*v, doc.rules.via_dia), VIA);
-                painter.circle_filled(tr.pt(*v), tr.len(doc.rules.via_drill / 2.0), theme::WELL);
-            }
+            self.draw_route(painter, tr, r);
         } else if self.tool == Tool::Route
-            && let Some(q) = self.hover_q
+            && let Some((at, item)) = self.route_target
         {
-            let (at, item) = self.route_snap(q, 4.0 / self.scale);
             let c = if item.is_some() { ACCENT } else { FG };
             painter.circle_stroke(tr.pt(at), 5.0, Stroke::new(1.2, c));
         }
@@ -796,6 +781,68 @@ impl App {
         }
     }
 
+    /// Placed segments solid, what a click would place shaded, the
+    /// look-ahead segment hollow; red where it's blocked or, ignoring
+    /// obstacles, running into something.
+    fn draw_route(&self, painter: &Painter, tr: &Tr, r: &Route) {
+        let doc = &self.doc;
+        let colour = |layer: u8, alpha: u8| {
+            let c = layer_color(Layer::Cu(layer));
+            Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+        };
+        // Other nets' clearance, near where the route is going (Ctrl+W).
+        if self.route_mode.show_clearance {
+            let around = self.route_target.map(|t| t.0).unwrap_or(r.from);
+            let reach = BBox::of(&[around, r.from]).grown(6.0);
+            for o in &self.obstacles.list {
+                if o.bbox.touches(&reach) && o.item.is_some() {
+                    let grown = Blob { core: o.blob.core.clone(), r: o.blob.r + o.gap + r.width / 2.0 };
+                    fill_blob(painter, tr, &grown, Color32::from_white_alpha(14));
+                    stroke_blob(painter, tr, &grown, Stroke::new(1.0, Color32::from_white_alpha(45)));
+                }
+            }
+        }
+        for (a, b, layer) in &r.segs {
+            fill_blob(painter, tr, &Blob::line(*a, *b, r.width), colour(*layer, 235));
+        }
+        for v in &r.vias {
+            fill_blob(painter, tr, &Blob::dot(*v, doc.rules.via_dia), VIA);
+            painter.circle_filled(tr.pt(*v), tr.len(doc.rules.via_drill / 2.0), theme::WELL);
+        }
+        if let Some(c) = &self.plan {
+            let pts = &c.plan.pts;
+            let n = pts.len().saturating_sub(1);
+            let hollow_last = self.route_mode.look_ahead && n >= 2;
+            for (i, s) in pts.windows(2).enumerate() {
+                let seg = Blob::line(s[0], s[1], r.width);
+                if hollow_last && i == n - 1 {
+                    stroke_blob(painter, tr, &seg, Stroke::new(1.4, colour(r.layer, 230)));
+                } else {
+                    fill_blob(painter, tr, &seg, colour(r.layer, 120));
+                    stroke_blob(painter, tr, &seg, Stroke::new(1.0, colour(r.layer, 220)));
+                }
+            }
+            for item in &c.plan.hits {
+                if let Some(&k) = self.copper.index.get(item) {
+                    stroke_blob(painter, tr, &self.copper.items[k].blob, Stroke::new(2.0, theme::RED));
+                }
+            }
+            if c.plan.blocked
+                && let Some(end) = c.plan.end()
+            {
+                let e = tr.pt(end);
+                painter.circle_stroke(e, 7.0, Stroke::new(1.6, theme::RED));
+                let t = tr.pt(c.to);
+                painter.line_segment([t + vec2(-5.0, -5.0), t + vec2(5.0, 5.0)], Stroke::new(1.6, theme::RED));
+                painter.line_segment([t + vec2(5.0, -5.0), t + vec2(-5.0, 5.0)], Stroke::new(1.6, theme::RED));
+            }
+        }
+        if let Some((at, item)) = self.route_target {
+            let c = if item.is_some() { ACCENT } else { FG };
+            painter.circle_stroke(tr.pt(at), 5.0, Stroke::new(1.2, c));
+        }
+    }
+
     fn draw_scale(&self, painter: &Painter, rect: Rect) {
         let mut step = 0.1;
         while step * self.scale < 40.0 {
@@ -834,7 +881,15 @@ impl App {
             }
         }
         if let Some(r) = &self.route {
-            let text = format!("Routing {} · {}", self.doc.net_name(r.net), self.unit.len(r.width));
+            let m = &self.route_mode;
+            let blocked = if self.plan.as_ref().is_some_and(|c| c.plan.blocked) { " · blocked" } else { "" };
+            let text = format!(
+                "Routing {} · {} · {} · {}{blocked}",
+                self.doc.net_name(r.net),
+                self.unit.len(r.width),
+                m.corner.name(),
+                m.conflict.name()
+            );
             chip(ui, &text, layer_color(Layer::Cu(r.layer)), "route-chip");
         }
     }
@@ -899,6 +954,17 @@ impl App {
                                 }
                             });
 
+                        if self.tool == Tool::Route {
+                            let m = self.route_mode;
+                            let label = format!("{} · {}", m.corner.name(), m.conflict.name());
+                            let pill = segmented_tool(ui, Icon::Filter, &label, false)
+                                .on_hover_text("How the router turns corners and gets past things (Shift+Space, Shift+R)");
+                            egui::Popup::from_toggle_button_response(&pill)
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                .align(egui::RectAlign::TOP_START)
+                                .show(|ui| self.routing_menu(ui));
+                        }
+
                         let grid = segmented_tool(ui, Icon::Grid, &self.unit.len(self.grid), self.show_grid)
                             .on_hover_text("Snap grid (G shows or hides it)");
                         egui::Popup::from_toggle_button_response(&grid)
@@ -931,6 +997,40 @@ impl App {
                     });
                 });
         });
+    }
+
+    /// The router's settings, with the keys that change them as you route.
+    fn routing_menu(&mut self, ui: &mut Ui) {
+        use crate::pcb::router::{Conflict, Corner};
+        ui.set_min_width(250.0);
+        let m = &mut self.route_mode;
+        let label = |ui: &mut Ui, text: &str| {
+            ui.label(RichText::new(text).size(12.5).color(DIM));
+        };
+        label(ui, "Corners  ·  Shift+Space");
+        for c in [Corner::D45, Corner::D90, Corner::Any] {
+            if ui.selectable_label(m.corner == c, c.name()).clicked() {
+                m.corner = c;
+            }
+        }
+        ui.separator();
+        label(ui, "When something's in the way  ·  Shift+R");
+        for c in [Conflict::Walkaround, Conflict::Stop, Conflict::Ignore] {
+            if ui.selectable_label(m.conflict == c, c.name()).clicked() {
+                m.conflict = c;
+            }
+        }
+        ui.separator();
+        ui.checkbox(&mut m.look_ahead, "Look-ahead segment  (1)");
+        ui.checkbox(&mut m.remove_loops, "Take out old paths a new route replaces  (Shift+D)");
+        ui.checkbox(&mut m.show_clearance, "Show clearance round other nets  (Ctrl+W)");
+        ui.separator();
+        label(ui, &format!("Width: {}  ·  3 cycles where it comes from", m.width_from.name()));
+        ui.add_space(2.0);
+        let keys = "Space flips the corner · V via to the other side · 2 via here\n\
+                    + − PgUp PgDn change layer with a via · Backspace takes back a click\n\
+                    Ctrl+click finishes the connection · Ctrl stops snapping · Esc ends";
+        ui.label(RichText::new(keys).size(11.5).color(FAINT));
     }
 
     pub fn drive_screenshot(&mut self, ctx: &egui::Context) {

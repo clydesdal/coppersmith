@@ -15,6 +15,23 @@ library management in one program, in Copperview's look.
 - Gerber X2 + Excellon output in Altium naming; opens in Copperview.
 - Undo/redo, save-changes guard, scripted screenshots for testing.
 
+## 1½. Router, the Altium way — started (0.2)
+
+Done: look-ahead segment, 45°/90°/any-angle corners with direction flip,
+walk around / stop at first obstacle / ignore obstacles, Ctrl+click
+auto-complete, vias mid-route on any layer, width sources, Backspace undoes a
+click, loop and stub removal after re-routing, clearance shading, the routing
+pill.
+
+Next:
+- Push obstacles and hug-and-push: shove other nets' tracks and vias aside,
+  springing back if the route moves away.
+- Arc corner modes (45° and 90° with arcs, arc radius keys), which need arcs
+  as a track shape in the board model, the rule check and the Gerber writer.
+- Gloss: re-smooth the routed and neighbouring tracks after each click.
+- Interactive sliding of existing tracks, and dragging vias with the router.
+- Follow mode, the length gauge, differential pairs, length tuning.
+
 ## 2. Library manager
 
 - Footprint editor: pads (shape, size, drill, turn, numbering), pad arrays, silkscreen, courtyard and assembly drawing, IPC-7351 wizards for the package families already generated.
