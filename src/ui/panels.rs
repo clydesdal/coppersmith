@@ -583,6 +583,9 @@ impl App {
             field(ui, "From the edge", |ui| length(ui, u, &mut r.edge_clearance));
             field(ui, "Mask margin", |ui| length(ui, u, &mut r.mask_margin));
             field(ui, "Name height", |ui| length(ui, u, &mut r.text_height));
+            // Where a 45° track turns, the 45° step is never shorter than this,
+            // so corners never close up into right angles.
+            field(ui, "Shortest 45°", |ui| length(ui, u, &mut r.min_diag));
         });
     }
 

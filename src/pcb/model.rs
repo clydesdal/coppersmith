@@ -352,6 +352,14 @@ pub struct Rules {
     pub mask_margin: f64,
     pub silk_width: f64,
     pub text_height: f64,
+    /// The shortest a 45° step may be where a 45° track turns, so a corner
+    /// never closes up into a right angle.
+    #[serde(default = "default_min_diag")]
+    pub min_diag: f64,
+}
+
+fn default_min_diag() -> f64 {
+    0.5
 }
 
 impl Default for Rules {
@@ -369,6 +377,7 @@ impl Default for Rules {
             mask_margin: 0.05,
             silk_width: 0.15,
             text_height: 1.0,
+            min_diag: default_min_diag(),
         }
     }
 }

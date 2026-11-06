@@ -10,14 +10,14 @@
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
 use crate::pcb::copper::{Item, analyse};
-use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, legs, shove_from};
+use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, chamfer, legs, shove_from};
 use std::collections::HashSet;
 
 /// Runs at a multiple of 45°.
 pub fn octilinear(d: P) -> bool {
+    // Corners are kept to the nanometre, so allow a few of those.
     let (x, y) = (d.x.abs(), d.y.abs());
-    let l = d.len();
-    l > 1e-9 && (x < 1e-6 * l.max(1.0) || y < 1e-6 * l.max(1.0) || (x - y).abs() < 1e-6 * l.max(1.0))
+    d.len() > 1e-9 && (x < 1e-5 || y < 1e-5 || (x - y).abs() < 1e-5)
 }
 
 fn straight45(t: &Track) -> bool {
@@ -215,6 +215,87 @@ pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<B
         apply_pushed(&mut b, &runs, &vias);
     }
     Some(b)
+}
+
+fn unit(d: P) -> P {
+    d.scale(1.0 / d.len().max(1e-12))
+}
+
+/// Keeps 45° work free of square corners after a move. Where two straight
+/// 45° tracks now meet at 90° or sharper (with no pad or via there), the
+/// corner is cut with 45° steps `min` long. False when a corner can't be
+/// cut, or when a 45° step between two tracks at right angles has been
+/// squeezed shorter than `min`: the move should stop short of that.
+pub fn fix_corners(board: &mut Board, changed: &HashSet<u32>, min: f64) -> bool {
+    if min <= 0.0 {
+        return true;
+    }
+    // The ends of what changed are where new corners can be.
+    let mut joints: Vec<(P, u8)> = Vec::new();
+    for t in board.tracks.iter().filter(|t| changed.contains(&t.id) && straight45(t)) {
+        for q in [t.a, t.b] {
+            if !joints.iter().any(|j| j.0.same(q) && j.1 == t.layer) {
+                joints.push((q, t.layer));
+            }
+        }
+    }
+    for (q, layer) in &joints {
+        let at: Vec<usize> = board
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.layer == *layer && (t.a.same(*q) || t.b.same(*q)))
+            .map(|(i, _)| i)
+            .collect();
+        if at.len() != 2 || pinned(board, *q) || !at.iter().all(|&i| straight45(&board.tracks[i])) {
+            continue;
+        }
+        let (t1, t2) = (board.tracks[at[0]].clone(), board.tracks[at[1]].clone());
+        let (f1, f2) = (far_end(&t1, *q), far_end(&t2, *q));
+        let (u, v) = (unit(q.sub(f1)), unit(f2.sub(*q)));
+        if u.dot(v) > 1e-9 {
+            continue;
+        }
+        let Some((a, b, cut)) = chamfer(*q, u, v, min) else { return false };
+        if a >= q.dist(f1) - 1e-6 || b >= q.dist(f2) - 1e-6 {
+            return false;
+        }
+        set_end(&mut board.tracks[at[0]], *q, cut[0]);
+        set_end(&mut board.tracks[at[1]], *q, *cut.last().unwrap());
+        for s in cut.windows(2) {
+            add_track(board, &t1, s[0], s[1]);
+        }
+    }
+    // Nothing between two tracks at right angles has got too short.
+    let near: HashSet<u32> = board
+        .tracks
+        .iter()
+        .filter(|t| changed.contains(&t.id) || joints.iter().any(|j| t.a.same(j.0) || t.b.same(j.0)))
+        .map(|t| t.id)
+        .collect();
+    for s in board.tracks.iter().filter(|t| near.contains(&t.id) && straight45(t)) {
+        if s.a.dist(s.b) >= min - 1e-6 {
+            continue;
+        }
+        let n1 = others_at(board, s.a, s.layer, s.id);
+        let n2 = others_at(board, s.b, s.layer, s.id);
+        if n1.len() != 1 || n2.len() != 1 || pinned(board, s.a) || pinned(board, s.b) {
+            continue;
+        }
+        let (t1, t2) = (&board.tracks[n1[0]], &board.tracks[n2[0]]);
+        let din = unit(s.a.sub(far_end(t1, s.a)));
+        let dout = unit(far_end(t2, s.b).sub(s.b));
+        let ds = unit(s.b.sub(s.a));
+        if din.cross(ds) * ds.cross(dout) > 0.0 && din.dot(dout).abs() < 1e-6 {
+            return false;
+        }
+    }
+    true
+}
+
+/// The tracks that differ between two boards.
+pub fn changed_tracks(before: &Board, after: &Board) -> HashSet<u32> {
+    after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect()
 }
 
 /// Re-lays a track from its far end `from` to `to` as a straight leg and a
@@ -586,5 +667,53 @@ mod pushing_while_moving {
         let mut after = b.clone();
         after.fp_mut(part).unwrap().at = p(7.0, -0.8);
         assert!(push_after_move(&b, after, true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod min_45 {
+    use super::*;
+
+    fn track(b: &mut Board, a: (f64, f64), e: (f64, f64)) -> u32 {
+        let id = b.new_id();
+        b.tracks.push(Track { mid: None, id, a: p(a.0, a.1), b: p(e.0, e.1), w: 0.25, layer: TOP, net: 1 });
+        id
+    }
+
+    #[test]
+    fn a_square_corner_a_move_makes_is_cut() {
+        let mut b = Board::default();
+        let t1 = track(&mut b, (0.0, 0.0), (5.0, 0.0));
+        let t2 = track(&mut b, (5.0, 0.0), (5.0, 5.0));
+        let changed: HashSet<u32> = [t1, t2].into();
+        assert!(fix_corners(&mut b, &changed, 0.5));
+        assert_eq!(b.tracks.len(), 3);
+        assert!(b.tracks.iter().all(|t| octilinear(t.b.sub(t.a))));
+        let diag = b.tracks.iter().find(|t| t.id != t1 && t.id != t2).unwrap();
+        assert!((diag.a.dist(diag.b) - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_slide_stops_before_its_piece_gets_too_short() {
+        // Up at 45°, along 10 mm, down at 45°: sliding up shortens the middle
+        // by twice the slide.
+        let make = || {
+            let mut b = Board::default();
+            track(&mut b, (0.0, 0.0), (2.0, 2.0));
+            let mid = track(&mut b, (2.0, 2.0), (12.0, 2.0));
+            track(&mut b, (12.0, 2.0), (14.0, 0.0));
+            (b, mid)
+        };
+        let ok = |d: f64| {
+            let (mut b, mid) = make();
+            let before = b.clone();
+            if !slide(&mut b, mid, p(0.0, d)) {
+                return false;
+            }
+            let changed = changed_tracks(&before, &b);
+            fix_corners(&mut b, &changed, 0.5)
+        };
+        assert!(ok(4.7), "leaves 0.6 mm");
+        assert!(!ok(4.8), "would leave 0.4 mm");
     }
 }

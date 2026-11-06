@@ -465,6 +465,9 @@ impl App {
         if self.doc == *before {
             return;
         }
+        let changed = crate::pcb::slide::changed_tracks(before, &self.doc);
+        let min = self.doc.rules.min_diag;
+        crate::pcb::slide::fix_corners(&mut self.doc, &changed, min);
         match crate::pcb::slide::push_after_move(before, self.doc.clone(), self.route_mode.via_push) {
             Some(b) => {
                 if b != self.doc {

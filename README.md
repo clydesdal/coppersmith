@@ -57,6 +57,23 @@ anything that's too close.
 Tracks that weren't at a multiple of 45° to begin with just stretch, so
 any-angle work stays as it was drawn. Arcs keep their bulge.
 
+### No square corners
+
+The board rule **Shortest 45°** (0.5 mm unless you change it, in the Rules
+card) keeps 45° work from closing up into right angles:
+
+- Routing at 45°, a turn of 90° or more is cut with 45° steps at least that
+  long (one for a right angle, two for a sharper turn), and a 45° step that's
+  too short is lengthened, wherever the clearance allows. That includes the
+  corner at a click point, which may shorten the piece placed before it.
+  Where there's no room to cut, the short stretch is re-laid as a straight
+  leg and a 45° leg.
+- Moving, a square corner a move makes is cut the same way, and a move that
+  would squeeze a 45° step below the rule stops there instead.
+- Pushed tracks get the same treatment at the corners a push makes.
+
+The 90° and arc corner styles keep their corners: that's what they're for.
+
 ### Routing
 
 While routing, the router shows what a click would lay from the route's end

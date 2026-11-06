@@ -479,6 +479,12 @@ impl App {
                 App::move_end(&mut doc, id, far, to);
             }
         }
+        // No square corners on 45° work, and no 45° step squeezed too short.
+        let changed = crate::pcb::slide::changed_tracks(&drag.before, &doc);
+        let min = doc.rules.min_diag;
+        if !crate::pcb::slide::fix_corners(&mut doc, &changed, min) {
+            return None;
+        }
         Some(doc)
     }
 
@@ -509,7 +515,7 @@ impl App {
                     }
                 }
                 self.notice = Some(if self.dragged(&drag, full, 1.0).is_none() {
-                    "Can't slide further: the track would shrink to nothing.".into()
+                    "Can't go further: a 45° step would get shorter than the rule allows (or a track would vanish).".into()
                 } else {
                     "Can't go further: something there can't move out of the way. Hold Ctrl to move without pushing.".into()
                 });

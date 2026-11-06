@@ -44,6 +44,9 @@ stops at what can't move, and is checked by the rule check on release.
 Done in 0.3.5: every move pushes — parts, vias, tracks, corners, track ends,
 turns and flips — with Ctrl to move freely.
 
+Done in 0.3.6: the Shortest 45° rule — routes, moves and pushes never leave
+square corners on 45° work.
+
 Next:
 - Keep arc corners tangent while sliding.
 - Push arcs (today an existing arc is fixed when pushing).

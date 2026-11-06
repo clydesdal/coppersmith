@@ -337,6 +337,169 @@ pub fn fillet(obs: &[Obstacle], pts: &[P], w: f64, radius: f64) -> (Vec<P>, Vec<
     (out, mids)
 }
 
+/// Cuts a corner where a path turns 90° or more into 45° steps `len` long:
+/// one step for a right angle, two for a sharper turn. `u` is the way in to
+/// the corner `c`, `v` the way out (both unit length). Returns how far back
+/// along `u` and on along `v` the cut starts and ends, and its points.
+pub fn chamfer(c: P, u: P, v: P, len: f64) -> Option<(f64, f64, Vec<P>)> {
+    let (cross, dot) = (u.cross(v), u.dot(v));
+    let turn = cross.atan2(dot).abs();
+    let steps = (turn / std::f64::consts::FRAC_PI_4).round() as i32 - 1;
+    if !(1..=2).contains(&steps) || cross.abs() < 1e-9 {
+        return None;
+    }
+    let s = cross.signum();
+    let ways: Vec<P> = (1..=steps).map(|k| u.rot(s * 45.0 * k as f64)).collect();
+    let sum = ways.iter().fold(P::default(), |acc, w| acc.add(w.scale(len)));
+    let (a, b) = (sum.cross(v) / cross, u.cross(sum) / cross);
+    if a <= 1e-9 || b <= 1e-9 {
+        return None;
+    }
+    let mut pts = vec![c.sub(u.scale(a)).rounded()];
+    let mut q = c.sub(u.scale(a));
+    for w in &ways[..ways.len() - 1] {
+        q = q.add(w.scale(len));
+        pts.push(q.rounded());
+    }
+    pts.push(c.add(v.scale(b)).rounded());
+    Some((a, b, pts))
+}
+
+fn unit(d: P) -> P {
+    d.scale(1.0 / d.len().max(1e-12))
+}
+
+/// Keeps a 45° path free of square corners: a 45° step shorter than `min`
+/// between two pieces at right angles is lengthened, and a turn of 90° or
+/// more is cut with 45° steps `min` long, wherever that stays clear of `obs`.
+/// `lead` is the point before the path's start, when the path carries on
+/// from a placed piece; the path's first point may then move back along it.
+/// Corners at points in `keep` are left alone.
+pub fn chamfer_path(obs: &[Obstacle], pts: &[P], w: f64, min: f64, lead: Option<P>, keep: &[P]) -> Vec<P> {
+    if min <= 0.0 || pts.len() < 2 {
+        return pts.to_vec();
+    }
+    let mut path: Vec<P> = lead.into_iter().chain(pts.iter().copied()).collect();
+    let first = usize::from(lead.is_some());
+    for _ in 0..4 {
+        lengthen_short_steps(obs, &mut path, w, min, keep);
+        cut_square_corners(obs, &mut path, w, min, first, keep);
+        if !relay_square_corners(obs, &mut path, w, first, keep) {
+            break;
+        }
+    }
+    if lead.is_some() {
+        path.remove(0);
+    }
+    merge_collinear(path)
+}
+
+fn kept(keep: &[P], q: P) -> bool {
+    keep.iter().any(|k| k.same(q))
+}
+
+fn square(path: &[P], i: usize) -> bool {
+    path[i].sub(path[i - 1]).dot(path[i + 1].sub(path[i])) <= 1e-9
+}
+
+/// Short 45° steps between pieces at right angles go back to a sharp
+/// corner, which the cut then makes at full length.
+fn lengthen_short_steps(obs: &[Obstacle], path: &mut Vec<P>, w: f64, min: f64, keep: &[P]) {
+    let mut i = 1;
+    while i + 2 < path.len() {
+        let (p0, s0, s1, p1) = (path[i - 1], path[i], path[i + 1], path[i + 2]);
+        let (din, ds, dout) = (unit(s0.sub(p0)), unit(s1.sub(s0)), unit(p1.sub(s1)));
+        let bridges = s0.dist(s1) < min - 1e-6
+            && din.cross(ds) * ds.cross(dout) > 0.0
+            && din.dot(dout).abs() < 1e-6
+            && !kept(keep, s0)
+            && !kept(keep, s1);
+        if bridges
+            && let Some(x) = meet_lines(p0, din, p1, dout)
+            && x.sub(p0).dot(din) > 1e-6
+            && p1.sub(x).dot(dout) > 1e-6
+            && clear(obs, &[p0, x, p1], w)
+        {
+            path.splice(i..=i + 1, [x]);
+            continue;
+        }
+        i += 1;
+    }
+}
+
+/// Square and sharper corners are cut with 45° steps `min` long, where
+/// there's room on both sides and the cut stays clear.
+fn cut_square_corners(obs: &[Obstacle], path: &mut Vec<P>, w: f64, min: f64, first: usize, keep: &[P]) {
+    let mut i = 1;
+    while i + 1 < path.len() {
+        let (p0, c, p1) = (path[i - 1], path[i], path[i + 1]);
+        let (u, v) = (unit(c.sub(p0)), unit(p1.sub(c)));
+        if u.dot(v) <= 1e-9
+            && !kept(keep, c)
+            && let Some((a, b, cut)) = chamfer(c, u, v, min)
+        {
+            let avail_in = c.dist(p0) * if i - 1 <= first { 1.0 } else { 0.5 };
+            let avail_out = c.dist(p1) * if i + 2 == path.len() { 1.0 } else { 0.5 };
+            if a < avail_in - 1e-6 && b < avail_out - 1e-6 && clear(obs, &cut, w) {
+                let n = cut.len();
+                path.splice(i..=i, cut);
+                i += n;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// A square corner with no room to cut (usually a little jog at the end):
+/// re-lays the short stretch round it as a straight leg and a 45° leg, if
+/// that's clear and leaves no square corner. True if anything changed.
+fn relay_square_corners(obs: &[Obstacle], path: &mut Vec<P>, w: f64, first: usize, keep: &[P]) -> bool {
+    let mut changed = false;
+    let mut i = 1;
+    while i + 1 < path.len() {
+        if !square(path, i) || kept(keep, path[i]) {
+            i += 1;
+            continue;
+        }
+        let mut done = false;
+        let starts: Vec<usize> = [i - 1, i.saturating_sub(2)].into_iter().filter(|s| *s >= first).collect();
+        'search: for &s in &starts {
+            for e in (i + 1..=(i + 3).min(path.len() - 1)).rev() {
+                for flip in [false, true] {
+                    let cand = legs(path[s], path[e], Corner::D45, flip);
+                    if !clear(obs, &cand, w) {
+                        continue;
+                    }
+                    let mut next: Vec<P> = path[..s].to_vec();
+                    next.extend_from_slice(&cand);
+                    next.extend_from_slice(&path[e + 1..]);
+                    let next = merge_collinear(next);
+                    let lo = s.saturating_sub(1).max(1);
+                    let hi = (s + cand.len() + 1).min(next.len().saturating_sub(1));
+                    if (lo..hi).all(|k| !square(&next, k)) {
+                        *path = next;
+                        done = true;
+                        break 'search;
+                    }
+                }
+            }
+        }
+        changed |= done;
+        i += 1;
+    }
+    changed
+}
+
+fn meet_lines(p1: P, d1: P, p2: P, d2: P) -> Option<P> {
+    let den = d1.cross(d2);
+    if den.abs() < 1e-12 {
+        return None;
+    }
+    let t = p2.sub(p1).cross(d2) / den;
+    Some(p1.add(d1.scale(t)).rounded())
+}
+
 /// Cuts a path at its first clash: straight pieces as far as they're clear,
 /// arcs not at all. True when it was cut.
 pub fn cut_at_clash(obs: &[Obstacle], pieces: &[(P, P, Option<P>)], w: f64) -> (Vec<P>, Vec<Option<P>>, bool) {
@@ -675,6 +838,11 @@ pub struct Scene {
     pub via_push: bool,
     /// The radius corners are rounded to in the arc corner styles.
     pub arc_radius: f64,
+    /// The shortest 45° step at a corner (the board's rule).
+    pub min_diag: f64,
+    /// The point before the route's end, when the route carries on from a
+    /// placed piece on this layer: the joint can be cut back along it.
+    pub lead: Option<P>,
 }
 
 impl Scene {
@@ -697,6 +865,8 @@ impl Scene {
             vias: board.vias.iter().filter(|v| v.net != net || net == 0).map(|v| (v.id, v.at, v.dia, v.net)).collect(),
             via_push: true,
             arc_radius: 1.0,
+            min_diag: board.rules.min_diag,
+            lead: None,
         }
     }
 
@@ -711,6 +881,11 @@ impl Scene {
 #[allow(clippy::too_many_arguments)]
 pub fn plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, mode: Conflict, board: BBox, held: &[(P, P)]) -> Plan {
     let mut plan = plan_straight(scene, a, b, w, corner, flip, mode, board, held);
+    // At 45°, no square corners (pushing modes do this before pushing).
+    if corner == Corner::D45 && plan.pushed.is_empty() && plan.vias.is_empty() {
+        let obs: &[Obstacle] = if mode == Conflict::Ignore { &[] } else { &scene.own };
+        plan.pts = chamfer_path(obs, &plan.pts, w, scene.min_diag, scene.lead, &[]);
+    }
     // Pushing modes round their corners before pushing (see push_plan).
     if corner.arcs() && plan.mids.is_empty() {
         let obs: &[Obstacle] = if mode == Conflict::Ignore { &[] } else { &scene.own };
@@ -783,6 +958,10 @@ fn length(pts: &[P]) -> f64 {
 fn push_plan(scene: &Scene, a: P, b: P, w: f64, corner: Corner, flip: bool, area: BBox, held: &[(P, P)], arcs: bool) -> Plan {
     let fixed: Vec<Obstacle> = scene.own.iter().filter(|o| !scene.movable(o)).cloned().collect();
     let mut head = walkaround(&fixed, a, b, w, corner, flip, area);
+    // Cut square corners first, so what's pushed keeps clear of the cuts.
+    if corner == Corner::D45 && !arcs {
+        head.pts = chamfer_path(&fixed, &head.pts, w, scene.min_diag, scene.lead, &[]);
+    }
     // Round the corners first, so what's pushed keeps clear of the arcs.
     let mut width = w;
     if arcs {
@@ -971,7 +1150,7 @@ fn splice(pts: &[P], s0: f64, s1: f64, mid: &[P]) -> Vec<P> {
 /// Re-bends the stretch of `run` from `s0` to `s1` along it to keep clear of
 /// `obs`, leaving the rest exactly where it was. Widens the stretch if it has
 /// to. None when it can't be done, or only the long way round.
-fn rebend(obs: &[Obstacle], run: &[P], w: f64, s0: f64, s1: f64, new_end: Option<P>) -> Option<Vec<P>> {
+fn rebend(obs: &[Obstacle], run: &[P], w: f64, s0: f64, s1: f64, new_end: Option<P>, min_diag: f64) -> Option<Vec<P>> {
     let total = *along(run).last().unwrap();
     for pad in [1.0, 2.5, f64::INFINITY] {
         let (a0, a1) = ((s0 - pad).max(0.0), (s1 + pad).min(total));
@@ -996,6 +1175,10 @@ fn rebend(obs: &[Obstacle], run: &[P], w: f64, s0: f64, s1: f64, new_end: Option
         let mut whole = splice(run, a0, a1, &bent.pts);
         if new_end.is_some() && a1 >= total - 1e-9 {
             *whole.last_mut().unwrap() = b;
+        }
+        // No square corners in what's been bent; the rest stays as it was.
+        if min_diag > 0.0 {
+            whole = chamfer_path(obs, &whole, w, min_diag, None, run);
         }
         if !clear(obs, &whole, w) {
             continue;
@@ -1030,7 +1213,7 @@ fn crowded_stretch(run: &[P], w: f64, net: u32, who: Owner, pushers: &[Pusher], 
 
 /// Re-bends a run so the end that was at `from` finishes at `to`, changing
 /// only the stretch near that end.
-fn follow(obs: &[Obstacle], run: &[P], from: P, to: P, w: f64) -> Option<Vec<P>> {
+fn follow(obs: &[Obstacle], run: &[P], from: P, to: P, w: f64, min_diag: f64) -> Option<Vec<P>> {
     let at_start = run[0].same(from);
     let mut path: Vec<P> = run.to_vec();
     if at_start {
@@ -1038,7 +1221,7 @@ fn follow(obs: &[Obstacle], run: &[P], from: P, to: P, w: f64) -> Option<Vec<P>>
     }
     let total = *along(&path).last().unwrap();
     let near = (to.dist(from) + 0.5).min(total);
-    let mut pts = rebend(obs, &path, w, total - near, total, Some(to))?;
+    let mut pts = rebend(obs, &path, w, total - near, total, Some(to), min_diag)?;
     if at_start {
         pts.reverse();
     }
@@ -1121,7 +1304,7 @@ pub fn shove_from(scene: &Scene, push: &[(Blob, u32)]) -> Option<(Vec<Moved>, Ve
             }
         }
         let Some((s0, s1)) = crowded_stretch(&runs[i], l.w, l.net, Owner::Run(i), &pushers, c) else { continue };
-        let pts = rebend(&obs, &runs[i], l.w, s0, s1, None)?;
+        let pts = rebend(&obs, &runs[i], l.w, s0, s1, None, scene.min_diag)?;
         pushers.retain(|p| p.owner != Owner::Run(i));
         for s in pts.windows(2) {
             pushers.push(pusher(Blob::line(s[0], s[1], l.w), l.net, Owner::Run(i)));
@@ -1211,7 +1394,7 @@ fn move_via(
             }
             let mut obs: Vec<Obstacle> = scene.all.iter().filter(|o| !scene.movable(o) && other_net(o.net)).cloned().collect();
             obs.extend(pushers.iter().filter(|p| p.owner != Owner::Run(i) && p.owner != Owner::Via(k) && other_net(p.net)).map(|p| as_obstacle(p, c)));
-            match follow(&obs, run, from, to, l.w) {
+            match follow(&obs, run, from, to, l.w, scene.min_diag) {
                 Some(pts) => here.push((i, pts)),
                 None => {
                     fine = false;
@@ -1231,7 +1414,7 @@ fn move_via(
                     continue;
                 }
                 let obs: Vec<Obstacle> = all.iter().filter(|o| other_net(o.net)).cloned().collect();
-                match follow(&obs, &run, from, to, l.w) {
+                match follow(&obs, &run, from, to, l.w, scene.min_diag) {
                     Some(pts) => there.push(((slot, j), pts)),
                     None => {
                         fine = false;
@@ -1816,5 +1999,80 @@ mod pushes_keep_45 {
         let (moved, vias) = shove(&scene, &[(p(10.3, -5.0), p(10.3, -0.15))], 0.25).expect("the via moves");
         assert_eq!(vias.len(), 1);
         assert!(all_45(&moved), "{moved:?}");
+    }
+}
+
+#[cfg(test)]
+mod no_square_corners {
+    use super::*;
+    use crate::pcb::slide::octilinear;
+
+    /// Turns of 90° or more along a path.
+    fn squares(pts: &[P]) -> usize {
+        pts.windows(3).filter(|s| s[1].sub(s[0]).dot(s[2].sub(s[1])) <= 1e-9).count()
+    }
+
+    fn diag_lengths(pts: &[P]) -> Vec<f64> {
+        pts.windows(2)
+            .filter(|s| {
+                let d = s[1].sub(s[0]);
+                d.x.abs() > 1e-5 && d.y.abs() > 1e-5
+            })
+            .map(|s| s[0].dist(s[1]))
+            .collect()
+    }
+
+    #[test]
+    fn the_cut_for_a_right_angle_and_a_sharper_turn() {
+        let (a, b, cut) = chamfer(p(10.0, 0.0), p(1.0, 0.0), p(0.0, 1.0), 0.5).unwrap();
+        assert!((a - 0.5 / 2f64.sqrt()).abs() < 1e-9 && (b - a).abs() < 1e-9);
+        assert_eq!(cut.len(), 2);
+        let s = 0.5f64.sqrt();
+        let (_, _, sharp) = chamfer(p(10.0, 0.0), p(1.0, 0.0), p(-s, s), 0.5).unwrap();
+        assert_eq!(sharp.len(), 3, "two 45° steps for a 135° turn");
+        assert!(sharp.windows(2).all(|w| octilinear(w[1].sub(w[0]))));
+    }
+
+    #[test]
+    fn a_square_corner_is_cut_to_the_minimum() {
+        let out = chamfer_path(&[], &[p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)], 0.25, 0.5, None, &[]);
+        assert_eq!(squares(&out), 0, "{out:?}");
+        assert_eq!(diag_lengths(&out).len(), 1);
+        assert!((diag_lengths(&out)[0] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_short_45_step_is_lengthened() {
+        let path = [p(0.0, 0.0), p(10.0, 0.0), p(10.1, 0.1), p(10.1, 10.0)];
+        let out = chamfer_path(&[], &path, 0.25, 0.5, None, &[]);
+        assert_eq!(squares(&out), 0);
+        assert!(diag_lengths(&out).iter().all(|l| *l >= 0.5 - 1e-5), "{out:?}");
+    }
+
+    #[test]
+    fn the_joint_with_whats_placed_is_cut_back_along_it() {
+        let out = chamfer_path(&[], &[p(0.0, 0.0), p(0.0, 5.0)], 0.25, 0.5, Some(p(-5.0, 0.0)), &[]);
+        assert!(out[0].same(p(-0.5 / 2f64.sqrt(), 0.0)), "{out:?}");
+        assert_eq!(squares(&[&[p(-5.0, 0.0)][..], &out[..]].concat()), 0);
+    }
+
+    #[test]
+    fn routes_at_45_have_no_square_corners() {
+        let b = crate::pcb::sample::board();
+        let c = crate::pcb::copper::analyse(&b);
+        let mut found = 0;
+        let mut tried = 0;
+        for cu in c.items.iter().filter(|i| matches!(i.item, Item::Pad(..)) && i.net != 0 && i.on.has(TOP)) {
+            let scene = Scene::new(&b, &c, TOP, cu.net);
+            for to in [p(5.0, 5.0), p(45.0, 30.0), p(25.0, 30.0), p(40.0, 8.0), p(10.0, 28.0)] {
+                for mode in [Conflict::Walkaround, Conflict::Push, Conflict::HugPush] {
+                    let plan = plan(&scene, cu.anchors[0], to, 0.25, Corner::D45, false, mode, b.outline_bbox(), &[]);
+                    found += squares(&plan.pts);
+                    tried += 1;
+                }
+            }
+        }
+        assert!(tried > 50);
+        assert_eq!(found, 0, "square corners in {tried} routes");
     }
 }

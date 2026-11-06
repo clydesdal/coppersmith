@@ -50,6 +50,8 @@ struct Mark {
     layer: u8,
     /// The board before this click pushed anything aside.
     doc: Option<Board>,
+    /// The last placed piece before this click shortened it to cut a corner.
+    cut: Option<(P, P, u8, Option<P>)>,
 }
 
 /// Where the width of a new track comes from (3 cycles it).
@@ -196,6 +198,14 @@ impl App {
         }
     }
 
+    /// Where the last placed piece starts, when the route carries straight on
+    /// from it on the same layer: the next corner can be cut back along it.
+    fn lead(r: &Route) -> Option<P> {
+        let last = r.segs.last()?;
+        let via_here = r.vias.last().is_some_and(|v| v.same(r.from));
+        (last.2 == r.layer && last.3.is_none() && last.1.same(r.from) && !via_here).then_some(last.0)
+    }
+
     /// The route already placed on this layer, which pushed tracks keep clear of.
     fn held(r: &Route) -> Vec<(P, P)> {
         let pieces: Vec<(P, P, Option<P>)> = r.segs.iter().filter(|s| s.2 == r.layer).map(|s| (s.0, s.1, s.3)).collect();
@@ -220,6 +230,7 @@ impl App {
         self.route_scene();
         self.obstacles.scene.via_push = m.via_push;
         self.obstacles.scene.arc_radius = m.arc_radius;
+        self.obstacles.scene.lead = App::lead(&r);
         let plan = router::plan(&self.obstacles.scene, r.from, to, r.width, m.corner, r.flip, m.conflict, area, &App::held(&r));
         self.plan = Some(PlanCache { key, plan, to, item });
     }
@@ -360,13 +371,25 @@ impl App {
             self.notice = Some(format!("Not placed: {why}"));
             return;
         }
+        // The corner at the click point was cut back along the last placed piece.
+        let cut_back = !pts[0].same(r.from) && App::lead(&r).is_some();
+        if !pts[0].same(r.from) && !cut_back {
+            return;
+        }
         let doc_before = (!pushed.is_empty() || !moved.is_empty()).then(|| self.doc.clone());
         if doc_before.is_some() {
             router::apply_pushed(&mut self.doc, &pushed, &moved);
             self.touch();
         }
         let Some(route) = &mut self.route else { return };
-        route.marks.push(Mark { segs: route.segs.len(), vias: route.vias.len(), from: route.from, layer: route.layer, doc: doc_before });
+        route.marks.push(Mark { segs: route.segs.len(), vias: route.vias.len(), from: route.from, layer: route.layer, doc: doc_before, cut: None });
+        if cut_back {
+            // Backspace puts the piece back as it was, by keeping a copy.
+            if let Some(last) = route.segs.pop() {
+                route.segs.push((last.0, pts[0], last.2, None));
+                route.marks.last_mut().unwrap().cut = Some(last);
+            }
+        }
         route.segs.extend(segs);
         route.from = pts[upto - 1];
         route.net = net;
@@ -422,7 +445,7 @@ impl App {
         }
         let Some(r) = &mut self.route else { return };
         if fresh || to_layer.is_some() {
-            r.marks.push(Mark { segs: r.segs.len(), vias: r.vias.len(), from: r.from, layer: r.layer, doc: None });
+            r.marks.push(Mark { segs: r.segs.len(), vias: r.vias.len(), from: r.from, layer: r.layer, doc: None, cut: None });
         }
         if fresh {
             r.vias.push(r.from);
@@ -447,6 +470,10 @@ impl App {
         match r.marks.pop() {
             Some(m) => {
                 r.segs.truncate(m.segs);
+                if let Some(piece) = m.cut {
+                    r.segs.pop();
+                    r.segs.push(piece);
+                }
                 r.vias.truncate(m.vias);
                 r.from = m.from;
                 r.layer = m.layer;
