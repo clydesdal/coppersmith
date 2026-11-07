@@ -339,6 +339,9 @@ impl App {
         }
         let inner_only = !shown.is_empty() && shown.iter().all(|l| *l != TOP && *l != BOTTOM);
         silk_for_pick(&mut self.hidden, &mut self.silk_hid, inner_only);
+        // The courtyards are for placing, not for looking at copper: every pick turns them off.
+        self.hidden.insert(Layer::Court(Side::Top));
+        self.hidden.insert(Layer::Court(Side::Bottom));
     }
 
     pub fn layers_page(&mut self, ui: &mut Ui) {

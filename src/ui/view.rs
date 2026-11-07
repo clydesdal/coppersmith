@@ -35,7 +35,7 @@ pub fn layer_color(layer: Layer) -> Color32 {
         Layer::Cu(BOTTOM) => rgb(0x4f8cff),
         Layer::Cu(n) => INNER[(n as usize + 3) % 4],
         Layer::Silk(Side::Top) => rgb(0xf2d24b),
-        Layer::Silk(Side::Bottom) => rgb(0xfdf2d0),
+        Layer::Silk(Side::Bottom) => rgb(0xffffff),
         Layer::Court(_) => rgb(0x8a6fb0),
         Layer::Fab(_) => rgb(0x8d8e8e),
         Layer::Mask(_) | Layer::Paste(_) => rgb(0xa8adb5),
@@ -106,7 +106,7 @@ pub fn stroke_blob(painter: &Painter, tr: &Tr, b: &Blob, stroke: Stroke) {
 fn ink(painter: &Painter, tr: &Tr, i: Ink, color: Color32) {
     match i {
         Ink::Line(a, b, w) => {
-            let w = tr.len(w).max(1.0);
+            let w = tr.len(w).max(1.3);
             painter.line_segment([tr.pt(a), tr.pt(b)], Stroke::new(w, color));
             if w > 2.5 {
                 painter.circle_filled(tr.pt(a), w / 2.0, color);
@@ -163,6 +163,25 @@ fn closed_line(painter: &Painter, tr: &Tr, ring: &[P], stroke: Stroke, dashed: b
     }
 }
 
+/// The layers from the far side to the near one: the far side's drawings, the
+/// copper, the near side's. Seen from the top the bottom is the far side, and its
+/// silkscreen would lie under all the copper; when it's the side being worked on
+/// it's drawn over the copper instead, so it can be read.
+fn stack(mirror: bool, copper: Vec<u8>, working: Option<Side>) -> Vec<Layer> {
+    let (far, near) = if mirror { (Side::Top, Side::Bottom) } else { (Side::Bottom, Side::Top) };
+    let lift = working == Some(far);
+    let mut v = vec![Layer::Fab(far), Layer::Court(far)];
+    if !lift {
+        v.push(Layer::Silk(far));
+    }
+    v.extend(copper.into_iter().map(Layer::Cu));
+    if lift {
+        v.push(Layer::Silk(far));
+    }
+    v.extend([Layer::Fab(near), Layer::Court(near), Layer::Silk(near), Layer::Edge]);
+    v
+}
+
 fn nice_step(grid: f64, scale: f64) -> f64 {
     let mut step = grid.max(0.01);
     for k in [2.0, 2.5, 2.0, 2.0, 2.5, 2.0, 2.0, 2.5, 2.0] {
@@ -181,17 +200,15 @@ impl App {
 
     /// The layers from the far side to the near one, the active copper last.
     fn draw_order(&self) -> Vec<Layer> {
-        let (far, near) = if self.mirror { (Side::Top, Side::Bottom) } else { (Side::Bottom, Side::Top) };
         let mut copper: Vec<u8> = self.doc.copper_layers();
         if self.mirror == false {
             copper.reverse();
         }
         copper.retain(|l| *l != self.layer);
         copper.push(self.layer);
-        let mut v = vec![Layer::Fab(far), Layer::Court(far), Layer::Silk(far)];
-        v.extend(copper.into_iter().map(Layer::Cu));
-        v.extend([Layer::Fab(near), Layer::Court(near), Layer::Silk(near), Layer::Edge]);
-        v
+        // The side being worked on: its copper, or its silkscreen.
+        let working = Layer::Cu(self.layer).side().or(self.silk);
+        stack(self.mirror, copper, working)
     }
 
     fn shows(&self, layer: Layer) -> bool {
@@ -1631,4 +1648,32 @@ pub fn save_png(picture: &egui::ColorImage, path: &std::path::Path) -> Result<()
     let mut writer = enc.write_header().map_err(|e| e.to_string())?;
     let bytes: Vec<u8> = picture.pixels.iter().flat_map(|c| c.to_array()).collect();
     writer.write_image_data(&bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    fn at(v: &[Layer], l: Layer) -> usize {
+        v.iter().position(|x| *x == l).unwrap()
+    }
+
+    #[test]
+    fn the_working_sides_silk_is_over_its_copper_even_when_that_side_is_far() {
+        let copper = vec![31, 1, 0];
+        // From the top, working on the bottom: bottom silk goes over all the copper.
+        let v = stack(false, copper.clone(), Some(Side::Bottom));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(31)) && at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(0)));
+        assert!(at(&v, Layer::Silk(Side::Top)) > at(&v, Layer::Silk(Side::Bottom)), "the near side's silk is still on top of it");
+        // Working on the top: the bottom silk stays underneath, as it is.
+        let v = stack(false, copper.clone(), Some(Side::Top));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) < at(&v, Layer::Cu(31)));
+        // An inner layer works on neither side.
+        let v = stack(false, copper.clone(), None);
+        assert!(at(&v, Layer::Silk(Side::Bottom)) < at(&v, Layer::Cu(31)));
+        // From underneath the bottom is the near side: nothing to lift.
+        let v = stack(true, vec![0, 1, 31], Some(Side::Bottom));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(31)));
+        assert_eq!(v.len(), 10, "every layer is there once: fab, courtyard and silk on each side, three copper, the edge");
+    }
 }
