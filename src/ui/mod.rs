@@ -13,6 +13,7 @@ pub mod schview;
 pub mod panels;
 pub mod play;
 pub mod routing;
+pub mod rulesview;
 pub mod theme;
 pub mod view;
 pub mod view3d;

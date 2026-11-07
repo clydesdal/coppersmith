@@ -261,6 +261,69 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
     {
         rules.edge_clearance = nm(v);
     }
+
+    // The rest of what the rules ask. A limit no board could reach (Altium's "no maximum"
+    // is a huge number) is no limit.
+    let limit = |r: &HashMap<String, String>, k: &str, most: f64| len(r, k).map(nm).filter(|v| *v > 0.0 && *v < most).unwrap_or(0.0);
+    if let Some(r) = general("Width") {
+        rules.max_track = limit(r, "MAXLIMIT", 100.0);
+    }
+    if let Some(r) = general("HoleSize") {
+        rules.max_drill = limit(r, "MAXLIMIT", 100.0);
+    }
+    if let Some(r) = general("RoutingVias") {
+        rules.via_min_dia = limit(r, "MINWIDTH", 100.0);
+        rules.via_max_dia = limit(r, "MAXWIDTH", 100.0);
+        rules.via_min_drill = limit(r, "MINHOLEWIDTH", 100.0);
+        rules.via_max_drill = limit(r, "MAXHOLEWIDTH", 100.0);
+    }
+    if let Some(v) = general("HoleToHoleClearance").and_then(|r| len(r, "GAP")) {
+        rules.hole_gap = nm(v);
+    }
+    if let Some(v) = general("ComponentClearance").and_then(|r| len(r, "GAP")) {
+        rules.component_gap = nm(v);
+    }
+    if let Some(r) = general("Length") {
+        rules.min_net_length = limit(r, "MINLIMIT", 2000.0);
+        rules.max_net_length = limit(r, "MAXLIMIT", 2000.0);
+    }
+
+    // Which rules a file has on. Altium checks what its rules say and nothing else, so a
+    // rule the file doesn't have, or has switched off, is off here.
+    if !recs.is_empty() {
+        let enabled = |kind: &str| recs.iter().any(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case(kind)) && r.get("ENABLED").is_none_or(|e| e == "TRUE"));
+        // (The via style rule stays off: it's for through vias, and a board here can't say which of its vias are.)
+        for info in crate::pcb::rulebook::CATALOG.iter().filter(|i| i.support == crate::pcb::rulebook::Support::Checked && !i.altium.is_empty() && !i.altium.contains(' ') && i.id != crate::pcb::rulebook::RuleId::RoutingVias) {
+            rules.set_on(info.id, enabled(info.altium));
+        }
+    }
+
+    // What the file says of each rule, to show.
+    const BOOKKEEPING: [&str; 17] = ["NAME", "COMMENT", "UNIQUEID", "SELECTION", "LOCKED", "KEEPOUT", "USERROUTED", "POLYGONOUTLINE", "LAYER", "UNIONINDEX", "DRCENABLED", "DEFAULTRULE", "GATHERCONTROL", "RULEKIND", "NETSCOPE", "LAYERKIND", "DEFINEDBYLOGICALDOCUMENT"];
+    rules.seen = recs
+        .iter()
+        .filter_map(|r| {
+            let kind = r.get("RULEKIND")?.trim().to_string();
+            let mut params: Vec<(String, String)> = r
+                .iter()
+                .filter(|(k, _)| {
+                    !(k.starts_with("TOPLAYER_") || k.starts_with("BOTTOMLAYER_") || k.starts_with("MIDLAYER") || k.starts_with("SCOPE") || BOOKKEEPING.contains(&k.as_str()) || ["ENABLED", "PRIORITY"].contains(&k.as_str()) || k.ends_with("_V5"))
+                })
+                .map(|(k, v)| (k.clone(), v.trim_end_matches('\0').chars().take(80).collect::<String>()))
+                .collect();
+            params.sort();
+            params.truncate(16);
+            Some(crate::pcb::rulebook::SeenRule {
+                rule: crate::pcb::rulebook::RuleId::from_altium(&kind),
+                kind,
+                name: r.get("NAME").cloned().unwrap_or_default(),
+                scope: r.get("SCOPE1EXPRESSION").map(|s| s.trim_end_matches('\0').trim().to_string()).unwrap_or_default(),
+                enabled: r.get("ENABLED").is_none_or(|e| e == "TRUE"),
+                priority: r.get("PRIORITY").and_then(|p| p.trim().parse().ok()).unwrap_or(1),
+                params,
+            })
+        })
+        .collect();
     area
 }
 
@@ -295,6 +358,35 @@ fn rule_layer_key(key: &str) -> Option<(u8, &str)> {
     let (n, what) = r.split_once('_')?;
     let n: u8 = n.parse().ok()?;
     (n >= 1 && n < crate::pcb::model::BOTTOM).then_some((n, what))
+}
+
+/// The widths and gaps a rule gives each copper layer (`TOPLAYER_MINWIDTH`,
+/// `MIDLAYER3_MAXGAP`…), by layer.
+fn layer_limits(r: &HashMap<String, String>) -> Vec<LayerLimit> {
+    let val = |k: &str| r.get(k).map(|v| nm(mil(Some(&v.trim_end_matches('\0').to_string()))));
+    let mut layers: Vec<LayerLimit> = Vec::new();
+    for k in r.keys() {
+        let Some((layer, what)) = rule_layer_key(k) else { continue };
+        let Some(v) = val(k) else { continue };
+        let i = match layers.iter().position(|l| l.layer == layer) {
+            Some(i) => i,
+            None => {
+                layers.push(LayerLimit { layer, ..LayerLimit::default() });
+                layers.len() - 1
+            }
+        };
+        match what {
+            "MINWIDTH" => layers[i].min_width = Some(v),
+            "PREFWIDTH" => layers[i].pref_width = Some(v),
+            "MAXWIDTH" => layers[i].max_width = Some(v),
+            "MINGAP" => layers[i].min_gap = Some(v),
+            "PREFGAP" => layers[i].pref_gap = Some(v),
+            "MAXGAP" => layers[i].max_gap = Some(v),
+            _ => {}
+        }
+    }
+    layers.sort_by_key(|l| l.layer);
+    layers
 }
 
 /// The classes of nets and of pairs, the pairs, and the rules asked of classes.
@@ -352,28 +444,7 @@ fn read_classes(
         };
         let Some(scope) = r.get("SCOPE1EXPRESSION").and_then(|s| class_scope(s)) else { continue };
         let val = |k: &str| r.get(k).map(|v| nm(mil(Some(&v.trim_end_matches('\0').to_string()))));
-        let mut layers: Vec<LayerLimit> = Vec::new();
-        let entry = |layers: &mut Vec<LayerLimit>, layer: u8| -> usize {
-            if let Some(i) = layers.iter().position(|l| l.layer == layer) {
-                return i;
-            }
-            layers.push(LayerLimit { layer, ..LayerLimit::default() });
-            layers.len() - 1
-        };
-        for (k, _) in r {
-            let Some((layer, what)) = rule_layer_key(k) else { continue };
-            let Some(v) = val(k) else { continue };
-            let i = entry(&mut layers, layer);
-            match what {
-                "MINWIDTH" => layers[i].min_width = Some(v),
-                "PREFWIDTH" => layers[i].pref_width = Some(v),
-                "MAXWIDTH" => layers[i].max_width = Some(v),
-                "MINGAP" => layers[i].min_gap = Some(v),
-                "PREFGAP" => layers[i].pref_gap = Some(v),
-                "MAXGAP" => layers[i].max_gap = Some(v),
-                _ => {}
-            }
-        }
+        let mut layers = layer_limits(r);
         // Older files give one set of limits for every layer.
         if layers.is_empty() && kind != ClassRuleKind::MatchedLengths {
             let all = LayerLimit {
@@ -397,6 +468,8 @@ fn read_classes(
             layers,
             tolerance: val("TOLERANCE").filter(|t| *t > 0.0),
             max_uncoupled: val("MAXUNCOUPLEDLENGTH").filter(|t| *t > 0.0),
+            within_pairs: r.get("CHECKNETSINDIFFPAIR").is_none_or(|v| v.trim() != "FALSE"),
+            between_pairs: r.get("CHECKDIFFPAIRVSDIFFPAIR").is_some_and(|v| v.trim() == "TRUE"),
         });
     }
 }
@@ -1056,6 +1129,28 @@ mod tests {
         assert!(kinds.contains(&ClassRuleKind::MatchedLengths) && kinds.contains(&ClassRuleKind::PairRouting), "{kinds:?}");
     }
 
+    #[test]
+    fn the_real_boards_rules_are_read_with_their_settings_and_which_are_on() {
+        use crate::pcb::rulebook::RuleId;
+        let path = std::path::Path::new("/Users/dal/Layouts/EZDISP1V9_LAYOUTS/EZDisplay.PcbDoc");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let r = read(&bytes, "EZDisplay").unwrap().board.rules;
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        assert!(close(r.hole_gap, 9.8425 * 0.0254), "{}", r.hole_gap);
+        assert!(close(r.component_gap, 3.5 * 0.0254), "{}", r.component_gap);
+        assert!(close(r.max_drill, 248.0315 * 0.0254), "{}", r.max_drill);
+        assert!(close(r.via_max_dia, 24.0 * 0.0254) && close(r.via_min_dia, 17.7165 * 0.0254));
+        assert_eq!(r.max_track, 0.0, "a maximum of 1816 mm is no maximum");
+        assert_eq!(r.max_net_length, 0.0, "nor is 2540 m");
+        // The file's rules: those it has are on, the one it lacks (acute angle) is off, and the
+        // via style is held off for the reason given.
+        assert!(r.is_on(RuleId::Clearance) && r.is_on(RuleId::HoleToHoleClearance) && r.is_on(RuleId::MatchedLengths) && r.is_on(RuleId::Length));
+        assert!(!r.is_on(RuleId::AcuteAngle) && !r.is_on(RuleId::RoutingVias));
+        assert!(r.seen.len() > 40, "every rule in the file is kept: {}", r.seen.len());
+        assert!(r.seen.iter().any(|s| s.rule == Some(RuleId::HoleSize) && s.params.iter().any(|(k, _)| k == "MAXLIMIT")));
+        assert!(r.seen.iter().any(|s| s.kind == "SupplyNets"), "even the ones Coppersmith only lists");
+    }
+
     /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_classes -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -1085,6 +1180,16 @@ mod tests {
                 if ["Width", "DiffPairsRouting", "Length", "MatchedLengths", "RoutingLayers", "Impedance", "RoutingVias"].iter().any(|k| kind.eq_ignore_ascii_case(k)) {
                     println!("RULE {} | {} | {} | {}", kind, r.get("NAME").cloned().unwrap_or_default(), r.get("SCOPE1EXPRESSION").cloned().unwrap_or_default(), r.iter().filter(|(k, _)| k.contains("WIDTH") || k.contains("GAP") || k.contains("LENGTH") || k.contains("TOLERANCE")).map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
                 }
+            }
+            // Every rule's own settings, bar the per-layer ones and the bookkeeping.
+            for r in &recs {
+                let mut kv: Vec<String> = r
+                    .iter()
+                    .filter(|(k, _)| !(k.starts_with("TOPLAYER_") || k.starts_with("BOTTOMLAYER_") || k.starts_with("MIDLAYER") || k.starts_with("SCOPE") || ["NAME", "COMMENT", "UNIQUEID", "SELECTION", "LOCKED", "KEEPOUT", "USERROUTED", "POLYGONOUTLINE", "LAYER", "UNIONINDEX", "DRCENABLED", "DEFAULTRULE", "GATHERCONTROL", "RULEKIND", "NETSCOPE", "LAYERKIND"].contains(&k.as_str())))
+                    .map(|(k, v)| format!("{k}={}", v.chars().take(60).collect::<String>()))
+                    .collect();
+                kv.sort();
+                println!("ALL {} | {} | {} | {}", r.get("RULEKIND").cloned().unwrap_or_default(), r.get("NAME").cloned().unwrap_or_default(), r.get("SCOPE1EXPRESSION").cloned().unwrap_or_default(), kv.join(" "));
             }
             let mut kinds: Vec<String> = recs.iter().filter_map(|r| r.get("RULEKIND").cloned()).collect();
             kinds.sort();

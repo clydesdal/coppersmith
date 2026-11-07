@@ -494,7 +494,18 @@ impl App {
                 if response.drag_stopped() {
                     self.end_drag(&tr, at);
                 }
-                if response.clicked() {
+                // A rule marker, clicked: the Checks panel shows the problem, the rule it breaks
+                // and that rule's controls.
+                let marker = if response.clicked() && self.show_problems {
+                    self.problems.iter().position(|p| p.marked() && tr.pt(p.at).distance(at) <= 11.0)
+                } else {
+                    None
+                };
+                if let Some(i) = marker {
+                    self.focus = Some(i);
+                    self.right_tab = crate::ui::dock::RightTab::Checks;
+                    self.show_right = true;
+                } else if response.clicked() {
                     let hit = self.pick(q, tol);
                     match (hit, shift) {
                         (Some(h), true) => {
@@ -1248,7 +1259,7 @@ impl App {
         // The rule checks.
         if self.show_problems {
             for (i, prob) in self.problems.iter().enumerate() {
-                if prob.title == "Not connected" || prob.items.is_empty() && prob.title != "Parts overlap" {
+                if !prob.marked() {
                     continue;
                 }
                 let c = if prob.severity == Severity::Error { theme::RED } else { theme::YELLOW };

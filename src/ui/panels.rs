@@ -36,7 +36,7 @@ pub(crate) fn heading(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-fn row(ui: &mut Ui, key: &str, value: &str) {
+pub(crate) fn row(ui: &mut Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(key).color(DIM));
@@ -173,7 +173,7 @@ pub(crate) fn chip(ui: &mut Ui, text: &str, on: bool) -> Response {
 }
 
 /// A length typed or dragged in the units on show; true when it changed.
-fn length(ui: &mut Ui, unit: Unit, mm: &mut f64) -> bool {
+pub(crate) fn length(ui: &mut Ui, unit: Unit, mm: &mut f64) -> bool {
     let mut v = unit.from_mm(*mm);
     let speed = match unit {
         Unit::Mm => 0.01,
@@ -1284,8 +1284,7 @@ impl App {
                         ui.painter().rect_filled(rect, 7.0, fill);
                         let dot = if prob.severity == Severity::Error { theme::RED } else { theme::YELLOW };
                         ui.painter().circle_filled(pos2(rect.left() + 10.0, rect.top() + 12.0), 3.5, dot);
-                        ui.painter().text(rect.left_top() + vec2(20.0, 4.0), Align2::LEFT_TOP, &prob.title, FontId::proportional(13.0), FG);
-                        let galley = ui.painter().layout_no_wrap(prob.detail.clone(), FontId::proportional(11.5), FAINT);
+                        ui.painter().text(rect.left_top() + vec2(20.0, 4.0), Align2::LEFT_TOP, &prob.title, FontId::proportional(13.0), FG);                        let galley = ui.painter().layout_no_wrap(prob.detail.clone(), FontId::proportional(11.5), FAINT);
                         ui.painter().with_clip_rect(rect.shrink(2.0)).galley(rect.left_top() + vec2(20.0, 21.0), galley, FAINT);
                         if response.on_hover_text(&prob.detail).clicked() {
                             go = Some(i);
@@ -1299,6 +1298,8 @@ impl App {
             let at = self.problems[i].at;
             self.zoom_to(at, 8.0);
         }
+        // The rule the picked problem breaks, with its controls.
+        self.rule_card(ui);
     }
 
     fn nets_card(&mut self, ui: &mut Ui) {

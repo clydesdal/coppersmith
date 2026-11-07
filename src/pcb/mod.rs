@@ -14,6 +14,7 @@ pub mod model;
 pub mod pour;
 pub mod project;
 pub mod router;
+pub mod rulebook;
 pub mod schematic;
 pub mod sample;
 pub mod slide;

@@ -651,6 +651,9 @@ impl App {
             self.show_right = true;
         }
         ui.separator();
+        if item(ui, "Design rules…", "", true) {
+            self.show_rules = true;
+        }
         if item(ui, "Board rules", "", true) {
             self.sel.clear();
             self.show_properties();

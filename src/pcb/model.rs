@@ -1,6 +1,7 @@
 //! What a board is made of. This is also the saved file, written as JSON.
 
 use crate::pcb::geom::*;
+use crate::pcb::rulebook::{RuleId, SeenRule};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
@@ -712,6 +713,11 @@ pub struct ClassRule {
     pub tolerance: Option<f64>,
     /// For pair routing: the most that may run uncoupled.
     pub max_uncoupled: Option<f64>,
+    /// For matched lengths on pairs: compare the two nets of each pair, and/or each pair with the others.
+    #[serde(default = "yes")]
+    pub within_pairs: bool,
+    #[serde(default)]
+    pub between_pairs: bool,
 }
 
 impl ClassRule {
@@ -743,6 +749,70 @@ pub struct Rules {
     /// pairs that differ.
     #[serde(default)]
     pub gaps: Vec<Gap>,
+    /// Rules switched off: the checks for them aren't made.
+    #[serde(default = "default_off")]
+    pub off: Vec<RuleId>,
+    /// The widest a track may be (0: no limit).
+    #[serde(default)]
+    pub max_track: f64,
+    /// The largest drill (0: no limit).
+    #[serde(default)]
+    pub max_drill: f64,
+    /// The pad and hole sizes a via may have (0: no limit).
+    #[serde(default)]
+    pub via_min_dia: f64,
+    #[serde(default)]
+    pub via_max_dia: f64,
+    #[serde(default)]
+    pub via_min_drill: f64,
+    #[serde(default)]
+    pub via_max_drill: f64,
+    /// The least gap between the edges of two drilled holes.
+    #[serde(default = "default_hole_gap")]
+    pub hole_gap: f64,
+    /// The least gap between the courtyards of two parts.
+    #[serde(default)]
+    pub component_gap: f64,
+    /// The smallest angle two tracks of a net may meet at, in degrees.
+    #[serde(default = "default_min_angle")]
+    pub min_angle: f64,
+    /// The least and most a net's tracks may add up to (0: no limit).
+    #[serde(default)]
+    pub min_net_length: f64,
+    #[serde(default)]
+    pub max_net_length: f64,
+    /// What a file said of its rules, kept so it can be shown whole.
+    #[serde(default)]
+    pub seen: Vec<SeenRule>,
+}
+
+/// Rules a new board starts with off: the ones that need a decision about the board's own
+/// limits before they mean anything.
+fn default_off() -> Vec<RuleId> {
+    vec![RuleId::HoleToHoleClearance, RuleId::AcuteAngle, RuleId::Length, RuleId::RoutingVias]
+}
+
+fn default_hole_gap() -> f64 {
+    0.254
+}
+
+fn default_min_angle() -> f64 {
+    90.0
+}
+
+impl Rules {
+    /// Whether the check for a rule is made.
+    pub fn is_on(&self, rule: RuleId) -> bool {
+        !self.off.contains(&rule)
+    }
+
+    pub fn set_on(&mut self, rule: RuleId, on: bool) {
+        self.off.retain(|r| *r != rule);
+        if !on {
+            self.off.push(rule);
+        }
+    }
+
 }
 
 /// The kinds of copper a clearance is measured between.
@@ -821,6 +891,19 @@ impl Default for Rules {
             text_height: 1.0,
             min_diag: default_min_diag(),
             gaps: Vec::new(),
+            off: default_off(),
+            max_track: 0.0,
+            max_drill: 0.0,
+            via_min_dia: 0.0,
+            via_max_dia: 0.0,
+            via_min_drill: 0.0,
+            via_max_drill: 0.0,
+            hole_gap: default_hole_gap(),
+            component_gap: 0.0,
+            min_angle: default_min_angle(),
+            min_net_length: 0.0,
+            max_net_length: 0.0,
+            seen: Vec::new(),
         }
     }
 }

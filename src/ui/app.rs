@@ -299,6 +299,9 @@ pub struct App {
     pub show_keys: bool,
     /// The window of net classes, pairs and the rules asked of them.
     pub show_classes: bool,
+    /// The design rules window, and the rule it should open on.
+    pub show_rules: bool,
+    pub rules_focus: Option<crate::pcb::rulebook::RuleId>,
     /// The symbols read from the project's library files, so they're read once.
     pub symbol_cache: std::collections::HashMap<PathBuf, Vec<crate::pcb::altium::schlib::Symbol>>,
     /// The schematics and libraries open in tabs beside the board.
@@ -426,6 +429,8 @@ impl App {
             prefs_saved: None,
             show_keys: false,
             show_classes: false,
+            show_rules: false,
+            rules_focus: None,
             symbol_cache: std::collections::HashMap::new(),
             docs: Vec::new(),
             active: None,
@@ -2301,6 +2306,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui));
         self.shortcuts_window(&ctx);
         self.classes_window(&ctx);
+        self.rules_window(&ctx);
         self.keep_layout();
         // A change made this frame shows its effect straight away.
         if self.copper_rev != self.rev || self.checked_rev != self.rev {

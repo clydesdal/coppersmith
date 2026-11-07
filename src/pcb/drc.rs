@@ -4,6 +4,7 @@ use crate::pcb::copper::{self, Copper, Cu, Item};
 use std::collections::{HashMap, HashSet};
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
+use crate::pcb::rulebook::RuleId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
@@ -13,11 +14,22 @@ pub enum Severity {
 
 #[derive(Clone, Debug)]
 pub struct Problem {
+    /// The rule it breaks.
+    pub rule: RuleId,
     pub severity: Severity,
     pub title: String,
     pub detail: String,
     pub at: P,
     pub items: Vec<Item>,
+}
+
+impl Problem {
+    /// Whether it's marked on the board: an unrouted connection is drawn as a rat's nest line
+    /// instead, and a problem with nothing of its own to point at isn't marked (parts, which
+    /// have no copper item, are).
+    pub fn marked(&self) -> bool {
+        self.title != "Not connected" && (!self.items.is_empty() || self.title.starts_with("Parts"))
+    }
 }
 
 /// How much short of its gap copper may be before it's too close. Altium's
@@ -139,8 +151,12 @@ fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec
         }
         let (gap, pa, pb) = a.gap_within(b, need);
         if gap < need - TOLERANCE {
-            let (what, sev) = if gap <= 1e-6 { ("Short circuit", Severity::Error) } else { ("Too close", Severity::Error) };
+            let (what, sev, rule) = if gap <= 1e-6 { ("Short circuit", Severity::Error, RuleId::ShortCircuit) } else { ("Too close", Severity::Error, RuleId::Clearance) };
+            if !r.is_on(rule) {
+                continue;
+            }
             out.push(Problem {
+                rule,
                 severity: sev,
                 title: what.into(),
                 detail: format!(
@@ -163,7 +179,7 @@ fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec
 fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Problem>) {
     let r = &board.rules;
     let edge = &board.outline;
-    if edge.len() < 3 {
+    if edge.len() < 3 || !r.is_on(RuleId::BoardOutlineClearance) {
         return;
     }
     let n = edge.len();
@@ -209,6 +225,7 @@ fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Prob
             && (!inside || gap < need - TOLERANCE)
         {
             out.push(Problem {
+                rule: RuleId::BoardOutlineClearance,
                 severity: Severity::Error,
                 title: if inside { "Too close to the edge".into() } else { "Off the board".into() },
                 detail: if inside {
@@ -227,6 +244,9 @@ fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Prob
 /// round keepouts when they're poured). Only what overlaps counts; touching
 /// the edge of a keepout is allowed.
 fn keepout_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
+    if !board.rules.is_on(RuleId::Keepout) {
+        return;
+    }
     let keepouts: Vec<(PlacedKeepout, Vec<Blob>)> = board
         .placed_keepouts()
         .into_iter()
@@ -281,6 +301,7 @@ fn keepout_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
             }
             if let Some((_, at)) = worst {
                 out.push(Problem {
+                    rule: RuleId::Keepout,
                     severity: Severity::Error,
                     title: "In a keepout".into(),
                     detail: format!("{} ({}) is in a keepout that keeps {kind}s out", describe(board, cu.item), board.net_name(cu.net)),
@@ -298,8 +319,9 @@ fn keepout_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
 fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
     let r = &board.rules;
     for t in &board.tracks {
-        if t.w < r.min_track - 1e-6 {
+        if r.is_on(RuleId::Width) && t.w < r.min_track - 1e-6 {
             out.push(Problem {
+                rule: RuleId::Width,
                 severity: Severity::Error,
                 title: "Track too thin".into(),
                 detail: format!("{:.3} mm, the least is {:.3}", t.w, r.min_track),
@@ -307,8 +329,19 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
                 items: vec![Item::Track(t.id)],
             });
         }
+        if r.is_on(RuleId::Width) && r.max_track > 0.0 && t.w > r.max_track + 1e-6 {
+            out.push(Problem {
+                rule: RuleId::Width,
+                severity: Severity::Error,
+                title: "Track too wide".into(),
+                detail: format!("{:.3} mm, the most is {:.3}", t.w, r.max_track),
+                at: t.a.lerp(t.b, 0.5),
+                items: vec![Item::Track(t.id)],
+            });
+        }
         if t.layer != TOP && t.layer != BOTTOM && t.layer >= board.copper.saturating_sub(1) {
             out.push(Problem {
+                rule: RuleId::RoutingLayers,
                 severity: Severity::Error,
                 title: "Track on a missing layer".into(),
                 detail: format!("{} isn't in this {}-layer board", Layer::Cu(t.layer).name(), board.copper),
@@ -319,8 +352,9 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
     }
 
     let hole = |out: &mut Vec<Problem>, item: Item, at: P, drill: f64, ring: Option<f64>| {
-        if drill < r.min_drill - 1e-6 {
+        if r.is_on(RuleId::HoleSize) && drill < r.min_drill - 1e-6 {
             out.push(Problem {
+                rule: RuleId::HoleSize,
                 severity: Severity::Error,
                 title: "Hole too small".into(),
                 detail: format!("{:.3} mm, the least is {:.3}", drill, r.min_drill),
@@ -328,10 +362,22 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
                 items: vec![item],
             });
         }
-        if let Some(ring) = ring
+        if r.is_on(RuleId::HoleSize) && r.max_drill > 0.0 && drill > r.max_drill + 1e-6 {
+            out.push(Problem {
+                rule: RuleId::HoleSize,
+                severity: Severity::Error,
+                title: "Hole too large".into(),
+                detail: format!("{:.3} mm, the most is {:.3}", drill, r.max_drill),
+                at,
+                items: vec![item],
+            });
+        }
+        if r.is_on(RuleId::MinimumAnnularRing)
+            && let Some(ring) = ring
             && ring < r.min_ring - 1e-6
         {
             out.push(Problem {
+                rule: RuleId::MinimumAnnularRing,
                 severity: Severity::Error,
                 title: "Copper ring too thin".into(),
                 detail: format!("{:.3} mm round the hole, the least is {:.3}", ring.max(0.0), r.min_ring),
@@ -353,9 +399,16 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
     }
 
     keepout_problems(board, copper, out);
+    via_problems(board, out);
+    hole_gap_problems(board, out);
+    acute_problems(board, out);
+    length_problems(board, out);
+    class_problems(board, out);
+    unpoured_problems(board, out);
 
-    if board.outline.len() < 3 {
+    if board.outline.len() < 3 && r.is_on(RuleId::BoardOutlineClearance) {
         out.push(Problem {
+            rule: RuleId::BoardOutlineClearance,
             severity: Severity::Warning,
             title: "No board outline".into(),
             detail: "Draw one with the Outline tool".into(),
@@ -374,29 +427,270 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
             if a.side != b.side && !(all_through[i] && all_through[j]) {
                 continue;
             }
+            if !r.is_on(RuleId::ComponentClearance) {
+                continue;
+            }
             let (ba, bb) = (boxes[i], boxes[j]);
             let w = ba.max.x.min(bb.max.x) - ba.min.x.max(bb.min.x);
             let h = ba.max.y.min(bb.max.y) - ba.min.y.max(bb.min.y);
             if w > 0.01 && h > 0.01 {
                 let at = p(ba.min.x.max(bb.min.x) + w / 2.0, ba.min.y.max(bb.min.y) + h / 2.0);
                 out.push(Problem {
+                    rule: RuleId::ComponentClearance,
                     severity: Severity::Warning,
                     title: "Parts overlap".into(),
                     detail: format!("{} and {} courtyards overlap", a.refdes, b.refdes),
                     at,
                     items: vec![],
                 });
+            } else if r.component_gap > 0.0 {
+                // Not touching, but nearer than the rule allows (corner to corner, or side by side).
+                let apart = (-w).max(0.0).hypot((-h).max(0.0));
+                if apart < r.component_gap - TOLERANCE {
+                    out.push(Problem {
+                        rule: RuleId::ComponentClearance,
+                        severity: Severity::Warning,
+                        title: "Parts too close".into(),
+                        detail: format!("{} and {} courtyards are {:.3} mm apart, needs {:.3}", a.refdes, b.refdes, apart, r.component_gap),
+                        at: ba.center().lerp(bb.center(), 0.5),
+                        items: vec![],
+                    });
+                }
             }
         }
     }
 
-    for rat in &copper.rats {
+    for rat in copper.rats.iter().filter(|_| r.is_on(RuleId::UnRoutedNet)) {
         out.push(Problem {
+            rule: RuleId::UnRoutedNet,
             severity: Severity::Warning,
             title: "Not connected".into(),
             detail: format!("{} still needs a track here", board.net_name(rat.net)),
             at: rat.a.lerp(rat.b, 0.5),
             items: vec![],
+        });
+    }
+}
+
+/// Vias with a pad or a hole outside what the via rule allows.
+fn via_problems(board: &Board, out: &mut Vec<Problem>) {
+    let r = &board.rules;
+    if !r.is_on(RuleId::RoutingVias) {
+        return;
+    }
+    for v in &board.vias {
+        let mut say = |title: &str, detail: String| {
+            out.push(Problem { rule: RuleId::RoutingVias, severity: Severity::Error, title: title.into(), detail, at: v.at, items: vec![Item::Via(v.id)] });
+        };
+        if r.via_min_dia > 0.0 && v.dia < r.via_min_dia - 1e-6 {
+            say("Via too small", format!("pad {:.3} mm, the least is {:.3}", v.dia, r.via_min_dia));
+        }
+        if r.via_max_dia > 0.0 && v.dia > r.via_max_dia + 1e-6 {
+            say("Via too large", format!("pad {:.3} mm, the most is {:.3}", v.dia, r.via_max_dia));
+        }
+        if r.via_min_drill > 0.0 && v.drill < r.via_min_drill - 1e-6 {
+            say("Via hole too small", format!("{:.3} mm, the least is {:.3}", v.drill, r.via_min_drill));
+        }
+        if r.via_max_drill > 0.0 && v.drill > r.via_max_drill + 1e-6 {
+            say("Via hole too large", format!("{:.3} mm, the most is {:.3}", v.drill, r.via_max_drill));
+        }
+    }
+}
+
+/// Drilled holes whose edges are nearer one another than the hole-to-hole rule allows.
+fn hole_gap_problems(board: &Board, out: &mut Vec<Problem>) {
+    let r = &board.rules;
+    if !r.is_on(RuleId::HoleToHoleClearance) || r.hole_gap <= 0.0 {
+        return;
+    }
+    let mut holes: Vec<(Item, P, f64)> = board.vias.iter().filter(|v| v.drill > 0.0).map(|v| (Item::Via(v.id), v.at, v.drill / 2.0)).collect();
+    for f in &board.footprints {
+        for (i, pad) in f.pads.iter().enumerate() {
+            if pad.drill > 0.0 {
+                holes.push((Item::Pad(f.id, i as u16), f.pad_center(i), pad.drill / 2.0));
+            }
+        }
+    }
+    holes.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+    let widest = holes.iter().map(|h| h.2).fold(0.0, f64::max);
+    for i in 0..holes.len() {
+        for j in i + 1..holes.len() {
+            // Sorted by x: once the next is further than any pair could be near, so are the rest.
+            if holes[j].1.x - holes[i].1.x > 2.0 * widest + r.hole_gap {
+                break;
+            }
+            let (a, b) = (&holes[i], &holes[j]);
+            let apart = a.1.dist(b.1) - a.2 - b.2;
+            if apart < r.hole_gap - TOLERANCE {
+                out.push(Problem {
+                    rule: RuleId::HoleToHoleClearance,
+                    severity: Severity::Error,
+                    title: "Holes too close".into(),
+                    detail: format!("{} and {}: {:.3} mm between the holes, needs {:.3}", describe(board, a.0), describe(board, b.0), apart.max(0.0), r.hole_gap),
+                    at: a.1.lerp(b.1, 0.5),
+                    items: vec![a.0, b.0],
+                });
+            }
+        }
+    }
+}
+
+/// Two straight tracks of a net meeting at a sharper angle than the rule allows, with
+/// nothing else (a via, a pad, a third track) there to fill it in.
+fn acute_problems(board: &Board, out: &mut Vec<Problem>) {
+    let r = &board.rules;
+    if !r.is_on(RuleId::AcuteAngle) || r.min_angle <= 0.0 || r.min_angle >= 180.0 {
+        return;
+    }
+    let key = |q: P| ((q.x * 1000.0).round() as i64, (q.y * 1000.0).round() as i64);
+    let mut filled: HashSet<(i64, i64)> = board.vias.iter().map(|v| key(v.at)).collect();
+    for f in &board.footprints {
+        for i in 0..f.pads.len() {
+            filled.insert(key(f.pad_center(i)));
+        }
+    }
+    let mut ends: HashMap<(u8, u32, i64, i64), Vec<(u32, P)>> = HashMap::new();
+    for t in board.tracks.iter().filter(|t| t.mid.is_none() && t.net != 0 && !t.a.same(t.b)) {
+        for (at, far) in [(t.a, t.b), (t.b, t.a)] {
+            let (x, y) = key(at);
+            ends.entry((t.layer, t.net, x, y)).or_default().push((t.id, far));
+        }
+    }
+    let mut found: Vec<Problem> = Vec::new();
+    for ((_, net, x, y), at) in &ends {
+        if at.len() != 2 || filled.contains(&(*x, *y)) {
+            continue;
+        }
+        let here = p(*x as f64 / 1000.0, *y as f64 / 1000.0);
+        let (u, v) = (at[0].1.sub(here), at[1].1.sub(here));
+        let cos = (u.dot(v) / (u.len() * v.len())).clamp(-1.0, 1.0);
+        let angle = cos.acos().to_degrees();
+        if angle < r.min_angle - 0.01 {
+            found.push(Problem {
+                rule: RuleId::AcuteAngle,
+                severity: Severity::Warning,
+                title: "Acute angle".into(),
+                detail: format!("{}: two tracks meet at {:.0}°, the least is {:.0}°", board.net_name(*net), angle, r.min_angle),
+                at: here,
+                items: vec![Item::Track(at[0].0), Item::Track(at[1].0)],
+            });
+        }
+    }
+    // The map's order is arbitrary; the list must not be.
+    found.sort_by(|a, b| (a.at.x, a.at.y).partial_cmp(&(b.at.x, b.at.y)).unwrap_or(std::cmp::Ordering::Equal));
+    out.extend(found);
+}
+
+/// What each net's tracks add up to.
+fn net_lengths(board: &Board) -> HashMap<u32, (f64, u32)> {
+    let mut totals: HashMap<u32, (f64, u32)> = HashMap::new();
+    for t in &board.tracks {
+        let e = totals.entry(t.net).or_insert((0.0, t.id));
+        e.0 += t.length();
+    }
+    totals
+}
+
+/// Nets with tracks adding up to more or less than the length rule allows.
+fn length_problems(board: &Board, out: &mut Vec<Problem>) {
+    let r = &board.rules;
+    if !r.is_on(RuleId::Length) || (r.min_net_length <= 0.0 && r.max_net_length <= 0.0) {
+        return;
+    }
+    let mut totals: Vec<(u32, (f64, u32))> = net_lengths(board).into_iter().filter(|(n, _)| *n != 0).collect();
+    totals.sort_by_key(|(n, _)| *n);
+    for (net, (total, first)) in totals {
+        let at = board.tracks.iter().find(|t| t.id == first).map(|t| t.a.lerp(t.b, 0.5)).unwrap_or_default();
+        let (title, detail) = if r.max_net_length > 0.0 && total > r.max_net_length + 1e-6 {
+            ("Net too long", format!("{}: {:.3} mm of track, the most is {:.3}", board.net_name(net), total, r.max_net_length))
+        } else if r.min_net_length > 0.0 && total < r.min_net_length - 1e-6 {
+            ("Net too short", format!("{}: {:.3} mm of track, the least is {:.3}", board.net_name(net), total, r.min_net_length))
+        } else {
+            continue;
+        };
+        out.push(Problem { rule: RuleId::Length, severity: Severity::Error, title: title.into(), detail, at, items: vec![Item::Track(first)] });
+    }
+}
+
+/// Tracks of a class of nets outside the widths its rule gives their layer, and groups of nets
+/// that are further apart in length than a matched-lengths rule allows.
+fn class_problems(board: &Board, out: &mut Vec<Problem>) {
+    if board.class_rules.is_empty() {
+        return;
+    }
+    if board.rules.is_on(RuleId::NetClassWidth) {
+        for t in board.tracks.iter().filter(|t| t.net != 0) {
+            for rule in board.class_rules_for(t.net).into_iter().filter(|r| matches!(r.kind, ClassRuleKind::Width | ClassRuleKind::PairRouting)) {
+                let Some(l) = rule.on(t.layer) else { continue };
+                let (lo, hi) = (l.min_width.unwrap_or(0.0), l.max_width.unwrap_or(f64::MAX));
+                if t.w < lo - 1e-6 || t.w > hi + 1e-6 {
+                    out.push(Problem {
+                        rule: RuleId::NetClassWidth,
+                        severity: Severity::Error,
+                        title: "Width outside its class".into(),
+                        detail: format!("{}: {:.3} mm on {}, {} allows {:.3} to {:.3}", board.net_name(t.net), t.w, Layer::Cu(t.layer).name(), rule.name, lo, hi.min(999.0)),
+                        at: t.a.lerp(t.b, 0.5),
+                        items: vec![Item::Track(t.id)],
+                    });
+                }
+            }
+        }
+    }
+    if !board.rules.is_on(RuleId::MatchedLengths) {
+        return;
+    }
+    let totals = net_lengths(board);
+    for rule in board.class_rules.iter().filter(|r| r.kind == ClassRuleKind::MatchedLengths) {
+        let Some(tol) = rule.tolerance else { continue };
+        // What is compared with what: within each pair, and across pairs if the rule asks.
+        let groups: Vec<Vec<u32>> = match &rule.scope {
+            ClassScope::PairClass(c) => {
+                let pairs: Vec<&DiffPair> = board.pair_classes.iter().filter(|x| x.name.eq_ignore_ascii_case(c)).flat_map(|x| x.pairs.iter()).filter_map(|n| board.diff_pairs.iter().find(|d| d.name.eq_ignore_ascii_case(n))).collect();
+                let mut g: Vec<Vec<u32>> = Vec::new();
+                if rule.within_pairs {
+                    g.extend(pairs.iter().map(|d| vec![d.pos, d.neg]));
+                }
+                if rule.between_pairs {
+                    g.push(pairs.iter().flat_map(|d| [d.pos, d.neg]).collect());
+                }
+                g
+            }
+            ClassScope::NetClass(c) => board.net_classes.iter().filter(|x| x.name.eq_ignore_ascii_case(c)).map(|x| x.nets.clone()).collect(),
+        };
+        for g in groups {
+            let lens: Vec<(u32, f64, u32)> = g.iter().filter_map(|n| totals.get(n).filter(|t| t.0 > 0.0).map(|t| (*n, t.0, t.1))).collect();
+            let (Some(long), Some(short)) = (lens.iter().max_by(|a, b| a.1.total_cmp(&b.1)), lens.iter().min_by(|a, b| a.1.total_cmp(&b.1))) else { continue };
+            let spread = long.1 - short.1;
+            if lens.len() >= 2 && spread > tol + 1e-6 {
+                let at = board.tracks.iter().find(|t| t.id == long.2).map(|t| t.a.lerp(t.b, 0.5)).unwrap_or_default();
+                out.push(Problem {
+                    rule: RuleId::MatchedLengths,
+                    severity: Severity::Warning,
+                    title: "Lengths not matched".into(),
+                    detail: format!("{}: {} is {:.3} mm longer than {}, {} allows {:.3}", rule.name, board.net_name(long.0), spread, board.net_name(short.0), "the rule", tol),
+                    at,
+                    items: vec![Item::Track(long.2), Item::Track(short.2)],
+                });
+            }
+        }
+    }
+}
+
+/// Pours that have no copper, on a board whose other pours have.
+fn unpoured_problems(board: &Board, out: &mut Vec<Problem>) {
+    if !board.rules.is_on(RuleId::UnpouredPolygon) || !board.pours.iter().any(|p| !p.fill.is_empty()) {
+        return;
+    }
+    for pour in board.pours.iter().filter(|p| p.fill.is_empty()) {
+        let ring = if pour.outline.len() >= 3 { &pour.outline } else { &board.outline };
+        let at = if ring.is_empty() { P::default() } else { BBox::of(ring).center() };
+        out.push(Problem {
+            rule: RuleId::UnpouredPolygon,
+            severity: Severity::Warning,
+            title: "Pour has no copper".into(),
+            detail: format!("The {} pour on {} has nothing poured", board.net_name(pour.net), Layer::Cu(pour.layer).name()),
+            at,
+            items: vec![Item::Pour(pour.id, 0)],
         });
     }
 }
@@ -479,6 +773,186 @@ mod tests {
         go(&mut b, "a smaller board");
         b.outline.clear();
         go(&mut b, "no outline");
+    }
+
+    /// The problems on a real board, by kind:
+    /// COPPERSMITH_BOARD=file cargo test dump_problems -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_problems() {
+        let Some(f) = std::env::var_os("COPPERSMITH_BOARD") else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&f)).unwrap().board;
+        let mut by: std::collections::BTreeMap<(String, String), (usize, String)> = std::collections::BTreeMap::new();
+        for p in check(&b, &analyse(&b)) {
+            let e = by.entry((p.title.clone(), p.rule.info().name.to_string())).or_insert((0, p.detail.clone()));
+            e.0 += 1;
+        }
+        for ((title, rule), (n, example)) in by {
+            println!("{n:5} {title} [{rule}] e.g. {example}");
+        }
+        println!("off: {:?}", b.rules.off);
+    }
+
+    fn titles(b: &Board) -> Vec<String> {
+        check(b, &analyse(b)).iter().map(|p| p.title.clone()).collect()
+    }
+
+    fn found(b: &Board, title: &str) -> Option<Problem> {
+        check(b, &analyse(b)).into_iter().find(|p| p.title == title)
+    }
+
+    #[test]
+    fn a_problem_says_which_rule_it_breaks_and_a_rule_switched_off_is_not_checked() {
+        let mut b = Board::default();
+        let (a, n) = (b.net("A"), b.net("B"));
+        track(&mut b, (5.0, 10.0), (40.0, 10.0), TOP, a);
+        track(&mut b, (5.0, 10.3), (40.0, 10.3), TOP, n);
+        assert_eq!(found(&b, "Too close").expect("too close").rule, RuleId::Clearance);
+        b.rules.set_on(RuleId::Clearance, false);
+        assert!(!titles(&b).contains(&"Too close".to_string()), "off means unchecked");
+        // Touching is a short circuit, a rule of its own.
+        let mut s = Board::default();
+        let (a, n) = (s.net("A"), s.net("B"));
+        track(&mut s, (5.0, 10.0), (40.0, 10.0), TOP, a);
+        track(&mut s, (5.0, 10.0), (40.0, 10.0), TOP, n);
+        assert_eq!(found(&s, "Short circuit").expect("short").rule, RuleId::ShortCircuit);
+        s.rules.set_on(RuleId::ShortCircuit, false);
+        assert!(found(&s, "Short circuit").is_none());
+        assert!(found(&s, "Too close").is_none(), "a short isn't also 'too close'");
+    }
+
+    #[test]
+    fn vias_and_holes_outside_their_sizes_are_caught() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let id = b.new_id();
+        b.vias.push(Via { id, at: p(20.0, 20.0), dia: 0.6, drill: 0.3, net: n });
+        assert!(titles(&b).iter().all(|t| !t.starts_with("Via")), "no limits, no problem");
+        b.rules.via_max_dia = 0.5;
+        b.rules.via_min_drill = 0.35;
+        // The via style rule starts off (it's for through vias only), whatever the limits.
+        assert!(found(&b, "Via too large").is_none() && !b.rules.is_on(RuleId::RoutingVias));
+        b.rules.set_on(RuleId::RoutingVias, true);
+        assert_eq!(found(&b, "Via too large").unwrap().rule, RuleId::RoutingVias);
+        assert!(found(&b, "Via hole too small").is_some());
+        b.rules.set_on(RuleId::RoutingVias, false);
+        assert!(titles(&b).iter().all(|t| !t.starts_with("Via")));
+        // A hole bigger than the drill limit.
+        part(&mut b, p(10.0, 10.0), n, 1.2);
+        assert!(found(&b, "Hole too large").is_none());
+        b.rules.max_drill = 1.0;
+        assert_eq!(found(&b, "Hole too large").unwrap().rule, RuleId::HoleSize);
+    }
+
+    #[test]
+    fn holes_nearer_than_the_rule_allows_are_caught_when_the_rule_is_on() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        for (id, x) in [(1u32, 20.0), (2, 20.5)] {
+            b.vias.push(Via { id, at: p(x, 20.0), dia: 0.6, drill: 0.3, net: n });
+        }
+        // Centres 0.5 apart, holes 0.3 across: 0.2 mm between their edges.
+        assert!(found(&b, "Holes too close").is_none(), "off to start with");
+        b.rules.set_on(RuleId::HoleToHoleClearance, true);
+        let hit = found(&b, "Holes too close").expect("holes too close");
+        assert_eq!(hit.rule, RuleId::HoleToHoleClearance);
+        assert_eq!(hit.items.len(), 2);
+        b.rules.hole_gap = 0.1;
+        assert!(found(&b, "Holes too close").is_none(), "a smaller gap is allowed");
+    }
+
+    #[test]
+    fn tracks_meeting_at_an_acute_angle_are_caught_unless_something_fills_the_corner() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        track(&mut b, (10.0, 10.0), (20.0, 10.0), TOP, n);
+        track(&mut b, (10.0, 10.0), (20.0, 12.0), TOP, n);
+        assert!(found(&b, "Acute angle").is_none(), "off to start with");
+        b.rules.set_on(RuleId::AcuteAngle, true);
+        let hit = found(&b, "Acute angle").expect("acute angle");
+        assert_eq!(hit.rule, RuleId::AcuteAngle);
+        // A right angle is fine, and a via at the corner fills it.
+        b.tracks.last_mut().unwrap().b = p(10.0, 20.0);
+        assert!(found(&b, "Acute angle").is_none());
+        b.tracks.last_mut().unwrap().b = p(20.0, 12.0);
+        let id = b.new_id();
+        b.vias.push(Via { id, at: p(10.0, 10.0), dia: 0.6, drill: 0.3, net: n });
+        assert!(found(&b, "Acute angle").is_none());
+    }
+
+    #[test]
+    fn nets_too_long_and_parts_too_close_are_caught() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        track(&mut b, (5.0, 10.0), (15.0, 10.0), TOP, n);
+        track(&mut b, (15.0, 10.0), (20.0, 10.0), TOP, n);
+        b.rules.set_on(RuleId::Length, true);
+        b.rules.max_net_length = 12.0;
+        let hit = found(&b, "Net too long").expect("net too long");
+        assert_eq!(hit.rule, RuleId::Length);
+        b.rules.max_net_length = 0.0;
+        b.rules.min_net_length = 20.0;
+        assert!(found(&b, "Net too short").is_some());
+        // Two parts side by side, a little apart.
+        let mut c = Board::default();
+        let m = c.net("A");
+        let (x, y) = (part(&mut c, p(10.0, 10.0), m, 0.0), part(&mut c, p(12.0, 10.0), m, 0.0));
+        let gap = {
+            let (bx, by) = (c.fp(x).unwrap().bbox(), c.fp(y).unwrap().bbox());
+            by.min.x - bx.max.x
+        };
+        assert!(gap > 0.0, "the two don't overlap: {gap}");
+        assert!(found(&c, "Parts too close").is_none(), "no gap asked, none checked");
+        c.rules.component_gap = gap + 0.2;
+        assert_eq!(found(&c, "Parts too close").expect("too close").rule, RuleId::ComponentClearance);
+        c.rules.component_gap = gap - 0.05;
+        assert!(found(&c, "Parts too close").is_none());
+    }
+
+    #[test]
+    fn a_net_class_has_its_widths_and_matched_lengths_held() {
+        let mut b = Board::default();
+        let (pos, neg) = (b.net("D_P"), b.net("D_N"));
+        track(&mut b, (5.0, 10.0), (15.0, 10.0), TOP, pos);
+        track(&mut b, (5.0, 12.0), (17.0, 12.0), TOP, neg);
+        b.net_classes.push(NetClass { name: "RF".into(), nets: vec![pos] });
+        b.class_rules.push(ClassRule {
+            name: "Width_RF".into(),
+            kind: ClassRuleKind::Width,
+            scope: ClassScope::NetClass("RF".into()),
+            layers: vec![LayerLimit { layer: TOP, min_width: Some(0.1), max_width: Some(0.2), ..LayerLimit::default() }],
+            tolerance: None,
+            max_uncoupled: None,
+            within_pairs: true,
+            between_pairs: false,
+        });
+        // The track is 0.25 wide; the class allows up to 0.2.
+        let hit = found(&b, "Width outside its class").expect("width outside its class");
+        assert_eq!(hit.rule, RuleId::NetClassWidth);
+        b.rules.set_on(RuleId::NetClassWidth, false);
+        assert!(found(&b, "Width outside its class").is_none());
+        // A pair 2 mm apart in length, in a class asking for 0.5.
+        b.diff_pairs.push(DiffPair { name: "D".into(), pos, neg });
+        b.pair_classes.push(PairClass { name: "BUS".into(), pairs: vec!["D".into()] });
+        b.class_rules.push(ClassRule {
+            name: "Match".into(),
+            kind: ClassRuleKind::MatchedLengths,
+            scope: ClassScope::PairClass("BUS".into()),
+            layers: vec![],
+            tolerance: Some(0.5),
+            max_uncoupled: None,
+            within_pairs: true,
+            between_pairs: false,
+        });
+        let hit = found(&b, "Lengths not matched").expect("lengths not matched");
+        assert_eq!(hit.rule, RuleId::MatchedLengths);
+        assert!(hit.detail.contains("2.000"), "{}", hit.detail);
+        b.class_rules[1].tolerance = Some(2.5);
+        assert!(found(&b, "Lengths not matched").is_none());
+        // Within the pair is what's asked, so a second pair's length doesn't matter here.
+        b.class_rules[1].tolerance = Some(0.5);
+        b.class_rules[1].within_pairs = false;
+        assert!(found(&b, "Lengths not matched").is_none(), "neither within nor between: nothing compared");
     }
 
     fn square(b: &mut Board, layer: Option<u8>, lo: (f64, f64), hi: (f64, f64), restrict: Restrict) -> u32 {

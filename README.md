@@ -273,6 +273,28 @@ tracks* turns it off.
 The rule check runs all the time: problems are marked on the board and listed
 on the right; click one to go to it.
 
+**Design rules.** *Rules ▸ Design rules…* opens a window with every rule
+Altium's files use (36 kinds, in Altium's groups: electrical, routing, high
+speed, manufacturing, placement, planes and pours, mask, surface mount, test
+points, supplies), each with what it asks and its controls. A rule is
+*Checked* (a switch turns its check on and off, and the number it asks for is
+there to change), *Applied* (used when pours and Gerbers are made) or *Shown
+only* (read from the file and kept, not checked yet), and what the file says of
+each (its scope, its settings) is listed under it. The checks: clearance and
+short circuit, un-routed nets, track width (least and most), the width a net
+class asks of each layer, hole sizes (least and most), annular ring, hole to
+hole, board outline, component clearance (overlap, and a gap), keep-outs,
+matched lengths within a pair or across a class, net length, acute angles, and
+un-poured polygons. From an Altium file a rule it doesn't have or has switched
+off starts off, as in Altium; the via style rule (for through vias only, which a
+board here can't tell from blind ones), hole to hole, acute angle and length
+start off on a new board.
+
+Click a marker on the board, or a problem in the list: the Checks panel shows
+the problem, the **rule it breaks** and that rule's controls (for a class
+width or matched-length problem, the rules of that net's class), so it can be
+changed on the spot, and one undo takes it back.
+
 ## Files
 
 Boards are saved as `.cspcb`, which is plain JSON (millimetres, Y up). An
