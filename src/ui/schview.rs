@@ -4,7 +4,7 @@
 
 use crate::pcb::altium::schlib::{Drawing, Pin, PinKind, Symbol};
 use crate::pcb::geom::*;
-use crate::pcb::schematic::{LabelKind, Placed, Schematic, Sel, elbow, transform};
+use crate::pcb::schematic::{LabelKind, Paper, Placed, Schematic, Sel, elbow, transform};
 use crate::ui::dock::EditorCmd;
 use crate::ui::icons::Icon;
 use crate::ui::panels::{card, chip, field, small_icon};
@@ -15,10 +15,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 const GRID: f64 = 2.54;
+/// How far the sheet's border is in from its edge.
+const BORDER: f64 = 5.08;
 // The sheet is warm off-white paper with ink on it: deep green wires, brown-red
 // outlines over a see-through gold, blue pins, dark text, teal net labels, red
 // supply symbols, a strong blue for what's picked.
 const PAPER: Color32 = theme::rgb(0xf6_f2_e6);
+/// The desk the sheet of paper lies on.
+const DESK: Color32 = theme::rgb(0xc9_c3_b2);
 const DOTS: Color32 = theme::rgb(0xd8_d2_bf);
 const WIRE: Color32 = theme::rgb(0x17_17_1a);
 const BODY: Color32 = theme::rgb(0x8d_3b_1c);
@@ -139,7 +143,7 @@ impl SchWindow {
             sel: None,
             center: p(30.0, 20.0),
             scale: 11.0,
-            fit: false,
+            fit: true,
             hover: None,
             symbols: builtin_symbols(),
             filter: String::new(),
@@ -575,6 +579,21 @@ impl SchWindow {
                 card(ui, |ui| {
                     ui.label(RichText::new("Sheet").font(semibold(14.0)));
                     field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut self.sch.name).desired_width(140.0)));
+                    let mut chosen = None;
+                    field(ui, "Paper", |ui| {
+                        egui::ComboBox::from_id_salt("paper").selected_text(self.sch.paper.name()).width(110.0).show_ui(ui, |ui| {
+                            for paper in Paper::ALL {
+                                if ui.selectable_label(self.sch.paper == paper, paper.name()).clicked() {
+                                    chosen = Some(paper);
+                                }
+                            }
+                        })
+                    });
+                    if let Some(paper) = chosen {
+                        self.remember();
+                        self.sch.paper = paper;
+                        self.fit = true;
+                    }
                     ui.label(RichText::new(format!("{} parts · {} wires · {} labels", self.sch.parts.len(), self.sch.wires.len(), self.sch.labels.len())).size(12.0).color(FAINT));
                     if !self.notes.is_empty() {
                         ui.label(RichText::new(format!("{} left out on reading", self.notes.len())).size(12.0).color(FAINT)).on_hover_text(self.notes.join("\n"));
@@ -703,14 +722,12 @@ impl SchWindow {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if self.fit {
             self.fit = false;
-            let bb = self.sch.bbox();
-            if bb.is_empty() {
-                self.center = p(30.0, 20.0);
-                self.scale = 11.0;
-            } else {
-                self.center = bb.center();
-                self.scale = ((rect.width() as f64 / (bb.w().max(10.0) * 1.5)).min(rect.height() as f64 / (bb.h().max(10.0) * 1.5))).clamp(2.0, 60.0);
-            }
+            // The page, and anything lying off it.
+            let (w, h) = self.sch.paper.size();
+            let mut bb = BBox::of(&[p(0.0, 0.0), p(w, h)]);
+            bb.union(&self.sch.bbox());
+            self.center = bb.center();
+            self.scale = ((rect.width() as f64 / (bb.w().max(10.0) * 1.08)).min(rect.height() as f64 / (bb.h().max(10.0) * 1.08))).clamp(0.5, 60.0);
         }
         if let Some(at) = resp.hover_pos() {
             let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
@@ -822,8 +839,7 @@ impl SchWindow {
         }
 
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, PAPER);
-        self.draw_grid(&painter, &tr, rect);
+        self.draw_page(&painter, &tr, rect);
         self.draw_sheet(&painter, &tr);
         self.draw_tool(&painter, &tr);
         if let Some(q) = self.hover {
@@ -838,6 +854,21 @@ impl SchWindow {
             Tool::Power => "Click a pin or wire to attach it",
         };
         note(&painter, rect.right_bottom() + vec2(-10.0, -8.0), Align2::RIGHT_BOTTOM, hint, FontId::proportional(12.0), TEXT_DIM);
+    }
+
+    /// The sheet of paper on the desk, with its border and the grid on it.
+    fn draw_page(&self, painter: &egui::Painter, tr: &Tr, rect: Rect) {
+        let (w, h) = self.sch.paper.size();
+        let page = Rect::from_two_pos(tr.pt(p(0.0, h)), tr.pt(p(w, 0.0)));
+        painter.rect_filled(rect, 0.0, DESK);
+        painter.rect_filled(page.translate(vec2(4.0, 5.0)), 0.0, Color32::from_black_alpha(45));
+        painter.rect_filled(page, 0.0, PAPER);
+        self.draw_grid(&painter.with_clip_rect(page.intersect(rect)), tr, rect);
+        let edge = Stroke::new(1.0, TEXT_DIM.gamma_multiply(0.7));
+        painter.rect_stroke(page, 0.0, edge, egui::StrokeKind::Middle);
+        // The border, in from the edge.
+        let border = Rect::from_two_pos(tr.pt(p(BORDER, h - BORDER)), tr.pt(p(w - BORDER, BORDER)));
+        painter.rect_stroke(border, 0.0, Stroke::new(1.4, TEXT_DIM), egui::StrokeKind::Middle);
     }
 
     fn draw_grid(&self, painter: &egui::Painter, tr: &Tr, rect: Rect) {

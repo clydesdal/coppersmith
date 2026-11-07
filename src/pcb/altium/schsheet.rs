@@ -17,7 +17,7 @@ use super::schlib::{Drawing, Pin, PinKind, Symbol, binary_pin, text_pin};
 use super::write::{Out, Rec, drawing_rec, param_text};
 use super::{Reader, open, params, stream};
 use crate::pcb::geom::*;
-use crate::pcb::schematic::{Label, LabelKind, Placed, Schematic, Wire, transform, transform_angle};
+use crate::pcb::schematic::{Label, LabelKind, Paper, Placed, Schematic, Wire, transform, transform_angle};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -262,8 +262,17 @@ pub fn read(bytes: &[u8], name: &str) -> Result<(Schematic, Vec<String>), String
                     out.labels.push(Label { id, at: point(p, "LOCATION.X", "LOCATION.Y"), text: t.clone(), kind, turns });
                 }
             }
-            // Parts' own records, the sheet, junctions (worked out), notes and such.
-            1 | 29 | 31 | 44 | 46 | 47 | 48 => {}
+            // The sheet: its paper.
+            31 => {
+                let custom = p.get("USECUSTOMSHEET").is_some_and(|v| v == "T");
+                out.paper = if custom && p.contains_key("CUSTOMX") {
+                    Paper::Custom(coord(p, "CUSTOMX").max(10.0), coord(p, "CUSTOMY").max(10.0))
+                } else {
+                    Paper::from_style(p.get("SHEETSTYLE").and_then(|v| v.parse().ok()).unwrap_or(0))
+                };
+            }
+            // Parts' own records, junctions (worked out), notes and such.
+            1 | 29 | 44 | 46 | 47 | 48 => {}
             _ => skipped += 1,
         }
     }
@@ -294,7 +303,10 @@ pub fn write(s: &Schematic) -> Result<Vec<u8>, String> {
     let err = |e: std::io::Error| format!("couldn't write the sheet: {e}");
     let mut recs: Vec<Vec<u8>> = Vec::new();
     let mut sheet = Rec::new(31);
-    sheet.set("FONTIDCOUNT", 1).set("SIZE1", 10).set("FONTNAME1", "Times New Roman").set("USEMBCS", "T").set("ISBOC", "T").set("SHEETSTYLE", 0).set("SNAPGRIDON", "T").set("SNAPGRIDSIZE", 10).set("VISIBLEGRIDON", "T").set("VISIBLEGRIDSIZE", 10);
+    sheet.set("FONTIDCOUNT", 1).set("SIZE1", 10).set("FONTNAME1", "Times New Roman").set("USEMBCS", "T").set("ISBOC", "T").set("SHEETSTYLE", s.paper.style()).set("SNAPGRIDON", "T").set("SNAPGRIDSIZE", 10).set("VISIBLEGRIDON", "T").set("VISIBLEGRIDSIZE", 10);
+    if let Paper::Custom(w, h) = s.paper {
+        sheet.set("USECUSTOMSHEET", "T").mm("CUSTOMX", w).mm("CUSTOMY", h);
+    }
     recs.push(sheet.bytes());
     let mut add = |r: &Rec| -> usize {
         recs.push(r.bytes());
@@ -431,6 +443,7 @@ mod tests {
         s.part_mut(b).unwrap().mirror = true;
         s.part_mut(b).unwrap().part = 2;
         let tip = |s: &Schematic, id: u32, n: &str| s.part(id).unwrap().pins().into_iter().find(|p| p.number == n).unwrap().tip;
+        s.paper = Paper::B;
         let (t1, t2) = (tip(&s, a, "1"), tip(&s, b, "5"));
         s.add_wire(vec![t1, p(t1.x + 5.08, t1.y), p(t2.x, t1.y), t2]).unwrap();
         s.add_label(p(40.64, t1.y), "SIG", LabelKind::Net);
@@ -450,6 +463,11 @@ mod tests {
         let s = sample();
         let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
         assert_eq!(back.parts.len(), 2);
+        assert_eq!(back.paper, Paper::B, "the paper is kept");
+        let mut wide = s.clone();
+        wide.paper = Paper::Custom(300.0, 200.0);
+        let (custom, _) = read(&write(&wide).unwrap(), "c").unwrap();
+        assert!(matches!(custom.paper, Paper::Custom(w, h) if (w - 300.0).abs() < 0.01 && (h - 200.0).abs() < 0.01), "{:?}", custom.paper);
         for (a, b) in s.parts.iter().zip(&back.parts) {
             assert_eq!((&a.designator, &a.value, &a.footprint, a.turns, a.mirror, a.part), (&b.designator, &b.value, &b.footprint, b.turns, b.mirror, b.part));
             assert_eq!(a.at, b.at);

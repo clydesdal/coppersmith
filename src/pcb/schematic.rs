@@ -10,6 +10,63 @@ use crate::pcb::geom::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// The size of the sheet's paper. Altium's sizes are the drawing area, in tenths
+/// of a mil, like 1150 by 760 for A4; here they're in millimetres.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub enum Paper {
+    #[default]
+    A4,
+    A3,
+    A2,
+    A1,
+    A0,
+    A,
+    B,
+    C,
+    D,
+    E,
+    /// Width and height.
+    Custom(f64, f64),
+}
+
+impl Paper {
+    pub const ALL: [Paper; 10] = [Paper::A4, Paper::A3, Paper::A2, Paper::A1, Paper::A0, Paper::A, Paper::B, Paper::C, Paper::D, Paper::E];
+
+    /// Width and height in millimetres.
+    pub fn size(self) -> (f64, f64) {
+        let units = |w: f64, h: f64| (w * 0.254, h * 0.254);
+        match self {
+            Paper::A4 => units(1150.0, 760.0),
+            Paper::A3 => units(1550.0, 1110.0),
+            Paper::A2 => units(2230.0, 1570.0),
+            Paper::A1 => units(3150.0, 2230.0),
+            Paper::A0 => units(4460.0, 3150.0),
+            Paper::A => units(950.0, 750.0),
+            Paper::B => units(1500.0, 950.0),
+            Paper::C => units(2000.0, 1500.0),
+            Paper::D => units(3200.0, 2000.0),
+            Paper::E => units(4200.0, 3200.0),
+            Paper::Custom(w, h) => (w, h),
+        }
+    }
+
+    pub fn name(self) -> String {
+        match self {
+            Paper::Custom(w, h) => format!("Custom {w:.0} × {h:.0} mm"),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Altium's `SHEETSTYLE` number.
+    pub fn style(self) -> u8 {
+        Paper::ALL.iter().position(|p| *p == self).unwrap_or(0) as u8
+    }
+
+    pub fn from_style(n: u8) -> Paper {
+        Paper::ALL.get(n as usize).copied().unwrap_or(Paper::A4)
+    }
+}
+
 /// A part on the sheet: a symbol, where it sits and how it's turned.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Placed {
@@ -65,6 +122,8 @@ pub enum Sel {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Schematic {
     pub name: String,
+    #[serde(default)]
+    pub paper: Paper,
     pub parts: Vec<Placed>,
     pub wires: Vec<Wire>,
     pub labels: Vec<Label>,
@@ -77,7 +136,7 @@ pub struct Schematic {
 
 impl Default for Schematic {
     fn default() -> Self {
-        Schematic { name: "Sheet1".into(), parts: Vec::new(), wires: Vec::new(), labels: Vec::new(), junctions: Vec::new(), next_id: 1 }
+        Schematic { name: "Sheet1".into(), paper: Paper::A4, parts: Vec::new(), wires: Vec::new(), labels: Vec::new(), junctions: Vec::new(), next_id: 1 }
     }
 }
 
@@ -685,6 +744,19 @@ mod tests {
         assert_eq!(turns(right), 3, "right is three quarter turns from up");
         assert_eq!(turns(left), 1, "left is one");
         assert_eq!(turns(free), 0);
+    }
+
+    #[test]
+    fn paper_sizes_are_altiums_and_numbered_as_its_sheet_styles_are() {
+        let (w, h) = Paper::A4.size();
+        assert!((w - 292.1).abs() < 0.01 && (h - 193.04).abs() < 0.01, "{w} {h}");
+        for (k, p) in Paper::ALL.iter().enumerate() {
+            assert_eq!(p.style() as usize, k);
+            assert_eq!(Paper::from_style(k as u8), *p);
+        }
+        assert_eq!(Paper::from_style(99), Paper::A4, "a style not known is A4");
+        assert_eq!(Paper::B.style(), 6);
+        assert_eq!(Paper::Custom(100.0, 50.0).size(), (100.0, 50.0));
     }
 
     #[test]

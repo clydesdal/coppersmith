@@ -386,6 +386,11 @@ or open in the library editor when you switch.
 - **Net label** and **Power:** type a name, click a pin or wire. A label with a
   number at the end counts up (D0, D1…); a power port points away from its pin
   and joins every port of the same name.
+- **The page:** the sheet is drawn as a sheet of paper on a darker desk, with its
+  border in from the edge and the grid on the paper. The paper size (A4, A3, A2,
+  A1, A0, A, B, C, D, E, or a custom size read from a SchDoc) is in the *Sheet*
+  card on the right when nothing is picked; it's read from and written to the
+  SchDoc's sheet record, and the view fits to the page.
 - **Select:** click or drag. Moving a part takes the wires on its pins with it,
   keeping them square. The right panel has the designator, value and footprint
   of what's picked (the symbol's footprints are offered), then the **checks**
