@@ -122,6 +122,8 @@ pub struct Launch {
     pub layout: Option<String>,
     /// A library to open in the library editor, for `--library`.
     pub library: Option<PathBuf>,
+    /// A schematic to open in the schematic editor, for `--schematic`.
+    pub schematic: Option<PathBuf>,
 }
 
 pub enum Asked {
@@ -225,6 +227,8 @@ pub struct App {
     pub show_keys: bool,
     /// The library editor, while it's open in place of the board.
     pub libwin: Option<crate::ui::libview::LibWindow>,
+    /// The schematic editor, likewise.
+    pub schwin: Option<crate::ui::schview::SchWindow>,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
     after_save: Option<Then>,
@@ -324,6 +328,7 @@ impl App {
             prefs_saved: None,
             show_keys: false,
             libwin: None,
+            schwin: None,
             last_field_edit: -10.0,
             confirm: None,
             after_save: None,
@@ -1530,6 +1535,31 @@ impl App {
         });
     }
 
+    /// Opens the schematic editor, on a file if given. The footprint and
+    /// symbol libraries the library editor holds come along.
+    pub fn open_schematic_editor(&mut self, path: Option<&std::path::Path>) {
+        let win = self.schwin.get_or_insert_with(crate::ui::schview::SchWindow::new);
+        if let Some(lib) = &self.libwin {
+            win.add_symbols(&lib.ed.symbols);
+        }
+        if let Some(path) = path {
+            self.notice = Some(win.open_file(path));
+        }
+        self.libwin = None;
+    }
+
+    fn show_schematic_editor(&mut self, ui: &mut Ui) {
+        let Some(mut win) = self.schwin.take() else { return };
+        let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
+        let out = win.show(ui, &known);
+        if out.notice.is_some() {
+            self.notice = out.notice;
+        }
+        if !out.close {
+            self.schwin = Some(win);
+        }
+    }
+
     fn show_library_editor(&mut self, ui: &mut Ui) {
         let Some(mut win) = self.libwin.take() else { return };
         let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
@@ -1557,7 +1587,8 @@ impl App {
                     ui.add(egui::Label::new(egui::RichText::new(n).size(12.5).color(theme::YELLOW)).truncate());
                 }
                 None => {
-                    ui.label(egui::RichText::new("Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them").size(12.0).color(theme::FAINT));
+                    let what = if self.schwin.is_some() { "Schematic editor · symbols from Altium libraries, saved as a Coppersmith schematic" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
+                    ui.label(egui::RichText::new(what).size(12.0).color(theme::FAINT));
                 }
             }
         });
@@ -1566,6 +1597,10 @@ impl App {
     fn apply_launch(&mut self) {
         if !self.applied_launch && self.frames >= 8 && let Some(path) = self.launch.library.take() {
             self.open_library_editor(Some(&path));
+        }
+        if !self.applied_launch && self.frames >= 8 && self.launch.schematic.is_some() {
+            let path = self.launch.schematic.take();
+            self.open_schematic_editor(path.as_deref().filter(|p| p.exists()));
         }
         if self.applied_launch || self.frames < 8 || self.canvas_rect == Rect::NOTHING {
             return;
@@ -1714,7 +1749,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll();
         self.save_changes_dialog(&ctx);
-        if self.confirm.is_none() && self.libwin.is_none() {
+        if self.confirm.is_none() && self.libwin.is_none() && self.schwin.is_none() {
             self.keys(&ctx);
         }
         self.refresh();
@@ -1722,12 +1757,16 @@ impl eframe::App for App {
         self.apply_launch();
         let width = ctx.content_rect().width();
         // The library editor takes the window below the menus.
-        if self.libwin.is_some() {
+        if self.libwin.is_some() || self.schwin.is_some() {
             let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
             Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
-            self.show_library_editor(ui);
+            if self.schwin.is_some() {
+                self.show_schematic_editor(ui);
+            } else {
+                self.show_library_editor(ui);
+            }
             self.shortcuts_window(&ctx);
             return;
         }

@@ -270,13 +270,17 @@ impl App {
         if item(ui, "Add a footprint library…", "", true) {
             self.ask_add_library(ctx);
         }
-        let editing = self.libwin.is_some();
+        let editing = self.libwin.is_some() || self.schwin.is_some();
         if item(ui, if editing { "Back to the board" } else { "Library editor…" }, "", true) {
             if editing {
                 self.libwin = None;
+                self.schwin = None;
             } else {
                 self.open_library_editor(None);
             }
+        }
+        if item(ui, "Schematic editor…", "", self.schwin.is_none()) {
+            self.open_schematic_editor(None);
         }
         ui.separator();
         if item(ui, "Save", "Ctrl+S", true) {

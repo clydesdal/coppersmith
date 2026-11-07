@@ -229,10 +229,19 @@ impl Schematic {
         Some(id)
     }
 
+    /// Adds a label; one put on a pin points away from it, a power symbol
+    /// so it doesn't sit on the part's body.
     pub fn add_label(&mut self, at: P, text: &str, kind: LabelKind) -> u32 {
         let id = self.new_id();
-        self.labels.push(Label { id, at: at.rounded(), text: text.to_string(), kind, turns: 0 });
+        let at = at.rounded();
+        let turns = self.pin_direction_at(at).map(|a| (((a - 90.0) / 90.0).round() as i32).rem_euclid(4) as u8).unwrap_or(0);
+        self.labels.push(Label { id, at, text: text.to_string(), kind, turns });
         id
+    }
+
+    /// The way a pin whose end is at `q` points out from its part, in degrees.
+    pub fn pin_direction_at(&self, q: P) -> Option<f64> {
+        self.parts.iter().flat_map(|p| p.pins()).find(|s| s.tip.same(q)).map(|s| s.angle)
     }
 
     pub fn delete(&mut self, sel: Sel) {
@@ -264,6 +273,56 @@ impl Schematic {
             }
         }
         self.fix_junctions();
+    }
+
+    /// Moves a part and drags the wires joined to its pins with it, keeping
+    /// them square by adding a corner where a segment would go crooked.
+    pub fn move_part_with_wires(&mut self, id: u32, d: P) {
+        let Some(part) = self.part(id) else { return };
+        let tips: Vec<P> = part.pins().into_iter().map(|s| s.tip).collect();
+        self.translate_only(Sel::Part(id), d);
+        for w in &mut self.wires {
+            // Either end of a wire may be on a pin of this part.
+            for at_start in [true, false] {
+                let pts = &mut w.pts;
+                let (end, next) = if at_start { (pts[0], pts[1]) } else { (pts[pts.len() - 1], pts[pts.len() - 2]) };
+                if !tips.iter().any(|t| t.same(end)) {
+                    continue;
+                }
+                let moved = end.add(d).rounded();
+                let was_horizontal = (end.y - next.y).abs() < 1e-9;
+                let was_vertical = (end.x - next.x).abs() < 1e-9;
+                let corner = if was_horizontal && (moved.y - next.y).abs() > 1e-9 {
+                    Some(p(next.x, moved.y))
+                } else if was_vertical && (moved.x - next.x).abs() > 1e-9 {
+                    Some(p(moved.x, next.y))
+                } else {
+                    None
+                };
+                // From the pin inwards: the pin's new place, then the corner.
+                let mut inwards = vec![moved];
+                inwards.extend(corner);
+                if at_start {
+                    pts.splice(0..1, inwards);
+                } else {
+                    inwards.reverse();
+                    let n = pts.len();
+                    pts.splice(n - 1..n, inwards);
+                }
+                pts.dedup_by(|a, b| a.same(*b));
+            }
+        }
+        // Wires that have shrunk to nothing go.
+        self.wires.retain(|w| w.pts.len() >= 2);
+        self.fix_junctions();
+    }
+
+    fn translate_only(&mut self, sel: Sel, d: P) {
+        if let Sel::Part(id) = sel
+            && let Some(p) = self.part_mut(id)
+        {
+            p.at = p.at.add(d).rounded();
+        }
     }
 
     /// Turns a part or a label a quarter anticlockwise about where it is.
@@ -585,6 +644,43 @@ mod tests {
         assert_eq!(s.pick(p(10.2, 5.0), 0.2), Some(Sel::Wire(w)));
         assert_eq!(s.pick(p(20.4, 0.2), 0.2), Some(Sel::Label(l)));
         assert_eq!(s.pick(p(30.0, 30.0), 0.2), None);
+    }
+
+    #[test]
+    fn moving_a_part_drags_its_wires_and_keeps_them_square() {
+        let mut s = Schematic::default();
+        let a = s.place(&resistor(), p(0.0, 0.0));
+        let b = s.place(&resistor(), p(15.24, 0.0));
+        // R1 pin 2 (5.08, 0) to R2 pin 1 (10.16, 0): one straight wire.
+        s.add_wire(vec![tip(&s, a, "2"), tip(&s, b, "1")]).unwrap();
+        // Move R1 up: the wire stays on its pin, with a corner to stay square.
+        s.move_part_with_wires(a, p(0.0, 5.08));
+        let w = &s.wires[0].pts;
+        assert_eq!(w.first(), Some(&p(5.08, 5.08)), "starts at the moved pin");
+        assert_eq!(w.last(), Some(&p(10.16, 0.0)), "still ends on R2");
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w.windows(2).all(|s| s[0].x == s[1].x || s[0].y == s[1].y), "square: {w:?}");
+        // The join holds: the same net as before.
+        let nets = s.netlist();
+        assert!(nets.iter().any(|(_, pins)| pins == &vec!["R1-2".to_string(), "R2-1".to_string()]), "{nets:?}");
+        // Moving R2 along the wire's own way keeps it straight (no corner).
+        s.move_part_with_wires(b, p(2.54, 0.0));
+        assert_eq!(s.wires[0].pts.last(), Some(&p(12.7, 0.0)));
+        assert!(s.wires[0].pts.windows(2).all(|s| s[0].x == s[1].x || s[0].y == s[1].y));
+    }
+
+    #[test]
+    fn a_label_on_a_pin_points_away_from_the_part() {
+        let mut s = Schematic::default();
+        let a = s.place(&resistor(), p(0.0, 0.0));
+        // Pin 2 points right (0°), pin 1 left (180°); a free label points up.
+        let right = s.add_label(tip(&s, a, "2"), "A", LabelKind::Power);
+        let left = s.add_label(tip(&s, a, "1"), "B", LabelKind::Power);
+        let free = s.add_label(p(0.0, 30.0), "C", LabelKind::Power);
+        let turns = |id| s.labels.iter().find(|l| l.id == id).unwrap().turns;
+        assert_eq!(turns(right), 3, "right is three quarter turns from up");
+        assert_eq!(turns(left), 1, "left is one");
+        assert_eq!(turns(free), 0);
     }
 
     #[test]
