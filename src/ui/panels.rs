@@ -391,10 +391,12 @@ impl App {
             let notes = self.lib.notes.join("\n");
             ui.label(RichText::new(text).size(11.5).color(FAINT)).on_hover_text(notes);
         }
+        ui.label(RichText::new("Double-click or right-click a part to edit it").size(11.5).color(FAINT));
         ui.add_space(6.0);
         let filter = self.lib_filter.to_lowercase();
         let words: Vec<&str> = filter.split_whitespace().collect();
         let mut start: Option<FootprintDef> = None;
+        let mut edit: Option<FootprintDef> = None;
         for cat in self.lib.categories() {
             let defs: Vec<&FootprintDef> = self
                 .lib
@@ -437,13 +439,23 @@ impl App {
                         preview(ui, d, vec2(220.0, 160.0));
                         ui.label(RichText::new(format!("{} pads · {}", d.pads.len(), d.source)).size(12.0).color(FAINT));
                     });
-                    if response.clicked() {
+                    if response.double_clicked() {
+                        edit = Some(d.clone());
+                    } else if response.clicked() {
                         start = Some(d.clone());
                     }
+                    response.context_menu(|ui| {
+                        if ui.button("Edit in the library editor").clicked() {
+                            edit = Some(d.clone());
+                            ui.close();
+                        }
+                    });
                 }
             });
         }
-        if let Some(d) = start {
+        if let Some(d) = edit {
+            self.edit_footprint(&d);
+        } else if let Some(d) = start {
             self.start_placing(&d);
         }
     }

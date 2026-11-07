@@ -52,6 +52,18 @@ impl LibWindow {
         LibWindow { ed: LibEditor::new(kind), center: p(0.0, 0.0), scale: 40.0, fit: true, shown: (kind, usize::MAX), grab: None, hover: None, rows: 8, pitch: 1.27, spacing: 5.4, tx, rx }
     }
 
+    /// Takes these footprints to edit, with `pick` chosen. `file` is where
+    /// saving goes, if they came from one.
+    pub fn load_footprints(&mut self, name: &str, defs: Vec<crate::pcb::library::FootprintDef>, pick: &str, file: Option<PathBuf>) {
+        self.ed.set_kind(Kind::Footprints);
+        self.ed.name = name.to_string();
+        self.ed.footprints = defs;
+        self.ed.fp_path = file;
+        self.ed.fp = self.ed.footprints.iter().position(|f| f.name == pick).unwrap_or(0);
+        self.ed.dirty = false;
+        self.fit = true;
+    }
+
     pub fn open_file(&mut self, path: &std::path::Path) -> Option<String> {
         let out = self.ed.open(path);
         self.fit = true;

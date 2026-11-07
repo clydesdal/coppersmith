@@ -1515,6 +1515,21 @@ impl App {
         }
     }
 
+    /// Opens the library a footprint is in, in the library editor, on that
+    /// footprint. Saving goes back to the library's own file if it has one
+    /// in the footprint folder.
+    pub fn edit_footprint(&mut self, def: &FootprintDef) {
+        let defs: Vec<FootprintDef> = self.lib.defs.iter().filter(|d| d.category == def.category).cloned().collect();
+        let file = crate::pcb::library::user_folder().map(|d| d.join(format!("{}.PcbLib", def.category))).filter(|p| p.exists());
+        let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(crate::ui::libedit::Kind::Footprints));
+        win.load_footprints(&def.category, defs, &def.name, file);
+        self.notice = Some(if def.source.starts_with("Built in") {
+            "Built-in footprints: Save as… to keep your changes in a PcbLib of your own".into()
+        } else {
+            format!("Editing {}", def.category)
+        });
+    }
+
     fn show_library_editor(&mut self, ui: &mut Ui) {
         let Some(mut win) = self.libwin.take() else { return };
         let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
