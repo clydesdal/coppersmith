@@ -87,6 +87,17 @@ a schematic editor.
 
 ## 3. Schematic capture
 
+Started: a schematic editor (File ▸ Schematic editor…) places parts from
+symbol libraries (Altium SchLib/IntLib, plus a few built in), draws square
+wires with automatic junction dots, net labels (numbers count up) and power
+ports, drags parts with their wires following, turns and mirrors, and works out
+the nets and a first set of checks as you go. Sheets open and save as Altium
+`.SchDoc` (the real test sheets read with the same nets as before) or as a
+Coppersmith `.cssch`. **Written SchDocs haven't been opened in Altium or Circuit
+Studio.** Next: sheet frame and title block, designator/value text you can move,
+buses and sheet entries, hierarchical sheets, annotation, a fuller ERC
+(output-to-output, missing power), multi-select, copy and paste.
+
 - Sheets, symbols, wires, junctions, net labels, power ports, buses, hierarchical sheets.
 - Annotation, electrical rule check (unconnected pins, output-to-output, missing power).
 - Netlist out; **Update PCB**: an engineering-change list (parts added, removed, renets) applied to the board, and back the other way for refdes changes.

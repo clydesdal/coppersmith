@@ -474,7 +474,8 @@ impl Schematic {
         let all_tips: Vec<(usize, P)> = self.parts.iter().enumerate().flat_map(|(i, p)| p.pins().into_iter().map(move |s| (i, s.tip))).collect();
         for part in &self.parts {
             for pin in part.pins() {
-                if pin.hidden {
+                // A hidden pin, or one named NC (not connected), is meant to be left alone.
+                if pin.hidden || pin.name.trim().eq_ignore_ascii_case("NC") {
                     continue;
                 }
                 let joined = touches_wire(pin.tip) || self.labels.iter().any(|l| l.at.same(pin.tip)) || all_tips.iter().filter(|(_, t)| t.same(pin.tip)).count() > 1 || ends.iter().any(|e| e.same(pin.tip));
@@ -625,6 +626,9 @@ mod tests {
         assert!(t.contains(&"R1 pin 1 () isn't connected".to_string()), "{t:?}");
         assert!(t.contains(&"R2 pin 2 () isn't connected".to_string()), "{t:?}");
         assert!(!t.iter().any(|x| x.contains("R1 pin 2")), "wired pins are fine: {t:?}");
+        // A pin named NC is left unconnected on purpose.
+        s.part_mut(b).unwrap().symbol.pins[1].name = "NC".into();
+        assert!(!texts(&s).iter().any(|x| x.contains("R2 pin 2")), "NC pins aren't reported");
         s.part_mut(b).unwrap().designator = "R1".into();
         s.part_mut(a).unwrap().footprint.clear();
         s.add_label(p(50.0, 50.0), "LOST", LabelKind::Net);

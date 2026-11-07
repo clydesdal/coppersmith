@@ -135,7 +135,8 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Sheet, String> {
         match record {
             2 => {
                 if let Some(k) = part_for(i) {
-                    let part = sheet.parts[k].part;
+                    // Each pin is of the part it says; only the part shown has its pins here.
+                    let part = p.get("OWNERPARTID").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0).max(0) as u32;
                     let pin = text_pin(p, part);
                     sheet.parts[k].pins.push(pin);
                 }

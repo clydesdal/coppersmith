@@ -62,6 +62,8 @@ pub struct SchWindow {
     /// The name the next label or power port gets.
     name: String,
     grab: Option<(Sel, P, P)>,
+    /// What reading a file left out.
+    notes: Vec<String>,
     tx: mpsc::Sender<Dialog>,
     rx: mpsc::Receiver<Dialog>,
 }
@@ -122,6 +124,7 @@ impl SchWindow {
             x_first: true,
             name: "GND".into(),
             grab: None,
+            notes: Vec::new(),
             tx,
             rx,
         };
@@ -156,10 +159,24 @@ impl SchWindow {
         }
     }
 
+    fn is_altium(path: &Path) -> bool {
+        path.extension().is_some_and(|e| e.eq_ignore_ascii_case("schdoc") || e.eq_ignore_ascii_case("csschdoc"))
+    }
+
     pub fn open_file(&mut self, path: &Path) -> String {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display())).and_then(|t| Schematic::load(&t));
-        match text {
-            Ok(s) => {
+        let read = if Self::is_altium(path) {
+            std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())).and_then(|b| {
+                let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                crate::pcb::altium::schsheet::read(&b, &name).map_err(|e| format!("{}: {e}", path.display()))
+            })
+        } else {
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display())).and_then(|t| Schematic::load(&t)).map(|s| (s, Vec::new()))
+        };
+        match read {
+            Ok((s, notes)) => {
+                if !notes.is_empty() {
+                    self.notes = notes;
+                }
                 self.sch = s;
                 self.path = Some(path.to_path_buf());
                 self.undo.clear();
@@ -284,7 +301,7 @@ impl SchWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            if let Some(path) = rfd::FileDialog::new().set_title("Open a schematic").add_filter("Coppersmith schematic", &["cssch", "json"]).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().set_title("Open a schematic").add_filter("Schematics", &["cssch", "json", "SchDoc", "schdoc", "CSSchDoc", "csschdoc"]).add_filter("Altium or Circuit Studio sheet", &["SchDoc", "schdoc", "CSSchDoc", "csschdoc"]).add_filter("Coppersmith schematic", &["cssch", "json"]).pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();
             }
@@ -294,7 +311,7 @@ impl SchWindow {
     fn ask_save_as(&self, ctx: &egui::Context) {
         let (tx, ctx, name) = (self.tx.clone(), ctx.clone(), format!("{}.cssch", self.sch.name));
         std::thread::spawn(move || {
-            if let Some(path) = rfd::FileDialog::new().set_title("Save the schematic").add_filter("Coppersmith schematic", &["cssch"]).set_file_name(name).save_file() {
+            if let Some(path) = rfd::FileDialog::new().set_title("Save the schematic").add_filter("Coppersmith schematic", &["cssch"]).add_filter("Altium sheet", &["SchDoc"]).set_file_name(name).save_file() {
                 let _ = tx.send(Dialog::SaveAs(path));
                 ctx.request_repaint();
             }
@@ -322,7 +339,8 @@ impl SchWindow {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        out.notice = Some(match std::fs::write(path, self.sch.save()) {
+        let bytes = if Self::is_altium(path) { crate::pcb::altium::schsheet::write(&self.sch) } else { Ok(self.sch.save().into_bytes()) };
+        out.notice = Some(match bytes.and_then(|b| std::fs::write(path, b).map_err(|e| e.to_string())) {
             Ok(()) => {
                 self.path = Some(path.to_path_buf());
                 self.dirty = false;
@@ -485,6 +503,9 @@ impl SchWindow {
                     ui.label(RichText::new("Sheet").font(semibold(14.0)));
                     field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut self.sch.name).desired_width(140.0)));
                     ui.label(RichText::new(format!("{} parts · {} wires · {} labels", self.sch.parts.len(), self.sch.wires.len(), self.sch.labels.len())).size(12.0).color(FAINT));
+                    if !self.notes.is_empty() {
+                        ui.label(RichText::new(format!("{} left out on reading", self.notes.len())).size(12.0).color(FAINT)).on_hover_text(self.notes.join("\n"));
+                    }
                 });
             }
         }

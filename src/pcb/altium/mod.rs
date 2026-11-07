@@ -18,6 +18,7 @@ pub mod pcblib;
 pub mod prims;
 pub mod schdoc;
 pub mod schlib;
+pub mod schsheet;
 pub mod write;
 
 use std::collections::HashMap;

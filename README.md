@@ -338,6 +338,38 @@ as well as made-up ones; **it hasn't been opened in Altium Designer or Circuit
 Studio**, which fill in the bookkeeping they keep (unique ids, embedded models)
 when they next save.
 
+### The schematic editor
+
+**File ▸ Schematic editor…** (or `coppersmith --schematic FILE`) opens a sheet to
+draw on. Symbols come from the list on the left: a few built in (resistor,
+capacitor, inductor, diode, an 8-pin chip), and any Altium `.SchLib`/`.IntLib`
+you add with **+** (copied into the data folder's `symbols` folder so they stay),
+or open in the library editor when you switch.
+
+- **Part:** pick a symbol, click to put it down, again for more; R turns it, X
+  mirrors it, Esc stops. Designators count up (R1, R2…).
+- **Wire:** click the corners; it draws in right angles (Space picks which way
+  the corner bends) and ends itself when it lands on a pin or another wire; Esc
+  ends it anywhere. Junction dots appear where a wire meets another partway.
+- **Net label** and **Power:** type a name, click a pin or wire. A label with a
+  number at the end counts up (D0, D1…); a power port points away from its pin
+  and joins every port of the same name.
+- **Select:** click or drag. Moving a part takes the wires on its pins with it,
+  keeping them square. The right panel has the designator, value and footprint
+  of what's picked (the symbol's footprints are offered), then the **checks**
+  (pins joined to nothing, unnamed or repeated designators, parts with no
+  footprint, labels touching nothing; pins named NC are left alone) and the
+  **nets** worked out from the wiring.
+
+Sheets save as Altium **`.SchDoc`** (File name ending `.SchDoc` in *Save as…*) or
+as Coppersmith's own `.cssch`, and open from either, so a sheet from Altium or
+Circuit Studio can be edited and sent back. The real test sheets read with the
+same nets as the earlier reader found, and written sheets read back the same in
+tests; **they haven't been opened in Altium or Circuit Studio.** Not yet: buses,
+sheet entries and hierarchy, a sheet border and title block, text notes,
+multi-select and copy/paste, moving the designator and value text, and
+putting a schematic's changes onto the board (Update PCB).
+
 ### Altium and Circuit Studio boards and schematics
 
 **Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in
