@@ -1020,7 +1020,7 @@ impl App {
             EditorLeft::Project => self.project_page(ui),
             EditorLeft::Items => match self.active.and_then(|i| self.docs.get_mut(i)) {
                 Some(Doc::Library(w)) => w.list(ui),
-                Some(Doc::Schematic(w)) => w.symbol_list(ui, &ctx),
+                Some(Doc::Schematic(w)) => w.symbol_panel(ui, &ctx),
                 Some(Doc::View3d(_)) | None => {}
             },
         });

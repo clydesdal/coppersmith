@@ -381,19 +381,38 @@ and *New schematic* add tabs.
 ### The schematic editor
 
 **+ ▸ New schematic** (or `coppersmith --schematic FILE`) opens a sheet to
-draw on. Symbols come from the list on the left: a few built in (resistor,
-capacitor, inductor, diode, an 8-pin chip), and any Altium `.SchLib`/`.IntLib`
-you add with **+** (copied into the data folder's `symbols` folder so they stay),
-or open in the library editor when you switch.
+draw on. The left panel (the *Symbols* tab) has two pages, and the tool you pick
+brings its page forward:
+
+- **Markers**, for **Net label** and **Power**: the standard things that aren't
+  parts, each drawn as it will look on the sheet. *Power and ground:* GND, AGND
+  (signal ground), PE (earth), VCC, +3V3, +5V, +12V, −12V, VDD, VBAT, VIN, VAC,
+  in Altium's styles (power ground, signal ground, earth, bar, circle, arrow,
+  wave); a name typed over takes the look its name usually has. *Nets:* a net
+  label, a bus (`NAME[0..7]`), and a **differential pair**, which puts down
+  `NAME_P` and `NAME_N` a grid apart in one click (the number counts up for the
+  next). *Ports:* input, output, bidirectional, unspecified. A picked supply or
+  port can change style or direction in the card on the right.
+- **Parts**, for **Part**: the symbols of the **project's libraries**, the
+  `.SchLib` and `.IntLib` files its project lists (read once and kept; the ones
+  open in a tab stand in with their edits). Choose one library or all, search,
+  and see the symbol under the pointer drawn before you place it. **+** opens
+  another library for that sheet. Nothing is built in or kept in a data folder:
+  with no project, the list is empty until you open one.
 
 - **Part:** pick a symbol, click to put it down, again for more; R turns it, X
   mirrors it, Esc stops. Designators count up (R1, R2…).
 - **Wire:** click the corners; it draws in right angles (Space picks which way
   the corner bends) and ends itself when it lands on a pin or another wire; Esc
   ends it anywhere. Junction dots appear where a wire meets another partway.
-- **Net label** and **Power:** type a name, click a pin or wire. A label with a
-  number at the end counts up (D0, D1…); a power port points away from its pin
-  and joins every port of the same name.
+- **Net label** and **Power:** pick a marker, type a name, click a pin or wire. A
+  label with a number at the end counts up (D0, D1…); a power port points away
+  from its pin (a ground hangs down when it's on its own) and joins every port
+  of the same name.
+- **Looks:** everything on the sheet is sized in millimetres (strokes, pin
+  numbers and names, supply and port symbols), so a symbol keeps its proportions
+  at any zoom. Altium's "show name" and "show designator" flags on pins are kept,
+  so a resistor's pins aren't labelled inside its body.
 - **The page:** the sheet is drawn as a sheet of paper on a darker desk, with its
   border in from the edge and the grid on the paper. The paper size (A4, A3, A2,
   A1, A0, A, B, C, D, E, or a custom size read from a SchDoc) is in the *Sheet*

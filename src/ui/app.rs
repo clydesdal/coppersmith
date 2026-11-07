@@ -297,6 +297,8 @@ pub struct App {
     pub show_keys: bool,
     /// The window of net classes, pairs and the rules asked of them.
     pub show_classes: bool,
+    /// The symbols read from the project's library files, so they're read once.
+    pub symbol_cache: std::collections::HashMap<PathBuf, Vec<crate::pcb::altium::schlib::Symbol>>,
     /// The schematics and libraries open in tabs beside the board.
     pub docs: Vec<Doc>,
     /// Which tab is on show: one of `docs`, or the board (None).
@@ -421,6 +423,7 @@ impl App {
             prefs_saved: None,
             show_keys: false,
             show_classes: false,
+            symbol_cache: std::collections::HashMap::new(),
             docs: Vec::new(),
             active: None,
             pending_close: None,
@@ -1641,23 +1644,58 @@ impl App {
         self.docs.iter().position(|d| d.paths().iter().any(|p| crate::pcb::project::same_file(p, path)))
     }
 
-    /// The symbols of the libraries open in tabs, for sheets to place.
-    fn doc_symbols(&self) -> Vec<crate::pcb::altium::schlib::Symbol> {
-        self.docs.iter().filter_map(|d| if let Doc::Library(w) = d { Some(w.ed.symbols.clone()) } else { None }).flatten().collect()
+    /// The libraries of symbols a sheet can place from: the project's symbol libraries
+    /// (read once, and kept), the one open in a tab standing for its file so a sheet
+    /// sees its edits, and any other library open in a tab.
+    pub fn symbol_libraries(&mut self) -> Vec<crate::ui::schview::SymbolLibrary> {
+        use crate::pcb::project::{FileKind, same_file};
+        use crate::ui::schview::SymbolLibrary;
+        let is_symbols = |p: &std::path::Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("schlib") || e.eq_ignore_ascii_case("intlib"));
+        let stem = |p: &std::path::Path| p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let mut out: Vec<SymbolLibrary> = Vec::new();
+        let files: Vec<PathBuf> = self.project.iter().flat_map(|p| p.files.iter()).filter(|f| f.kind == FileKind::Library && !f.missing && is_symbols(&f.path)).map(|f| f.path.clone()).collect();
+        for path in files {
+            let open = self.docs.iter().find_map(|d| match d {
+                Doc::Library(w) if w.ed.sym_path.as_deref().is_some_and(|q| same_file(q, &path)) => Some(w.ed.symbols.clone()),
+                _ => None,
+            });
+            let symbols = match open {
+                Some(s) => s,
+                None => self.symbol_cache.entry(path.clone()).or_insert_with(|| crate::pcb::altium::read(&path).map(|g| g.symbols).unwrap_or_default()).clone(),
+            };
+            if !symbols.is_empty() {
+                out.push(SymbolLibrary { name: stem(&path), path: Some(path), symbols });
+            }
+        }
+        for d in &self.docs {
+            if let Doc::Library(w) = d
+                && !w.ed.symbols.is_empty()
+                && !w.ed.sym_path.as_deref().is_some_and(|q| out.iter().any(|l| l.path.as_deref().is_some_and(|p| same_file(p, q))))
+            {
+                let name = w.ed.sym_path.as_deref().map(stem).unwrap_or_else(|| w.ed.name.clone());
+                out.push(SymbolLibrary { name, path: w.ed.sym_path.clone(), symbols: w.ed.symbols.clone() });
+            }
+        }
+        out
+    }
+
+    /// Gives the sheet on show the libraries on offer.
+    fn feed_symbols(&mut self) {
+        let Some(i) = self.active else { return };
+        if !matches!(self.docs.get(i), Some(Doc::Schematic(_))) {
+            return;
+        }
+        let libs = self.symbol_libraries();
+        if let Some(Doc::Schematic(w)) = self.docs.get_mut(i) {
+            w.set_libraries(libs);
+        }
     }
 
     /// Shows a tab, or the board (None).
     pub fn activate(&mut self, tab: Option<usize>) {
         self.active = tab.filter(|i| *i < self.docs.len());
         self.pending_close = None;
-        if let Some(i) = self.active
-            && matches!(self.docs[i], Doc::Schematic(_))
-        {
-            let symbols = self.doc_symbols();
-            if let Doc::Schematic(w) = &mut self.docs[i] {
-                w.add_symbols(&symbols);
-            }
-        }
+        self.feed_symbols();
     }
 
     /// Closes a tab. One with unsaved changes asks to be closed twice.
@@ -1738,7 +1776,6 @@ impl App {
             self.note_file(path);
         }
         let mut win = crate::ui::schview::SchWindow::new();
-        win.add_symbols(&self.doc_symbols());
         if let Some(path) = path {
             self.notice = Some(win.open_file(path));
         }
@@ -1848,6 +1885,7 @@ impl App {
                 self.left_tab = LeftTab::Project;
                 self.editor_tab = crate::ui::dock::EditorLeft::Project;
                 self.show_left = true;
+                self.feed_symbols();
             }
             Err(e) => self.notice = Some(e),
         }
@@ -1876,7 +1914,15 @@ impl App {
                 let out = w.show(ui, &known);
                 (notice, reload) = (out.notice, out.reload_parts);
             }
-            Some(Doc::Schematic(w)) => notice = w.show(ui, &known).notice,
+            Some(Doc::Schematic(w)) => {
+                let out = w.show(ui, &known);
+                notice = out.notice;
+                // A tool that has its list in the left panel brings it forward.
+                if out.show_symbols {
+                    self.editor_tab = crate::ui::dock::EditorLeft::Items;
+                    self.show_left = true;
+                }
+            }
             Some(Doc::View3d(v)) => v.show(ui, &gpu, &report),
             None => {}
         }

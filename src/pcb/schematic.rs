@@ -101,6 +101,121 @@ pub enum LabelKind {
     Port,
 }
 
+/// How a power port is drawn, numbered as Altium's `STYLE` is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum PowerStyle {
+    Circle,
+    Arrow,
+    #[default]
+    Bar,
+    Wave,
+    /// Power ground: three bars, shortening.
+    Ground,
+    /// Signal ground: a triangle.
+    SignalGround,
+    Earth,
+}
+
+impl PowerStyle {
+    pub const ALL: [PowerStyle; 7] = [PowerStyle::Bar, PowerStyle::Circle, PowerStyle::Arrow, PowerStyle::Wave, PowerStyle::Ground, PowerStyle::SignalGround, PowerStyle::Earth];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PowerStyle::Circle => "Circle",
+            PowerStyle::Arrow => "Arrow",
+            PowerStyle::Bar => "Bar",
+            PowerStyle::Wave => "Wave",
+            PowerStyle::Ground => "Power ground",
+            PowerStyle::SignalGround => "Signal ground",
+            PowerStyle::Earth => "Earth",
+        }
+    }
+
+    /// The number Altium's `STYLE` holds for it.
+    pub fn altium(self) -> u8 {
+        match self {
+            PowerStyle::Circle => 0,
+            PowerStyle::Arrow => 1,
+            PowerStyle::Bar => 2,
+            PowerStyle::Wave => 3,
+            PowerStyle::Ground => 4,
+            PowerStyle::SignalGround => 5,
+            PowerStyle::Earth => 6,
+        }
+    }
+
+    /// From Altium's `STYLE`; styles this doesn't draw (the GOST ones) are a bar.
+    pub fn from_altium(n: u8) -> PowerStyle {
+        match n {
+            0 => PowerStyle::Circle,
+            1 => PowerStyle::Arrow,
+            3 => PowerStyle::Wave,
+            4 => PowerStyle::Ground,
+            5 => PowerStyle::SignalGround,
+            6 => PowerStyle::Earth,
+            _ => PowerStyle::Bar,
+        }
+    }
+
+    /// The style a supply of this name is usually drawn in: grounds as grounds, the rest as bars.
+    pub fn for_name(name: &str) -> PowerStyle {
+        let n = name.trim().to_uppercase();
+        if n == "PE" || n.contains("EARTH") || n.contains("CHASSIS") {
+            PowerStyle::Earth
+        } else if n.starts_with('A') && n.contains("GND") || n.starts_with("SGND") || n.starts_with("SIG") && n.contains("GND") {
+            PowerStyle::SignalGround
+        } else if n.contains("GND") || n.starts_with("VSS") || n == "0V" {
+            PowerStyle::Ground
+        } else {
+            PowerStyle::Bar
+        }
+    }
+
+    /// Whether the symbol hangs off its wire like a ground, with its name beyond it.
+    pub fn is_ground(self) -> bool {
+        matches!(self, PowerStyle::Ground | PowerStyle::SignalGround | PowerStyle::Earth)
+    }
+}
+
+/// Which way a port's signal goes, as Altium's `IOTYPE`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum PortIo {
+    Unspecified,
+    Output,
+    Input,
+    #[default]
+    Bidirectional,
+}
+
+impl PortIo {
+    pub fn name(self) -> &'static str {
+        match self {
+            PortIo::Unspecified => "Unspecified",
+            PortIo::Output => "Output",
+            PortIo::Input => "Input",
+            PortIo::Bidirectional => "Bidirectional",
+        }
+    }
+
+    pub fn altium(self) -> u8 {
+        match self {
+            PortIo::Unspecified => 0,
+            PortIo::Output => 1,
+            PortIo::Input => 2,
+            PortIo::Bidirectional => 3,
+        }
+    }
+
+    pub fn from_altium(n: u8) -> PortIo {
+        match n {
+            0 => PortIo::Unspecified,
+            1 => PortIo::Output,
+            2 => PortIo::Input,
+            _ => PortIo::Bidirectional,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Label {
     pub id: u32,
@@ -110,6 +225,12 @@ pub struct Label {
     /// Which way a power symbol or port points, in quarter turns.
     #[serde(default)]
     pub turns: u8,
+    /// How a power port is drawn.
+    #[serde(default)]
+    pub style: PowerStyle,
+    /// Which way a port's signal goes.
+    #[serde(default)]
+    pub io: PortIo,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -151,6 +272,8 @@ pub struct SheetPin {
     pub tip: P,
     pub angle: f64,
     pub hidden: bool,
+    pub name_shown: bool,
+    pub number_shown: bool,
 }
 
 /// What an electrical check found.
@@ -184,7 +307,7 @@ impl Placed {
         let angle = transform_angle(pin.angle, self.turns, self.mirror);
         let t = angle.to_radians();
         let tip = at.add(p(t.cos(), t.sin()).scale(pin.length)).rounded();
-        SheetPin { number: pin.number.clone(), name: pin.name.clone(), at, tip, angle, hidden: pin.hidden }
+        SheetPin { number: pin.number.clone(), name: pin.name.clone(), at, tip, angle, hidden: pin.hidden, name_shown: pin.name_shown, number_shown: pin.number_shown }
     }
 
     /// The pins of the part shown (a many-part symbol shows one part).
@@ -290,11 +413,17 @@ impl Schematic {
 
     /// Adds a label; one put on a pin points away from it, a power symbol
     /// so it doesn't sit on the part's body.
+    #[cfg(test)]
     pub fn add_label(&mut self, at: P, text: &str, kind: LabelKind) -> u32 {
+        self.add_marker(at, text, kind, PowerStyle::for_name(text), PortIo::default())
+    }
+
+    /// A label with its power style or port direction given.
+    pub fn add_marker(&mut self, at: P, text: &str, kind: LabelKind, style: PowerStyle, io: PortIo) -> u32 {
         let id = self.new_id();
         let at = at.rounded();
         let turns = self.pin_direction_at(at).map(|a| (((a - 90.0) / 90.0).round() as i32).rem_euclid(4) as u8).unwrap_or(0);
-        self.labels.push(Label { id, at, text: text.to_string(), kind, turns });
+        self.labels.push(Label { id, at, text: text.to_string(), kind, turns, style, io });
         id
     }
 
@@ -504,6 +633,8 @@ impl Schematic {
                         angle: s.angle,
                         kind: crate::pcb::altium::schlib::PinKind::Passive,
                         hidden: s.hidden,
+                        name_shown: s.name_shown,
+                        number_shown: s.number_shown,
                     })
                     .collect();
                 schdoc::Part { designator: p.designator.clone(), lib_ref: p.symbol.name.clone(), value: p.value.clone(), footprint: p.footprint.clone(), at: p.at, part: p.part, pins }
@@ -587,7 +718,7 @@ mod tests {
 
     /// A two-pin part along x: pin 1 at (-5.08, 0) pointing left, pin 2 at (5.08, 0) pointing right, 2.54 long.
     fn resistor() -> Symbol {
-        let pin = |n: &str, x: f64, a: f64| Pin { part: 1, number: n.into(), name: String::new(), at: p(x, 0.0), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false };
+        let pin = |n: &str, x: f64, a: f64| Pin { part: 1, number: n.into(), name: String::new(), at: p(x, 0.0), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
         Symbol {
             name: "Resistor".into(),
             description: String::new(),

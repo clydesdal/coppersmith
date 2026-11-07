@@ -17,7 +17,7 @@ use super::schlib::{Drawing, Pin, PinKind, Symbol, binary_pin, text_pin};
 use super::write::{Out, Rec, drawing_rec, param_text};
 use super::{Reader, open, params, stream};
 use crate::pcb::geom::*;
-use crate::pcb::schematic::{Label, LabelKind, Paper, Placed, Schematic, Wire, transform, transform_angle};
+use crate::pcb::schematic::{Label, LabelKind, Paper, Placed, PortIo, PowerStyle, Schematic, Wire, transform, transform_angle};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -259,7 +259,9 @@ pub fn read(bytes: &[u8], name: &str) -> Result<(Schematic, Vec<String>), String
                     let id = out.new_id();
                     // A power port's ORIENTATION: 0 right, 1 up, 2 left, 3 down; ours count from up.
                     let turns = if kind == LabelKind::Power { (p.get("ORIENTATION").and_then(|v| v.parse::<u8>().ok()).unwrap_or(1).wrapping_sub(1)) & 3 } else { 0 };
-                    out.labels.push(Label { id, at: point(p, "LOCATION.X", "LOCATION.Y"), text: t.clone(), kind, turns });
+                    let style = if kind == LabelKind::Power { PowerStyle::from_altium(p.get("STYLE").and_then(|v| v.parse().ok()).unwrap_or(2)) } else { PowerStyle::default() };
+                    let io = if kind == LabelKind::Port { PortIo::from_altium(p.get("IOTYPE").and_then(|v| v.parse().ok()).unwrap_or(3)) } else { PortIo::default() };
+                    out.labels.push(Label { id, at: point(p, "LOCATION.X", "LOCATION.Y"), text: t.clone(), kind, turns, style, io });
                 }
             }
             // The sheet: its paper.
@@ -377,13 +379,12 @@ pub fn write(s: &Schematic) -> Result<Vec<u8>, String> {
             }
             LabelKind::Power => {
                 r = Rec::new(17);
-                let ground = l.text.to_uppercase().contains("GND") || l.text.to_uppercase().starts_with("VSS");
-                r.set("TEXT", &l.text).set("STYLE", if ground { 4 } else { 2 }).set("SHOWNETNAME", "T").set("ORIENTATION", (l.turns + 1) & 3);
+                r.set("TEXT", &l.text).set("STYLE", l.style.altium()).set("SHOWNETNAME", "T").set("ORIENTATION", (l.turns + 1) & 3);
             }
             LabelKind::Port => {
                 r = Rec::new(18);
                 let width = (l.text.chars().count() as f64 * 1.0 + 2.0).ceil();
-                r.set("NAME", &l.text).set("STYLE", 3).set("IOTYPE", 3).set("ALIGNMENT", 2).mm("WIDTH", width * SCH * 10.0 / 10.0);
+                r.set("NAME", &l.text).set("STYLE", 3).set("IOTYPE", l.io.altium()).set("ALIGNMENT", 2).mm("WIDTH", width * SCH * 10.0 / 10.0);
             }
         }
         r.at("LOCATION.X", "LOCATION.Y", l.at);
@@ -415,7 +416,7 @@ mod tests {
     }
 
     fn symbol() -> Symbol {
-        let pin = |part, n: &str, name: &str, x: f64, y: f64, a: f64| Pin { part, number: n.into(), name: name.into(), at: p(x, y), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false };
+        let pin = |part, n: &str, name: &str, x: f64, y: f64, a: f64| Pin { part, number: n.into(), name: name.into(), at: p(x, y), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
         Symbol {
             name: "OPAMP".into(),
             description: "Dual op amp".into(),
@@ -456,6 +457,39 @@ mod tests {
         let mut v: Vec<(String, String, P)> = s.parts.iter().flat_map(|p| p.pins().into_iter().map(|x| (p.designator.clone(), x.number, x.tip)).collect::<Vec<_>>()).collect();
         v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         v
+    }
+
+    #[test]
+    fn a_power_ports_style_and_a_ports_direction_survive_a_write_and_read() {
+        use crate::pcb::schematic::{PortIo, PowerStyle};
+        let mut s = Schematic::default();
+        s.add_marker(p(10.16, 10.16), "PE", LabelKind::Power, PowerStyle::Earth, PortIo::default());
+        s.add_marker(p(20.32, 10.16), "VIN", LabelKind::Power, PowerStyle::Arrow, PortIo::default());
+        s.add_marker(p(30.48, 10.16), "+3V3", LabelKind::Power, PowerStyle::Circle, PortIo::default());
+        s.add_marker(p(10.16, 30.48), "CLK", LabelKind::Port, PowerStyle::default(), PortIo::Input);
+        s.add_marker(p(20.32, 30.48), "DATA", LabelKind::Port, PowerStyle::default(), PortIo::Output);
+        let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
+        let find = |name: &str| back.labels.iter().find(|l| l.text == name).unwrap_or_else(|| panic!("no {name}"));
+        assert_eq!(find("PE").style, PowerStyle::Earth);
+        assert_eq!(find("VIN").style, PowerStyle::Arrow);
+        assert_eq!(find("+3V3").style, PowerStyle::Circle);
+        assert_eq!(find("CLK").io, PortIo::Input);
+        assert_eq!(find("DATA").io, PortIo::Output);
+    }
+
+    #[test]
+    fn a_pins_hidden_name_and_number_stay_hidden_through_a_write_and_read() {
+        let mut sym = symbol();
+        sym.pins[0].name_shown = false;
+        sym.pins[1].number_shown = false;
+        let mut s = Schematic::default();
+        s.place(&sym, p(25.4, 25.4));
+        let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
+        let pins = back.parts[0].pins();
+        let one = pins.iter().find(|x| x.number == "1").unwrap();
+        assert!(!one.name_shown && one.number_shown, "pin 1 keeps its number but not its name");
+        let two = pins.iter().find(|x| x.name == sym.pins[1].name && x.number == sym.pins[1].number).unwrap();
+        assert!(two.name_shown && !two.number_shown, "its neighbour keeps its name but not its number");
     }
 
     #[test]
