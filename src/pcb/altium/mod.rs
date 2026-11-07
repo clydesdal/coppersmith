@@ -62,6 +62,30 @@ pub fn read(path: &Path) -> Result<Imported, String> {
     Ok(got)
 }
 
+/// Each extension as it's given, in lower case and in capitals, so a file
+/// dialog that matches exactly still shows `.SCHLIB` and `.SchDoc` alike.
+pub fn with_cases(exts: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in exts {
+        for v in [e.to_string(), e.to_lowercase(), e.to_uppercase()] {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// A library of footprints or symbols: PcbLib, SchLib or IntLib.
+pub fn is_library(path: &Path) -> bool {
+    path.extension().is_some_and(|e| ["pcblib", "schlib", "intlib"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// A schematic sheet: an Altium or Circuit Studio SchDoc, or Coppersmith's own.
+pub fn is_schematic(path: &Path) -> bool {
+    path.extension().is_some_and(|e| ["schdoc", "csschdoc", "cssch"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
 /// The kinds of Altium file there are readers for.
 pub fn is_board(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc"))
@@ -282,6 +306,20 @@ mod tests {
                 assert!(!got.footprints.is_empty() || !got.symbols.is_empty(), "{f}: nothing read");
             }
         }
+    }
+
+    #[test]
+    fn file_kinds_are_told_apart_whatever_the_case() {
+        let ext = |s: &str| std::path::PathBuf::from(s);
+        assert!(is_library(&ext("Ezdisplay.SCHLIB")) && is_library(&ext("a.PcbLib")) && is_library(&ext("b.intlib")));
+        assert!(is_schematic(&ext("01 MAIN.SchDoc")) && is_schematic(&ext("x.CSSCHDOC")) && is_schematic(&ext("y.cssch")));
+        assert!(!is_library(&ext("board.PcbDoc")) && !is_schematic(&ext("board.PcbDoc")) && !is_library(&ext("noext")));
+        // A dialog that matches exactly gets every spelling.
+        let v = with_cases(&["SchLib", "cssch"]);
+        for want in ["SchLib", "schlib", "SCHLIB", "cssch", "CSSCH"] {
+            assert!(v.iter().any(|x| x == want), "{want} missing from {v:?}");
+        }
+        assert_eq!(v.iter().filter(|x| *x == "cssch").count(), 1, "no repeats");
     }
 
     #[test]

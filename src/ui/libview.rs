@@ -73,7 +73,7 @@ impl LibWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &["PcbLib", "pcblib", "SchLib", "schlib", "IntLib", "intlib"]);
+            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();
@@ -266,6 +266,16 @@ impl LibWindow {
         ui.add_space(6.0);
         let words = self.ed.filter.to_lowercase();
         let names = self.ed.names();
+        if names.is_empty() {
+            // Say why the list is empty and what to do, rather than leave it blank.
+            let (here, other, other_count, other_name) = if symbols { ("symbols", "footprints", self.ed.footprints.len(), "Footprints") } else { ("footprints", "symbols", self.ed.symbols.len(), "Symbols") };
+            ui.label(RichText::new(format!("No {here} here yet.")).size(13.0).color(DIM));
+            if other_count > 0 {
+                ui.label(RichText::new(format!("This library has {other_count} {other}: switch to {other_name} at the top.")).size(12.0).color(YELLOW));
+            }
+            let open = if symbols { "Open a SchLib or IntLib with the folder button, or press + to draw one." } else { "Open a PcbLib or IntLib with the folder button, press + to draw one, or double-click a part in the board's Parts list to edit its library." };
+            ui.label(RichText::new(open).size(12.0).color(FAINT));
+        }
         let mut pick = None;
         let room = if self.wizard_room() { 215.0 } else { 0.0 };
         ScrollArea::vertical().max_height((ui.available_height() - room).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {

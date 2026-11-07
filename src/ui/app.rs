@@ -1077,11 +1077,14 @@ impl App {
     pub fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
+            use crate::pcb::altium::with_cases as cases;
+            // Boards first; schematics and libraries open in their editors.
             let dialog = rfd::FileDialog::new()
-                .set_title("Open a board")
-                .add_filter("Boards", &["cspcb", "json", "PcbDoc", "pcbdoc", "CSPcbDoc", "cspcbdoc"])
-                .add_filter("Coppersmith board", &["cspcb", "json"])
-                .add_filter("Altium or Circuit Studio board", &["PcbDoc", "pcbdoc", "CSPcbDoc", "cspcbdoc"]);
+                .set_title("Open")
+                .add_filter("Boards, schematics and libraries", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib"]))
+                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc"]))
+                .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch"]))
+                .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Open(path));
                 ctx.request_repaint();
@@ -1094,7 +1097,7 @@ impl App {
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new()
                 .set_title("Add an Altium library")
-                .add_filter("Altium footprint library", &["PcbLib", "pcblib", "IntLib", "intlib"]);
+                .add_filter("Altium footprint library", &crate::pcb::altium::with_cases(&["PcbLib", "IntLib"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::AddLibrary(path));
                 ctx.request_repaint();
@@ -1244,6 +1247,9 @@ impl App {
         while let Ok(asked) = self.asked_rx.try_recv() {
             match asked {
                 Asked::AddLibrary(path) => self.add_library(path),
+                // Schematics and libraries open in their editors, not as a board.
+                Asked::Open(path) if crate::pcb::altium::is_schematic(&path) => self.open_schematic_editor(Some(&path)),
+                Asked::Open(path) if crate::pcb::altium::is_library(&path) => self.open_library_editor(Some(&path)),
                 Asked::Open(path) if self.dirty => self.confirm = Some(Then::Open(path)),
                 Asked::Open(path) => self.open(path),
                 Asked::SaveAs(path) => {
@@ -1514,6 +1520,7 @@ impl App {
             Some(e) if e == "schlib" => crate::ui::libedit::Kind::Symbols,
             _ => crate::ui::libedit::Kind::Footprints,
         };
+        self.schwin = None;
         let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(kind));
         if let Some(path) = path {
             self.notice = win.open_file(path);
