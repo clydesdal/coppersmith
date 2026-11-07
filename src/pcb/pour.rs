@@ -115,7 +115,58 @@ fn around(board: &Board) -> Around {
     Around { items, bare_holes }
 }
 
-/// Pours every pour on the board, in order.
+/// What a poured pour keeps for those poured after it on its layer.
+type Done = (u8, u32, f64, Vec<Shape>);
+
+fn done_of(pour: &Pour, islands: &[Island]) -> Done {
+    (pour.layer, pour.net, pour.clearance, islands.iter().map(|is| is.rings.iter().map(|r| to(r)).collect()).collect())
+}
+
+/// A fingerprint of everything a pour's shape is worked out from: its own
+/// settings, the board's edge, the copper on its layer and the pours poured
+/// before it there (through `before`, their fingerprints in turn).
+fn signature(board: &Board, pour: &Pour, env: &Around, before: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let f = |h: &mut std::collections::hash_map::DefaultHasher, v: f64| v.to_bits().hash(h);
+    let pts = |h: &mut std::collections::hash_map::DefaultHasher, ring: &[P]| {
+        ring.len().hash(h);
+        for q in ring {
+            f(h, q.x);
+            f(h, q.y);
+        }
+    };
+    (pour.layer, pour.net, pour.plane, pour.connect as u8, pour.remove_islands, before).hash(&mut h);
+    for v in [pour.clearance, pour.edge, pour.spoke, pour.gap, pour.min_area, pour.neck, board.rules.clearance] {
+        f(&mut h, v);
+    }
+    pts(&mut h, pour.area(board));
+    pts(&mut h, &board.outline);
+    for hole in &env.bare_holes {
+        pts(&mut h, &hole.core);
+        f(&mut h, hole.r);
+    }
+    for (cu, drill) in &env.items {
+        if !cu.on.has(pour.layer) {
+            continue;
+        }
+        cu.item.hash(&mut h);
+        cu.net.hash(&mut h);
+        f(&mut h, *drill);
+        pts(&mut h, &cu.anchors);
+        pts(&mut h, &cu.blob.core);
+        f(&mut h, cu.blob.r);
+        for part in &cu.parts {
+            pts(&mut h, &part.core);
+            f(&mut h, part.r);
+        }
+    }
+    h.finish() | 1
+}
+
+/// Pours every pour on the board, in order. Pours on different layers don't
+/// affect each other, so each layer's go on a thread of their own; a pour
+/// whose surroundings are as they were when it last poured is left alone.
 pub fn repour(board: &mut Board) {
     if board.pours.is_empty() {
         return;
@@ -123,13 +174,50 @@ pub fn repour(board: &mut Board) {
     let env = around(board);
     let mut order: Vec<usize> = (0..board.pours.len()).collect();
     order.sort_by_key(|&i| (board.pours[i].plane, board.pours[i].order, board.pours[i].id));
-    let mut done: Vec<(u8, u32, f64, Vec<Shape>)> = Vec::new();
+    let mut layers: Vec<(u8, Vec<usize>)> = Vec::new();
     for i in order {
-        let shapes = pour_one(board, &board.pours[i], &env, &done);
-        let pour = &board.pours[i];
-        let islands = finish(board, pour, &env, &shapes);
-        done.push((pour.layer, pour.net, pour.clearance, islands.iter().map(|is| is.rings.iter().map(|r| to(r)).collect()).collect()));
-        board.pours[i].fill = islands;
+        let layer = board.pours[i].layer;
+        match layers.iter_mut().find(|(l, _)| *l == layer) {
+            Some((_, group)) => group.push(i),
+            None => layers.push((layer, vec![i])),
+        }
+    }
+
+    // (pour, its new fill and fingerprint), or None where it stands as it was.
+    type Poured = Vec<(usize, Option<(Vec<Island>, u64)>)>;
+    let pour_layer = |group: &[usize]| -> Poured {
+        let mut done: Vec<Done> = Vec::new();
+        let mut before = 0u64;
+        let mut out: Poured = Vec::new();
+        for &i in group {
+            let pour = &board.pours[i];
+            let sig = signature(board, pour, &env, before);
+            before = sig;
+            if pour.sig == sig {
+                done.push(done_of(pour, &pour.fill));
+                out.push((i, None));
+                continue;
+            }
+            let shapes = pour_one(board, pour, &env, &done);
+            let islands = finish(board, pour, &env, &shapes);
+            done.push(done_of(pour, &islands));
+            out.push((i, Some((islands, sig))));
+        }
+        out
+    };
+    let results: Vec<Poured> = if layers.len() < 2 {
+        layers.iter().map(|(_, g)| pour_layer(g)).collect()
+    } else {
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = layers.iter().map(|(_, g)| scope.spawn(|| pour_layer(g))).collect();
+            jobs.into_iter().map(|j| j.join().expect("a pour panicked")).collect()
+        })
+    };
+    for (i, poured) in results.into_iter().flatten() {
+        if let Some((islands, sig)) = poured {
+            board.pours[i].fill = islands;
+            board.pours[i].sig = sig;
+        }
     }
 }
 
@@ -381,6 +469,52 @@ mod tests {
         assert!(bad.is_empty(), "{bad:?}");
         // The GND pad is joined to the pour, so nothing's left to connect.
         assert!(c.rats.is_empty(), "{:?}", c.rats);
+    }
+
+    /// A board with a GND pour on the top and another on the bottom.
+    fn two_pours() -> Board {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        // A through-hole pad, so GND is there on both layers for the pours to join.
+        pad(&mut b, p(10.0, 10.0), gnd, 0.8);
+        b.tracks.push(Track { mid: None, id: 900, a: p(20.0, 10.0), b: p(30.0, 30.0), w: 0.25, layer: TOP, net: sig });
+        for layer in [TOP, BOTTOM] {
+            let id = b.new_id();
+            b.pours.push(Pour::new(id, layer, gnd, Vec::new(), &b.rules));
+        }
+        b
+    }
+
+    #[test]
+    fn a_pour_is_left_alone_while_its_surroundings_stand() {
+        let mut b = two_pours();
+        b.repour();
+        let (areas, sigs) = (b.pours.iter().map(|p| p.copper_area()).collect::<Vec<_>>(), b.pours.iter().map(|p| p.sig).collect::<Vec<_>>());
+        assert!(areas.iter().all(|a| *a > 100.0) && sigs.iter().all(|s| *s != 0), "{areas:?} {sigs:?}");
+        // Poured again with nothing changed: nothing is redone.
+        b.repour();
+        assert_eq!(sigs, b.pours.iter().map(|p| p.sig).collect::<Vec<_>>());
+        assert_eq!(areas, b.pours.iter().map(|p| p.copper_area()).collect::<Vec<_>>());
+        // Copper of another net on the top pours it again there, and only there.
+        let sig = b.net("SIG");
+        b.tracks.push(Track { mid: None, id: 901, a: p(5.0, 30.0), b: p(40.0, 30.0), w: 1.0, layer: TOP, net: sig });
+        b.repour();
+        assert_ne!(sigs[0], b.pours[0].sig);
+        assert!(b.pours[0].copper_area() < areas[0] - 10.0, "the top pour gave way");
+        assert_eq!(sigs[1], b.pours[1].sig);
+        assert_eq!(areas[1], b.pours[1].copper_area());
+    }
+
+    #[test]
+    fn pouring_layers_side_by_side_gives_what_pouring_each_alone_does() {
+        let mut both = two_pours();
+        both.repour();
+        for k in 0..2 {
+            let mut alone = two_pours();
+            alone.pours.remove(1 - k);
+            alone.repour();
+            assert_eq!(alone.pours[0].fill, both.pours[k].fill, "layer {k}");
+        }
     }
 
     #[test]

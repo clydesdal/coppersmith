@@ -384,6 +384,10 @@ pub struct Pour {
     /// What it poured into: worked out from the board, not saved.
     #[serde(skip)]
     pub fill: Vec<Island>,
+    /// A fingerprint of everything `fill` was worked out from, so a pour
+    /// whose surroundings haven't changed isn't poured again. Not saved.
+    #[serde(skip)]
+    pub sig: u64,
 }
 
 fn yes() -> bool {
@@ -418,6 +422,7 @@ impl Pour {
             min_area: 0.0,
             neck: 0.0,
             fill: Vec::new(),
+            sig: 0,
         }
     }
 
