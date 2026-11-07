@@ -607,6 +607,14 @@ impl App {
             heading(ui, "Rules");
             let r = &mut self.doc.rules;
             field(ui, "Clearance", |ui| length(ui, u, &mut r.clearance));
+            // Altium's table of gaps for pairs of kinds of copper, where they differ from this.
+            if !r.gaps.is_empty() {
+                let table: Vec<String> = r.gaps.iter().map(|g| format!("{} – {}: {}", g.a.name(), g.b.name(), u.len(g.mm))).collect();
+                ui.label(RichText::new(format!("and {} pairs with their own gap", r.gaps.len())).size(11.5).color(FAINT)).on_hover_text(format!(
+                    "Gaps asked of particular kinds of copper (from Altium); any other pair is the clearance above.\n\n{}",
+                    table.join("\n")
+                ));
+            }
             field(ui, "Track width", |ui| length(ui, u, &mut r.track));
             field(ui, "Via pad", |ui| length(ui, u, &mut r.via_dia));
             field(ui, "Via hole", |ui| length(ui, u, &mut r.via_drill));

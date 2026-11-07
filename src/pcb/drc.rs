@@ -20,6 +20,11 @@ pub struct Problem {
     pub items: Vec<Item>,
 }
 
+/// How much short of its gap copper may be before it's too close. Altium's
+/// coordinates are 2.5 nm apart and each rounds when it comes in, so a gap
+/// that is exactly the rule's there can come out a few nanometres short here.
+const TOLERANCE: f64 = 1e-5;
+
 pub fn describe(board: &Board, item: Item) -> String {
     match item {
         Item::Pad(f, i) => match board.fp(f) {
@@ -110,7 +115,7 @@ pub fn check_again(board: &Board, copper: &Copper, last: Option<&Cache>) -> (Vec
 /// item that `dirty` marks. Pours may keep a wider gap.
 fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Problem>) {
     let r = &board.rules;
-    let widest = items.iter().filter_map(|c| c.keeps.map(|k| k.0)).fold(r.clearance, f64::max);
+    let widest = items.iter().filter_map(|c| c.keeps.map(|k| k.0)).fold(r.widest(), f64::max);
     for (i, j) in crate::pcb::copper::near_pairs_where(items, widest, |i, j| dirty[i] || dirty[j]) {
         let (a, b) = (&items[i], &items[j]);
         if !a.on.shares(b.on) || (a.net == b.net && a.net != 0) {
@@ -122,7 +127,8 @@ fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec
         {
             continue;
         }
-        let need = [a.keeps, b.keeps].iter().flatten().map(|k| k.0).fold(r.clearance, f64::max);
+        // The gap the rules ask of these two kinds of copper; a pour keeps its own too, if wider.
+        let need = [a.keeps, b.keeps].iter().flatten().map(|k| k.0).fold(r.gap(a.kind(), b.kind()), f64::max);
         // Pads of one part with no nets are its own business.
         if let (Item::Pad(fa, _), Item::Pad(fb, _)) = (a.item, b.item)
             && fa == fb
@@ -132,7 +138,7 @@ fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec
             continue;
         }
         let (gap, pa, pb) = a.gap_within(b, need);
-        if gap < need - 1e-6 {
+        if gap < need - TOLERANCE {
             let (what, sev) = if gap <= 1e-6 { ("Short circuit", Severity::Error) } else { ("Too close", Severity::Error) };
             out.push(Problem {
                 severity: sev,
@@ -200,7 +206,7 @@ fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Prob
         let mid = |b: &Blob| b.core.iter().fold(P::default(), |s, q| s.add(*q)).scale(1.0 / b.core.len().max(1) as f64);
         let inside = cu.parts.iter().all(|part| point_in_ring(mid(part), edge));
         if let Some((gap, at)) = worst
-            && (!inside || gap < need - 1e-6)
+            && (!inside || gap < need - TOLERANCE)
         {
             out.push(Problem {
                 severity: Severity::Error,
@@ -605,6 +611,70 @@ mod tests {
         let c = analyse(&b);
         let (gone, _) = check_again(&b, &c, Some(&cache));
         assert!(gone.iter().all(|p| p.title != "In a keepout"));
+    }
+
+    fn too_close(b: &Board) -> Vec<String> {
+        check(b, &analyse(b)).into_iter().filter(|p| p.title == "Too close").map(|p| p.detail).collect()
+    }
+
+    #[test]
+    fn the_gap_asked_depends_on_what_is_close() {
+        let mut b = Board::default();
+        let (a, n) = (b.net("A"), b.net("B"));
+        b.rules.clearance = 0.1;
+        b.rules.gaps = vec![Gap { a: Kind::Via, b: Kind::Track, mm: 0.3 }, Gap { a: Kind::Via, b: Kind::Via, mm: 0.4 }];
+        // Two tracks 0.15 apart: the general gap is 0.1, so that's fine.
+        track(&mut b, (5.0, 10.0), (20.0, 10.0), TOP, a);
+        track(&mut b, (5.0, 10.4), (20.0, 10.4), TOP, n);
+        assert!(too_close(&b).is_empty(), "{:?}", too_close(&b));
+        // A via 0.2 from a track: the table asks 0.3.
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(30.0, 5.0), dia: 0.6, drill: 0.3, net: n });
+        let t = track(&mut b, (25.0, 4.0), (35.0, 4.0), TOP, a);
+        assert!(too_close(&b).is_empty(), "a track 0.575 from the via's edge is fine");
+        b.tracks.iter_mut().find(|x| x.id == t).unwrap().a = p(25.0, 5.625);
+        b.tracks.iter_mut().find(|x| x.id == t).unwrap().b = p(35.0, 5.625);
+        let found = too_close(&b);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("needs 0.300") && found[0].contains("via"), "{found:?}");
+        // Two vias 0.35 apart: the table asks 0.4 of two vias.
+        b.tracks.retain(|x| x.id != t);
+        let w = b.new_id();
+        b.vias.push(Via { id: w, at: p(30.95, 5.0), dia: 0.6, drill: 0.3, net: a });
+        let found = too_close(&b);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("needs 0.400"), "{found:?}");
+    }
+
+    #[test]
+    fn a_gap_a_few_nanometres_short_is_not_too_close_but_a_few_microns_is() {
+        let mut b = Board::default();
+        let (a, n) = (b.net("A"), b.net("B"));
+        b.rules.clearance = 0.1;
+        track(&mut b, (5.0, 10.0), (20.0, 10.0), TOP, a);
+        // Edges 0.1 - 4 nm apart: that's Altium's rounding, not a violation.
+        let t = track(&mut b, (5.0, 10.35 - 4e-6), (20.0, 10.35 - 4e-6), TOP, n);
+        assert!(too_close(&b).is_empty(), "{:?}", too_close(&b));
+        b.tracks.iter_mut().find(|x| x.id == t).unwrap().a = p(5.0, 10.35 - 3e-5);
+        b.tracks.iter_mut().find(|x| x.id == t).unwrap().b = p(20.0, 10.35 - 3e-5);
+        assert_eq!(too_close(&b).len(), 1, "30 nm short is");
+    }
+
+    #[test]
+    fn checking_again_notices_the_gap_table_change() {
+        let mut b = Board::default();
+        let (a, n) = (b.net("A"), b.net("B"));
+        b.rules.clearance = 0.1;
+        track(&mut b, (5.0, 10.0), (20.0, 10.0), TOP, a);
+        track(&mut b, (5.0, 10.4), (20.0, 10.4), TOP, n);
+        let c = analyse(&b);
+        let (none, cache) = check_again(&b, &c, None);
+        assert!(none.iter().all(|p| p.title != "Too close"));
+        b.rules.gaps = vec![Gap { a: Kind::Track, b: Kind::Track, mm: 0.3 }];
+        let c = analyse(&b);
+        let (found, _) = check_again(&b, &c, Some(&cache));
+        assert_eq!(found.iter().filter(|p| p.title == "Too close").count(), 1, "the table says 0.3 now, with nothing else changed");
+        assert_eq!(said(&found), said(&check(&b, &c)));
     }
 
     #[test]

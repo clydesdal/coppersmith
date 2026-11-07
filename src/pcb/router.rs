@@ -179,10 +179,12 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
         .flat_map(|c| {
             // Tracks can be pushed, arcs included (see Scene::new for the exceptions).
             let movable = matches!(c.item, Item::Track(_));
+            // How far a track must keep from this kind of copper.
+            let gap = r.gap(Kind::Track, c.kind());
             c.parts.iter().map(move |part| Obstacle {
                 blob: part.clone(),
                 bbox: part.bbox(),
-                gap: r.clearance,
+                gap,
                 item: Some(c.item),
                 net: c.net,
                 movable,
@@ -971,7 +973,7 @@ impl PushBase {
                 all.push(Obstacle {
                     bbox: part.bbox(),
                     blob: part,
-                    gap: board.rules.clearance,
+                    gap: board.rules.gap(Kind::Track, Kind::Track),
                     item: Some(Item::Track(t.id)),
                     net: t.net,
                     movable: false,
@@ -1023,7 +1025,7 @@ impl Scene {
             all: std::sync::Arc::new(all),
             net,
             layer,
-            clearance: board.rules.clearance,
+            clearance: board.rules.gap(Kind::Track, Kind::Track),
             others,
             vias: board.vias.iter().filter(|v| v.net != net || net == 0).map(|v| (v.id, v.at, v.dia, v.net)).collect(),
             via_push: true,
@@ -1065,7 +1067,7 @@ impl Scene {
                 all,
                 net: 0,
                 layer,
-                clearance: board.rules.clearance,
+                clearance: board.rules.gap(Kind::Track, Kind::Track),
                 others,
                 vias: board.vias.iter().map(|v| (v.id, v.at, v.dia, v.net)).collect(),
                 via_push: true,
@@ -2585,5 +2587,60 @@ mod keepout_walls {
         // Moved clear of the route's way, the route is straight again.
         b.footprints[0].at = p(17.0, 35.0);
         assert_eq!(route(&b, n, TOP).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+    }
+}
+
+#[cfg(test)]
+mod gap_kinds {
+    use super::*;
+    use crate::pcb::copper::analyse;
+
+    fn part(b: &mut Board, at: P, drill: f64, net: u32) {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            label_height: None,
+            locked: false,
+            keepouts: vec![],
+        });
+    }
+
+    #[test]
+    fn a_track_keeps_the_gap_the_table_gives_for_each_kind_of_copper_it_meets() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        b.rules.clearance = 0.1;
+        b.rules.gaps = vec![Gap { a: Kind::Track, b: Kind::Via, mm: 0.3 }, Gap { a: Kind::ThPad, b: Kind::Track, mm: 0.2 }];
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(10.0, 10.0), dia: 0.6, drill: 0.3, net: n });
+        let t = b.new_id();
+        b.tracks.push(Track { mid: None, id: t, a: p(20.0, 10.0), b: p(30.0, 10.0), w: 0.25, layer: TOP, net: n });
+        part(&mut b, p(40.0, 10.0), 0.0, n);
+        part(&mut b, p(50.0, 10.0), 0.5, n);
+        let gap_of = |what: &dyn Fn(Item) -> bool| {
+            let found: Vec<f64> = obstacles_all(&b, &analyse(&b), TOP).iter().filter(|o| o.item.is_some_and(what)).map(|o| o.gap).collect();
+            assert!(!found.is_empty());
+            assert!(found.windows(2).all(|w| w[0] == w[1]), "one gap for one kind: {found:?}");
+            found[0]
+        };
+        assert_eq!(gap_of(&|i| matches!(i, Item::Via(_))), 0.3, "a via: the table's");
+        assert_eq!(gap_of(&|i| matches!(i, Item::Track(_))), 0.1, "a track: the general one");
+        let (smd, through) = (b.footprints[0].id, b.footprints[1].id);
+        assert_eq!(gap_of(&|i| matches!(i, Item::Pad(f, _) if f == smd)), 0.1, "a surface pad: the general one");
+        assert_eq!(gap_of(&|i| matches!(i, Item::Pad(f, _) if f == through)), 0.2, "a through-hole pad: the table's");
+        // A scene keeps tracks from each other by the track-to-track gap.
+        assert_eq!(Scene::new(&b, &analyse(&b), TOP, n).clearance, 0.1);
+        b.rules.gaps.push(Gap { a: Kind::Track, b: Kind::Track, mm: 0.15 });
+        assert_eq!(Scene::new(&b, &analyse(&b), TOP, n).clearance, 0.15);
+        assert_eq!(Scene::for_push(&b, TOP).clearance, 0.15);
     }
 }

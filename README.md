@@ -280,8 +280,19 @@ editor still to come. Writing Altium libraries is next.
 
 **Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in
 unsaved, as a new Coppersmith board: outline, copper layers, parts (with
-their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (clearance from the
-clearance table, track widths, via sizes, mask and edge clearance).
+their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (the
+clearance rules, track widths, via sizes, mask and edge clearance).
+
+Clearance comes in as Altium has it: a general gap, and a table of gaps for the
+pairs of kinds of copper that need a different one (track, surface pad,
+through-hole pad, via, region and pour). A pair the table doesn't list needs the
+general gap, so on a board with a 3.5 mil general gap two tracks may be 3.5 mil
+apart while a via and a track need 5 mil, and a pour keeps 18 mil from a track and
+20 mil from a surface pad. The rule check, the router and the pours all ask for
+the gap of the pair in question; the rules card on the right shows the table. A
+clearance rule that applies only to particular objects (the fiducial pads, say)
+isn't taken, and the status bar says so. A gap is allowed to come out 10 nm short:
+Altium's coordinates are 2.5 nm apart, and each rounds on the way in.
 
 Keepouts come in as keepouts: fills, regions and tracks flagged as keepouts,
 on the board and on parts, and shapes on the Keep-Out layer. They keep pours

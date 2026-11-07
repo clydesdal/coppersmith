@@ -89,6 +89,45 @@ struct AreaRules {
     plane_connect: Connect,
     plane_spoke: f64,
     plane_gap: f64,
+    /// Clearance rules that apply to particular objects rather than to all,
+    /// which aren't taken.
+    scoped_clearances: usize,
+}
+
+/// Altium's table of gaps between kinds of object, `ClearanceObj_A-ClearanceObj_B:units;…`.
+/// It lists only the pairs that differ from the general gap. Where two of
+/// its names stand for one of ours (a track and an arc, a fill and a region),
+/// the track's and the region's gap is the one kept.
+fn parse_gaps(table: &str) -> Vec<Gap> {
+    // Not this file's own `Kind`, which is for the storages in it.
+    use crate::pcb::model::Kind;
+    let kind =|name: &str| -> Option<(Kind, u8)> {
+        Some(match name.trim().trim_start_matches("ClearanceObj_") {
+            "Track" => (Kind::Track, 0),
+            "Arc" => (Kind::Track, 1),
+            "SMDPad" => (Kind::SmdPad, 0),
+            "THPad" => (Kind::ThPad, 0),
+            "Via" => (Kind::Via, 0),
+            "Region" => (Kind::Region, 0),
+            "Fill" => (Kind::Region, 1),
+            "Poly" => (Kind::Pour, 0),
+            _ => return None,
+        })
+    };
+    // (kind, kind, gap, how far from the first choice it is)
+    let mut found: Vec<(Kind, Kind, f64, u8)> = Vec::new();
+    for entry in table.trim_end_matches('\0').split(';') {
+        let Some((pair, units)) = entry.split_once(':') else { continue };
+        let Some((a, b)) = pair.split_once('-') else { continue };
+        let (Some((ka, ra)), Some((kb, rb)), Ok(v)) = (kind(a), kind(b), units.trim().parse::<f64>()) else { continue };
+        let (mm, rank) = (nm(v * super::UNIT), ra + rb);
+        match found.iter_mut().find(|e| (e.0 == ka && e.1 == kb) || (e.0 == kb && e.1 == ka)) {
+            Some(e) if rank < e.3 => *e = (ka, kb, mm, rank),
+            Some(_) => {}
+            None => found.push((ka, kb, mm, rank)),
+        }
+    }
+    found.into_iter().map(|(a, b, mm, _)| Gap { a, b, mm }).collect()
 }
 
 /// The board's design rules that Coppersmith has a place for. Each comes
@@ -105,7 +144,14 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
         plane_connect: Connect::Relief,
         plane_spoke: 0.254,
         plane_gap: 0.254,
+        scoped_clearances: 0,
     };
+    area.scoped_clearances = recs
+        .iter()
+        .filter(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case("Clearance")))
+        .filter(|r| r.get("ENABLED").is_none_or(|e| e == "TRUE"))
+        .filter(|r| r.get("SCOPE1EXPRESSION").is_some_and(|s| s.trim() != "All") || r.get("SCOPE2EXPRESSION").is_some_and(|s| s.trim() != "All"))
+        .count();
     let general = |kind: &str| -> Option<&HashMap<String, String>> {
         recs.iter()
             .filter(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case(kind)))
@@ -128,10 +174,15 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
                 .map(|v| v * super::UNIT)
                 .fold(f64::MAX, f64::min)
         });
+        // The general gap is for every pair the table doesn't list; the table's
+        // gaps are kept as they are, pair by pair.
         match (table, len(r, "GAP")) {
-            (Some(t), _) if t < f64::MAX && t > 0.0 => rules.clearance = nm(t),
             (_, Some(v)) => rules.clearance = nm(v),
+            (Some(t), None) if t < f64::MAX && t > 0.0 => rules.clearance = nm(t),
             _ => {}
+        }
+        if let Some(t) = r.get("OBJECTCLEARANCES") {
+            rules.gaps = parse_gaps(t);
         }
         // Pours keep the table's polygon gaps, or where it has none, the
         // general gap.
@@ -369,6 +420,13 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
 
     let mut b = Board { name: name.to_string(), footprints: Vec::new(), outline: Vec::new(), ..Board::default() };
     let area_rules = read_rules(&rule_recs, &mut b.rules);
+    if area_rules.scoped_clearances > 0 {
+        notes.push(format!(
+            "{} clearance rule{} for particular objects wasn't taken",
+            area_rules.scoped_clearances,
+            if area_rules.scoped_clearances == 1 { "" } else { "s" }
+        ));
+    }
 
     // The outline: corners, and arcs between them.
     b.outline = vertex_ring(&board_rec, &at);
@@ -685,6 +743,28 @@ mod tests {
 
     fn text(layer: u8, at: P, height: f64, rot: f64, mirror: bool, s: &str) -> Prim {
         Prim::Text { head: prims::Head { layer, flags: 0x000c, net: NONE, polygon: NONE, component: 0 }, at, height, rot, mirror, text: s.into() }
+    }
+
+    #[test]
+    fn altiums_gap_table_is_read_pair_by_pair() {
+        let table = "ClearanceObj_Arc-ClearanceObj_Fill:100000;ClearanceObj_Track-ClearanceObj_Fill:60000;\
+                     ClearanceObj_Track-ClearanceObj_Region:60000;ClearanceObj_Arc-ClearanceObj_Region:86614;\
+                     ClearanceObj_Fill-ClearanceObj_Region:252000;ClearanceObj_Via-ClearanceObj_Hole:250000;\
+                     ClearanceObj_SMDPad-ClearanceObj_Poly:200000;ClearanceObj_Poly-ClearanceObj_Poly:350000;\
+                     ClearanceObj_Track-ClearanceObj_Via:50000;ClearanceObj_Via-ClearanceObj_Text:50000";
+        let gaps = parse_gaps(table);
+        use crate::pcb::model::Kind as K;
+        let rules = Rules { gaps, ..Rules::default() };
+        let mil = |m: f64| (m / 0.0254 * 1000.0).round() / 1000.0;
+        // The track's own figures, not the arc's, where both are given.
+        assert_eq!(mil(rules.pair(K::Track, K::Region).unwrap()), 6.0);
+        assert_eq!(mil(rules.pair(K::Region, K::Track).unwrap()), 6.0, "either way round");
+        assert_eq!(mil(rules.pair(K::SmdPad, K::Pour).unwrap()), 20.0);
+        assert_eq!(mil(rules.pair(K::Pour, K::Pour).unwrap()), 35.0);
+        assert_eq!(mil(rules.pair(K::Track, K::Via).unwrap()), 5.0);
+        // What isn't copper to copper (holes, text) is left out, and what isn't listed isn't there.
+        assert_eq!(rules.gaps.len(), 5, "{:?}", rules.gaps);
+        assert_eq!(rules.pair(K::Track, K::Track), None);
     }
 
     #[test]

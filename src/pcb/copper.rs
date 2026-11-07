@@ -76,6 +76,18 @@ impl Cu {
         Cu { item, blob, parts: parts.blobs, boxes: parts.boxes, grid: parts.grid, bbox: parts.bbox, on, net, anchors, keeps: None }
     }
 
+    /// What kind of copper it is, for the gap the rules ask between kinds.
+    pub fn kind(&self) -> Kind {
+        match self.item {
+            Item::Track(_) => Kind::Track,
+            Item::Via(_) => Kind::Via,
+            Item::Fill(_) => Kind::Region,
+            Item::Pour(..) => Kind::Pour,
+            Item::Pad(..) if matches!(self.on, On::All) => Kind::ThPad,
+            Item::Pad(..) => Kind::SmdPad,
+        }
+    }
+
     /// Is this the same copper, in the same place, on the same net and
     /// layers, as `o`? What a check reads is all that's compared.
     pub fn same_as(&self, o: &Cu) -> bool {

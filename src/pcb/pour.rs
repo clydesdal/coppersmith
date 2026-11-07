@@ -146,6 +146,10 @@ fn signature(board: &Board, pour: &Pour, env: &Around, before: u64) -> u64 {
     for v in [pour.clearance, pour.edge, pour.spoke, pour.gap, pour.min_area, pour.neck, board.rules.clearance] {
         f(&mut h, v);
     }
+    for g in &board.rules.gaps {
+        (g.a, g.b).hash(&mut h);
+        f(&mut h, g.mm);
+    }
     pts(&mut h, pour.area(board));
     pts(&mut h, &board.outline);
     for hole in &env.bare_holes {
@@ -257,6 +261,9 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
         }
         let ours = pour.net != 0 && cu.net == pour.net;
         if !ours {
+            // How far a pour keeps from this kind of copper: what the rules ask of the pair
+            // (the general clearance where the table doesn't list it), if more than the pour's own.
+            let near = near.max(board.rules.gap(Kind::Pour, cu.kind()));
             for part in cu.parts.iter() {
                 away.push(cut(part, near));
             }
@@ -293,7 +300,9 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
     // Pours poured before this one, of other nets.
     for (l, net, gap, shapes) in done {
         if *l == layer && (*net != pour.net || pour.net == 0) {
-            let grown = offset(shapes, near.max(*gap) + MARGIN);
+            // The offset's round corners are drawn a little inside the true curve, so go 1% further.
+            let apart = near.max(*gap).max(board.rules.gap(Kind::Pour, Kind::Pour));
+            let grown = offset(shapes, apart * 1.01 + MARGIN);
             away.extend(rings_of(&grown));
         }
     }
@@ -600,6 +609,54 @@ mod tests {
         b.repour();
         assert!(poured_at(&b, 0, p(20.0, 30.0)), "where it was, poured again");
         assert!(!poured_at(&b, 0, p(41.0, 11.0)), "where it is");
+    }
+
+    #[test]
+    fn a_pour_keeps_the_gap_the_table_gives_for_each_kind_of_copper() {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        b.rules.clearance = 0.1;
+        b.rules.gaps = vec![Gap { a: Kind::Pour, b: Kind::Track, mm: 0.5 }, Gap { a: Kind::Pour, b: Kind::SmdPad, mm: 0.8 }];
+        b.tracks.push(Track { mid: None, id: 900, a: p(10.0, 20.0), b: p(40.0, 20.0), w: 0.25, layer: TOP, net: sig });
+        pad(&mut b, p(25.0, 30.0), sig, 0.0);
+        let id = b.new_id();
+        let mut pour = Pour::new(id, TOP, gnd, Vec::new(), &b.rules);
+        pour.clearance = 0.2;
+        pour.remove_islands = false;
+        b.pours.push(pour);
+        b.repour();
+        // The track's edge is at y = 20.125: held off by 0.5, not by the pour's own 0.2.
+        assert!(!poured_at(&b, 0, p(25.0, 20.125 + 0.45)), "0.45 from the track is too near");
+        assert!(poured_at(&b, 0, p(25.0, 20.125 + 0.55)), "0.55 is not");
+        // A surface pad (radius 0.75): the table asks 0.8.
+        assert!(!poured_at(&b, 0, p(25.0, 30.0 + 0.75 + 0.75)), "0.75 from the pad is too near");
+        assert!(poured_at(&b, 0, p(25.0, 30.0 + 0.75 + 0.85)), "0.85 is not");
+        // And the rule check, asking the same, finds the pour clear of both.
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        assert!(found.iter().all(|p| p.title != "Too close"), "{found:?}");
+    }
+
+    #[test]
+    fn two_pours_keep_the_gap_the_table_gives_between_pours() {
+        let mut b = Board::default();
+        let (gnd, vbat) = (b.net("GND"), b.net("VBAT"));
+        b.rules.gaps = vec![Gap { a: Kind::Pour, b: Kind::Pour, mm: 0.889 }];
+        // GND's corners at (30, 5) and (30, 35) are inside VBAT's area, where
+        // VBAT is cut back from them by a rounded offset.
+        for (net, lo, hi) in [(gnd, (5.0, 5.0), (30.0, 35.0)), (vbat, (20.0, 0.0), (50.0, 40.0))] {
+            let id = b.new_id();
+            let mut pour = Pour::new(id, TOP, net, rect_outline(p(lo.0, lo.1), p(hi.0, hi.1)), &b.rules);
+            pour.remove_islands = false;
+            b.pours.push(pour);
+        }
+        b.repour();
+        assert!(b.pours.iter().all(|p| p.copper_area() > 100.0), "both poured");
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        assert!(found.iter().all(|p| p.title != "Too close"), "{:?}", found.iter().filter(|p| p.title == "Too close").collect::<Vec<_>>());
+        // And not further than it had to be, by much: the first pour reaches to within a hair of the gap.
+        let edge = b.pours[0].fill.iter().flat_map(|i| i.rings[0].iter().map(|q| q.x)).fold(f64::MIN, f64::max);
+        let first = b.pours[1].fill.iter().flat_map(|i| i.rings[0].iter().map(|q| q.x)).fold(f64::MAX, f64::min);
+        assert!(first - edge < 0.889 + 0.05, "gap {}", first - edge);
     }
 
     #[test]

@@ -647,6 +647,66 @@ pub struct Rules {
     /// never closes up into a right angle.
     #[serde(default = "default_min_diag")]
     pub min_diag: f64,
+    /// How far apart two kinds of copper must be, where that isn't the
+    /// general `clearance`: Altium keeps a table of these, listing only the
+    /// pairs that differ.
+    #[serde(default)]
+    pub gaps: Vec<Gap>,
+}
+
+/// The kinds of copper a clearance is measured between.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Kind {
+    /// A track or an arc.
+    Track,
+    /// A pad on one layer.
+    SmdPad,
+    /// A pad with a hole through it.
+    ThPad,
+    Via,
+    /// A fill or solid region.
+    Region,
+    /// A copper pour.
+    Pour,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Track => "track",
+            Kind::SmdPad => "surface pad",
+            Kind::ThPad => "through-hole pad",
+            Kind::Via => "via",
+            Kind::Region => "region",
+            Kind::Pour => "pour",
+        }
+    }
+}
+
+/// The least gap between two kinds of copper, in either order.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Gap {
+    pub a: Kind,
+    pub b: Kind,
+    pub mm: f64,
+}
+
+impl Rules {
+    /// The gap the table gives two kinds of copper, if it has the pair.
+    pub fn pair(&self, a: Kind, b: Kind) -> Option<f64> {
+        self.gaps.iter().find(|g| (g.a == a && g.b == b) || (g.a == b && g.b == a)).map(|g| g.mm)
+    }
+
+    /// How far apart two kinds of copper must be: the table's gap for the
+    /// pair, or the general clearance.
+    pub fn gap(&self, a: Kind, b: Kind) -> f64 {
+        self.pair(a, b).unwrap_or(self.clearance)
+    }
+
+    /// The widest gap asked of anything, so how far to look for copper too close.
+    pub fn widest(&self) -> f64 {
+        self.gaps.iter().map(|g| g.mm).fold(self.clearance, f64::max)
+    }
 }
 
 fn default_min_diag() -> f64 {
@@ -669,6 +729,7 @@ impl Default for Rules {
             silk_width: 0.15,
             text_height: 1.0,
             min_diag: default_min_diag(),
+            gaps: Vec::new(),
         }
     }
 }
@@ -1048,6 +1109,30 @@ mod tests {
         assert!(t.h() > t.w() - 1e-9, "turned, it's taller than wide: {t:?}");
         f.label_height = Some(2.0);
         assert!(f.label_bbox(&rules).h() > t.h(), "a taller name has a taller box");
+    }
+
+    #[test]
+    fn the_gap_for_a_pair_is_the_tables_or_the_general_one() {
+        let mut r = Rules { clearance: 0.1, ..Rules::default() };
+        assert_eq!(r.gap(Kind::Track, Kind::Via), 0.1, "no table");
+        r.gaps = vec![Gap { a: Kind::Via, b: Kind::Track, mm: 0.3 }, Gap { a: Kind::Pour, b: Kind::Pour, mm: 0.9 }];
+        assert_eq!(r.gap(Kind::Track, Kind::Via), 0.3);
+        assert_eq!(r.gap(Kind::Via, Kind::Track), 0.3, "either way round");
+        assert_eq!(r.gap(Kind::Track, Kind::Track), 0.1, "a pair it hasn't is the general gap");
+        assert_eq!(r.pair(Kind::Track, Kind::Track), None);
+        assert_eq!(r.pair(Kind::Pour, Kind::Pour), Some(0.9));
+        assert_eq!(r.widest(), 0.9);
+        assert_eq!(Rules { clearance: 0.5, ..Rules::default() }.widest(), 0.5);
+    }
+
+    #[test]
+    fn a_board_saved_before_gap_tables_still_loads_and_one_with_gaps_keeps_them() {
+        let mut b = Board::default();
+        b.rules.gaps = vec![Gap { a: Kind::Via, b: Kind::Via, mm: 0.127 }];
+        assert_eq!(Board::load(&b.save()).unwrap().rules.gaps, b.rules.gaps);
+        let mut v: serde_json::Value = serde_json::from_str(&Board::default().save()).unwrap();
+        v["rules"].as_object_mut().unwrap().remove("gaps");
+        assert!(Board::load(&v.to_string()).unwrap().rules.gaps.is_empty());
     }
 
     #[test]
