@@ -511,13 +511,17 @@ impl App {
                                 _ => None,
                             })
                             .collect();
+                        // A differential pair is picked as both nets, to be measured against each other.
+                        self.sel = crate::ui::panels::with_partners(&self.doc, &self.sel);
                         // The totals are in the Properties panel, with the rest of what's picked.
                         self.show_properties();
                         let (tracks, vias, total) = crate::ui::panels::picked_tracks(&self.doc, &self.sel);
-                        let net = match self.sel.first() {
-                            Some(Sel::Track(id)) => self.doc.tracks.iter().find(|t| t.id == *id).map(|t| self.doc.net_name(t.net).to_string()),
-                            _ => None,
-                        };
+                        let names: Vec<&str> = crate::ui::panels::net_lengths(&self.doc, &self.sel)
+                            .iter()
+                            .filter(|n| n.total > 0.0)
+                            .map(|n| self.doc.net_name(n.net))
+                            .collect();
+                        let net = if names.is_empty() { None } else { Some(names.join(" + ")) };
                         self.notice = Some(format!(
                             "{}: {tracks} track{} and {vias} via{} joined · total track length {}",
                             net.unwrap_or_else(|| "Joined copper".into()),

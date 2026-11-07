@@ -247,6 +247,91 @@ pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
     (tracks, vias, length)
 }
 
+/// What's picked of one net: its track length on each copper layer.
+pub struct NetLength {
+    pub net: u32,
+    /// Copper layers (top to bottom) with the length of the picked tracks on each.
+    pub layers: Vec<(u8, f64)>,
+    pub total: f64,
+    pub vias: usize,
+}
+
+/// The picked tracks and vias, net by net, in the order the nets are first met.
+/// Vias are counted, not measured: the board doesn't say how long a barrel is.
+pub fn net_lengths(board: &Board, sel: &[Sel]) -> Vec<NetLength> {
+    let mut out: Vec<NetLength> = Vec::new();
+    let order = board.copper_layers();
+    let entry = |net: u32, out: &mut Vec<NetLength>| -> usize {
+        if let Some(i) = out.iter().position(|n| n.net == net) {
+            return i;
+        }
+        out.push(NetLength { net, layers: Vec::new(), total: 0.0, vias: 0 });
+        out.len() - 1
+    };
+    for s in sel {
+        match s {
+            Sel::Track(id) => {
+                if let Some(t) = board.tracks.iter().find(|t| t.id == *id) {
+                    let i = entry(t.net, &mut out);
+                    let len = t.length();
+                    out[i].total += len;
+                    match out[i].layers.iter_mut().find(|(l, _)| *l == t.layer) {
+                        Some((_, sum)) => *sum += len,
+                        None => out[i].layers.push((t.layer, len)),
+                    }
+                }
+            }
+            Sel::Via(id) => {
+                if let Some(v) = board.vias.iter().find(|v| v.id == *id) {
+                    let i = entry(v.net, &mut out);
+                    out[i].vias += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    for n in &mut out {
+        n.layers.sort_by_key(|(l, _)| order.iter().position(|o| o == l).unwrap_or(usize::MAX));
+    }
+    out
+}
+
+/// Every track and via of a net.
+fn whole_net(board: &Board, net: u32) -> Vec<Sel> {
+    let tracks = board.tracks.iter().filter(|t| t.net == net).map(|t| Sel::Track(t.id));
+    let vias = board.vias.iter().filter(|v| v.net == net).map(|v| Sel::Via(v.id));
+    tracks.chain(vias).collect()
+}
+
+/// A selection with the other half of any differential pair joined in: where a
+/// picked track's net has a partner, both nets are picked whole, so the two
+/// can be measured against each other.
+pub fn with_partners(board: &Board, sel: &[Sel]) -> Vec<Sel> {
+    let mut nets: Vec<u32> = Vec::new();
+    for s in sel {
+        if let Sel::Track(id) = s {
+            if let Some(t) = board.tracks.iter().find(|t| t.id == *id) {
+                if let Some(p) = board.diff_partner(t.net) {
+                    for n in [t.net, p] {
+                        if !nets.contains(&n) {
+                            nets.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out = sel.to_vec();
+    for n in nets {
+        for s in whole_net(board, n) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// Looking at inner layers only, the silkscreen is in the way: this hides it,
 /// remembering which layers it hid (not those already hidden). With any other
 /// pick it brings back just those.
@@ -755,9 +840,12 @@ impl App {
         let u = self.unit;
         let layers = self.doc.copper_layers();
         let doc_nets = self.doc.clone();
+        let mut pick_pair = false;
         let Some(t) = self.doc.tracks.iter_mut().find(|t| t.id == id) else { return };
+        let partner = doc_nets.diff_partner(t.net).map(|p| doc_nets.net_name(p).to_string());
         card(ui, |ui| {
             heading(ui, "Track");
+            ui.label(RichText::new(doc_nets.net_name(t.net)).strong());
             field(ui, "Width", |ui| length(ui, u, &mut t.w));
             field(ui, "Layer", |ui| {
                 egui::ComboBox::from_id_salt(("track-layer", id)).selected_text(Layer::Cu(t.layer).name()).show_ui(ui, |ui| {
@@ -774,9 +862,18 @@ impl App {
             }
             row(ui, "From", &format!("{}, {}", u.num(t.a.x), u.num(t.a.y)));
             row(ui, "To", &format!("{}, {}", u.num(t.b.x), u.num(t.b.y)));
+            if let Some(p) = &partner {
+                ui.add_space(4.0);
+                if ui.button(format!("Pick pair ({p})")).on_hover_text("Picks both nets of the differential pair, with their lengths").clicked() {
+                    pick_pair = true;
+                }
+            }
             ui.add_space(4.0);
             ui.label(RichText::new("Double-click a track to pick up everything joined to it.").size(12.0).color(FAINT));
         });
+        if pick_pair {
+            self.sel = with_partners(&self.doc, &[Sel::Track(id)]);
+        }
     }
 
     fn via_card(&mut self, ui: &mut Ui, id: u32) {
@@ -960,6 +1057,22 @@ impl App {
             if vias > 0 {
                 row(ui, "Vias", &vias.to_string());
             }
+            // Net by net, with the length on each layer: for two nets (a pair), how far apart they are.
+            let nets = net_lengths(&self.doc, &self.sel);
+            for n in nets.iter().filter(|n| n.total > 0.0 || n.vias > 0) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(self.doc.net_name(n.net)).strong());
+                for (l, len) in &n.layers {
+                    row(ui, &Layer::Cu(*l).name(), &u.len(*len));
+                }
+                row(ui, "Length", &u.len(n.total));
+            }
+            let measured: Vec<&NetLength> = nets.iter().filter(|n| n.total > 0.0).collect();
+            if let [a, b] = measured[..] {
+                ui.add_space(4.0);
+                let pair = self.doc.diff_partner(a.net) == Some(b.net);
+                row(ui, if pair { "Pair mismatch" } else { "Difference" }, &u.len((a.total - b.total).abs()));
+            }
             ui.horizontal_wrapped(|ui| {
                 if tool_button(ui, Icon::Rotate, "Turn", true).clicked() {
                     act = Some('r');
@@ -1096,6 +1209,31 @@ impl App {
 mod quick_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_pair_is_measured_net_by_net_and_layer_by_layer() {
+        let mut b = Board::default();
+        b.copper = 4;
+        let (dp, dn) = (b.net("USB_DP"), b.net("USB_DN"));
+        let other = b.net("VCC");
+        // DP: 10 on top, 5 on layer 1. DN: 12 on top. A VCC track that must stay out.
+        b.tracks.push(Track { mid: None, id: 1, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.2, layer: TOP, net: dp });
+        b.tracks.push(Track { mid: None, id: 2, a: p(10.0, 0.0), b: p(10.0, 5.0), w: 0.2, layer: 1, net: dp });
+        b.tracks.push(Track { mid: None, id: 3, a: p(0.0, 1.0), b: p(12.0, 1.0), w: 0.2, layer: TOP, net: dn });
+        b.tracks.push(Track { mid: None, id: 4, a: p(0.0, 9.0), b: p(50.0, 9.0), w: 0.2, layer: TOP, net: other });
+        let sel = with_partners(&b, &[Sel::Track(1)]);
+        assert!(sel.contains(&Sel::Track(2)) && sel.contains(&Sel::Track(3)), "both whole nets are picked");
+        assert!(!sel.contains(&Sel::Track(4)));
+        let n = net_lengths(&b, &sel);
+        assert_eq!(n.len(), 2);
+        let dp_len = n.iter().find(|x| x.net == dp).unwrap();
+        assert_eq!(dp_len.layers, vec![(TOP, 10.0), (1, 5.0)]);
+        assert!((dp_len.total - 15.0).abs() < 1e-9);
+        let dn_len = n.iter().find(|x| x.net == dn).unwrap();
+        assert!((dn_len.total - 12.0).abs() < 1e-9);
+        // A track with no partner picks nothing more.
+        assert_eq!(with_partners(&b, &[Sel::Track(4)]), vec![Sel::Track(4)]);
+    }
 
     #[test]
     fn the_total_track_length_adds_up_what_is_picked() {

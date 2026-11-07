@@ -859,6 +859,31 @@ impl Board {
         self.nets.iter().find(|n| n.name.eq_ignore_ascii_case(name)).map(|n| n.id)
     }
 
+    /// The other half of a differential pair, found by name (`USB_DP`/`USB_DN`,
+    /// `CLK_P`/`CLK_N`, `RX+`/`RX-`, `TX0P`/`TX0N`): the same name with the
+    /// polarity swapped, if the board has a net called that.
+    pub fn diff_partner(&self, net: u32) -> Option<u32> {
+        if net == 0 {
+            return None;
+        }
+        let name = self.nets.iter().find(|n| n.id == net)?.name.to_ascii_uppercase();
+        const ENDS: [(&str, &str); 6] = [("_DP", "_DN"), ("DP", "DN"), ("_P", "_N"), ("+", "-"), ("P", "N"), ("_POS", "_NEG")];
+        for (p, n) in ENDS {
+            for (mine, other) in [(p, n), (n, p)] {
+                if let Some(stem) = name.strip_suffix(mine) {
+                    if stem.is_empty() {
+                        continue;
+                    }
+                    let want = format!("{stem}{other}");
+                    if let Some(found) = self.nets.iter().find(|x| x.id != net && x.name.eq_ignore_ascii_case(&want)) {
+                        return Some(found.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// The net with this name, made if it isn't there yet.
     pub fn net(&mut self, name: &str) -> u32 {
         if let Some(id) = self.net_by_name(name) {
@@ -1227,6 +1252,20 @@ mod tests {
         assert!(t.h() > t.w() - 1e-9, "turned, it's taller than wide: {t:?}");
         f.label_height = Some(2.0);
         assert!(f.label_bbox(&rules).h() > t.h(), "a taller name has a taller box");
+    }
+
+    #[test]
+    fn differential_partners_are_found_by_name() {
+        let mut b = Board::default();
+        let ids: Vec<u32> = ["USB_DP", "USB_DN", "CLK_P", "CLK_N", "RX+", "RX-", "TX0P", "TX0N", "VCC", "GND", "LONE_P"].iter().map(|n| b.net(n)).collect();
+        assert_eq!(b.diff_partner(ids[0]), Some(ids[1]));
+        assert_eq!(b.diff_partner(ids[1]), Some(ids[0]));
+        assert_eq!(b.diff_partner(ids[2]), Some(ids[3]));
+        assert_eq!(b.diff_partner(ids[4]), Some(ids[5]));
+        assert_eq!(b.diff_partner(ids[6]), Some(ids[7]));
+        assert_eq!(b.diff_partner(ids[8]), None);
+        assert_eq!(b.diff_partner(ids[10]), None, "no partner on the board, no pair");
+        assert_eq!(b.diff_partner(0), None);
     }
 
     #[test]
