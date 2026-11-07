@@ -301,6 +301,8 @@ pub struct App {
     pub active: Option<usize>,
     /// A tab with unsaved changes that has been asked to close once.
     pub pending_close: Option<usize>,
+    /// What each inner copper layer is for, found out when the board changed last (and which change).
+    pub layer_roles: (u64, Vec<(u8, crate::pcb::model::LayerRole)>),
     /// The graphics card's side of the 3D view, and what it said went wrong.
     pub gpu3d: crate::ui::gpu3d::Shared,
     pub gpu3d_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -417,6 +419,7 @@ impl App {
             docs: Vec::new(),
             active: None,
             pending_close: None,
+            layer_roles: (u64::MAX, Vec::new()),
             gpu3d: std::sync::Arc::new(std::sync::Mutex::new(None)),
             gpu3d_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
             gpu3d_release: false,
@@ -2094,7 +2097,7 @@ impl eframe::App for App {
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
             if self.show_left && width >= 600.0 {
                 let frame = egui::Frame::new().fill(theme::PANEL);
-                Panel::left("editor_left").resizable(true).default_size(270.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.editor_left_dock(ui));
+                Panel::left("editor_left").resizable(true).default_size(190.0).size_range(160.0..=310.0).frame(frame).show(ui, |ui| self.editor_left_dock(ui));
             }
             self.show_editor(ui);
             self.shortcuts_window(&ctx);
@@ -2107,11 +2110,11 @@ impl eframe::App for App {
         // The panels either side, each with its tabs along the bottom.
         if self.show_left && width >= 600.0 {
             let frame = egui::Frame::new().fill(theme::PANEL);
-            Panel::left("left").resizable(true).default_size(280.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.left_dock(ui));
+            Panel::left("left").resizable(true).default_size(196.0).size_range(160.0..=310.0).frame(frame).show(ui, |ui| self.left_dock(ui));
         }
         if self.show_right && width >= 900.0 {
             let frame = egui::Frame::new().fill(theme::PANEL);
-            Panel::right("right").resizable(true).default_size(310.0).size_range(250.0..=480.0).frame(frame).show(ui, |ui| self.right_dock(ui));
+            Panel::right("right").resizable(true).default_size(217.0).size_range(175.0..=336.0).frame(frame).show(ui, |ui| self.right_dock(ui));
         }
         let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
         Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.status_bar(ui));

@@ -20,6 +20,13 @@ impl Side {
 
 /// Copper 0 is the top and 31 the bottom, whatever the layer count, so
 /// changing from two layers to four leaves the outer tracks where they are.
+/// What an inner copper layer is used for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayerRole {
+    Plane,
+    Signal,
+}
+
 pub const TOP: u8 = 0;
 pub const BOTTOM: u8 = 31;
 
@@ -793,6 +800,32 @@ impl Board {
         self.next_id - 1
     }
 
+    /// What each inner copper layer is for, worked out from what's on it: a
+    /// plane (a plane pour, or a pour over most of the board with next to no
+    /// tracks) or one that carries signals.
+    pub fn inner_layer_roles(&self) -> Vec<(u8, LayerRole)> {
+        let outline_area = if self.outline.len() >= 3 { ring_area(&self.outline).abs() } else { 0.0 };
+        let area = if outline_area > 0.0 {
+            outline_area
+        } else {
+            let e = self.extent();
+            e.w() * e.h()
+        };
+        self.copper_layers()
+            .into_iter()
+            .filter(|l| *l != TOP && *l != BOTTOM)
+            .map(|l| {
+                let pours = self.pours.iter().filter(|p| p.layer == l);
+                let tracks = self.tracks.iter().filter(|t| t.layer == l).count();
+                let planed = pours.clone().any(|p| p.plane);
+                // Over most of the board: the whole of it (no outline given), or what's poured.
+                let broad = pours.clone().any(|p| p.outline.is_empty() || p.fill.iter().map(|i| i.area).sum::<f64>() >= 0.5 * area);
+                let role = if planed || (broad && tracks < 30) { LayerRole::Plane } else { LayerRole::Signal };
+                (l, role)
+            })
+            .collect()
+    }
+
     /// The copper layers from top to bottom.
     pub fn copper_layers(&self) -> Vec<u8> {
         let mut v = vec![TOP];
@@ -932,6 +965,33 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inner_layers_are_found_to_be_planes_or_for_signals() {
+        let mut b = Board::default();
+        b.copper = 6;
+        b.outline = rect_outline(p(0.0, 0.0), p(40.0, 30.0));
+        let net = b.net("N");
+        // Layer 1: a plane. 2: busy with tracks. 3: a pour over the board and almost nothing else. 4: nothing at all.
+        let mut plane = Pour::new(1, 1, net, Vec::new(), &b.rules);
+        plane.plane = true;
+        b.pours.push(plane);
+        for k in 0..40 {
+            b.tracks.push(Track { mid: None, id: 100 + k, a: p(1.0, k as f64 * 0.5), b: p(9.0, k as f64 * 0.5), w: 0.2, layer: 2, net });
+        }
+        b.pours.push(Pour::new(3, 3, net, Vec::new(), &b.rules));
+        let roles = b.inner_layer_roles();
+        assert_eq!(roles, vec![(1, LayerRole::Plane), (2, LayerRole::Signal), (3, LayerRole::Plane), (4, LayerRole::Signal)]);
+        // A busy layer with a ground pour poured over it is still a signal layer.
+        for k in 0..40 {
+            b.tracks.push(Track { mid: None, id: 200 + k, a: p(1.0, k as f64 * 0.5), b: p(9.0, k as f64 * 0.5), w: 0.2, layer: 3, net });
+        }
+        assert_eq!(b.inner_layer_roles()[2], (3, LayerRole::Signal));
+        // Two layers have no inner ones.
+        let mut two = Board::default();
+        two.copper = 2;
+        assert!(two.inner_layer_roles().is_empty());
+    }
+
     use super::*;
 
     #[test]

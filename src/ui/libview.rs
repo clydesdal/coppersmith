@@ -186,7 +186,7 @@ impl LibWindow {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::right("lib_props").resizable(true).default_size(290.0).size_range(240.0..=440.0).frame(side).show(ui, |ui| {
+        Panel::right("lib_props").resizable(true).default_size(203.0).size_range(170.0..=310.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, elsewhere));
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui, &ctx, &mut out));

@@ -469,7 +469,7 @@ impl SchWindow {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::right("sch_props").resizable(true).default_size(300.0).size_range(240.0..=460.0).frame(side).show(ui, |ui| {
+        Panel::right("sch_props").resizable(true).default_size(210.0).size_range(170.0..=320.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, footprints));
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui, &ctx, &mut out));

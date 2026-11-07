@@ -39,6 +39,14 @@ Properties forward. Drag a panel's edge to size it; hide the left or right panel
 with the arrows at the top right, **View ▸ Left panel / Right panel**, or
 Ctrl+[ and Ctrl+].
 
+At the top of the *Layers* list are quick choices for the copper: **All**, **Top**,
+**Bottom** and **Planes** (every inner plane), and on a second row one chip for
+each inner layer that carries signals (**In 2**, **In 5**…), which shows just that
+layer and works on it. Which inner layers are planes and which are for signals is
+worked out from the board whenever it changes: a layer with a plane pour, or a
+pour over most of the board and next to no tracks, is a plane; anything else
+inside is a signal layer. Silkscreen and the other layers keep as you set them.
+
 The tools, the layer, track width, grid and view buttons float over the board.
 **View ▸ Ribbon of controls** (Ctrl+Shift+R) puts them in a strip under the menus
 instead, with file and edit buttons, the select filter and the tools in groups;

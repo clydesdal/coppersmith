@@ -281,14 +281,17 @@ impl App {
 
     /// The Layers tab: the layers, and what to show on them.
     /// What the quick choices at the top of the layer list show: which of the
-    /// copper layers (the rest are left as they are). "Middle signals" are the
-    /// inner layers that aren't planes; with only planes inside, all the inner ones.
-    fn quick_layer_sets(&self) -> Vec<(&'static str, Vec<u8>)> {
-        let all = self.doc.copper_layers();
-        let inner: Vec<u8> = all.iter().copied().filter(|l| *l != TOP && *l != BOTTOM).collect();
-        let signals: Vec<u8> = inner.iter().copied().filter(|l| !self.doc.pours.iter().any(|p| p.layer == *l && p.plane)).collect();
-        let signals = if signals.is_empty() { inner } else { signals };
-        vec![("All", all), ("Top copper", vec![TOP]), ("Bottom copper", vec![BOTTOM]), ("Middle signals", signals)]
+    /// copper layers (the rest are left as they are). The inner layers are sorted
+    /// out by what's on them: planes together, and each signal layer on its own.
+    fn quick_layer_sets(&mut self) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+        use crate::pcb::model::LayerRole;
+        if self.layer_roles.0 != self.rev {
+            self.layer_roles = (self.rev, self.doc.inner_layer_roles());
+        }
+        let planes: Vec<u8> = self.layer_roles.1.iter().filter(|(_, r)| *r == LayerRole::Plane).map(|(l, _)| *l).collect();
+        let first = vec![("All".to_string(), self.doc.copper_layers()), ("Top".to_string(), vec![TOP]), ("Bottom".to_string(), vec![BOTTOM]), ("Planes".to_string(), planes)];
+        let signals = self.layer_roles.1.iter().filter(|(_, r)| *r == LayerRole::Signal).map(|(l, _)| (format!("In {l}"), vec![*l])).collect();
+        (first, signals)
     }
 
     /// Shows only these copper layers, and works on the first if the one being
@@ -311,19 +314,27 @@ impl App {
     pub fn layers_page(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Layers").size(14.0).color(DIM));
         ui.add_space(2.0);
-        // Quick choices: all the copper, just the top, just the bottom, or the inner signal layers.
-        let sets = self.quick_layer_sets();
+        // Quick choices: all the copper, just the top, just the bottom, the planes; and under
+        // them each inner layer that carries signals, on its own.
+        let (first, signals) = self.quick_layer_sets();
         let showing: Vec<u8> = self.doc.copper_layers().into_iter().filter(|l| !self.hidden.contains(&Layer::Cu(*l))).collect();
         let mut chosen: Option<Vec<u8>> = None;
-        ui.horizontal_wrapped(|ui| {
-            for (name, set) in &sets {
-                let usable = !set.is_empty();
-                let on = usable && *set == showing;
-                if ui.add_enabled_ui(usable, |ui| chip(ui, name, on)).inner.on_hover_text(if usable { "Show just these copper layers" } else { "This board has no inner layers" }).clicked() {
-                    chosen = Some(set.clone());
-                }
+        for (row, tip) in [(&first, "Show just these copper layers"), (&signals, "Show just this inner signal layer")] {
+            if row.is_empty() {
+                continue;
             }
-        });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (name, set) in row {
+                    let usable = !set.is_empty();
+                    let on = usable && *set == showing;
+                    let hint = if usable { tip } else { "This board has no planes" };
+                    if ui.add_enabled_ui(usable, |ui| chip(ui, name, on)).inner.on_hover_text(hint).clicked() {
+                        chosen = Some(set.clone());
+                    }
+                }
+            });
+        }
         if let Some(set) = chosen {
             self.show_copper_only(&set);
         }
@@ -562,9 +573,14 @@ impl App {
             field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut self.doc.name).desired_width(150.0)));
             let b = self.doc.outline_bbox();
             if !b.is_empty() {
-                row(ui, "Size", &format!("{} × {} {}", u.num(b.w()), u.num(b.h()), u.name()));
+                // Without trailing zeros, so it fits a narrow panel.
+                let short = |v: f64| {
+                    let t = u.num(v);
+                    if t.contains('.') { t.trim_end_matches('0').trim_end_matches('.').to_string() } else { t }
+                };
+                row(ui, "Size", &format!("{} × {} {}", short(b.w()), short(b.h()), u.name()));
             }
-            field(ui, "Copper layers", |ui| {
+            field(ui, "Layers", |ui| {
                 let mut n = self.doc.copper;
                 if segmented(ui, &mut n, &[(6, "6"), (4, "4"), (2, "2")]) {
                     self.doc.copper = n;
@@ -574,7 +590,7 @@ impl App {
                 }
             });
             row(ui, "Parts", &self.doc.footprints.len().to_string());
-            row(ui, "Tracks · vias", &format!("{} · {}", self.doc.tracks.len(), self.doc.vias.len()));
+            row(ui, "Tracks/vias", &format!("{} · {}", self.doc.tracks.len(), self.doc.vias.len()));
             ui.add_space(6.0);
             ui.collapsing(RichText::new("Make it a rectangle").color(DIM), |ui| {
                 let id = ui.make_persistent_id("rect-size");
@@ -607,10 +623,10 @@ impl App {
             field(ui, "Track width", |ui| length(ui, u, &mut r.track));
             field(ui, "Via pad", |ui| length(ui, u, &mut r.via_dia));
             field(ui, "Via hole", |ui| length(ui, u, &mut r.via_drill));
-            field(ui, "Thinnest track", |ui| length(ui, u, &mut r.min_track));
-            field(ui, "Smallest hole", |ui| length(ui, u, &mut r.min_drill));
-            field(ui, "Thinnest ring", |ui| length(ui, u, &mut r.min_ring));
-            field(ui, "From the edge", |ui| length(ui, u, &mut r.edge_clearance));
+            field(ui, "Min track", |ui| length(ui, u, &mut r.min_track));
+            field(ui, "Min hole", |ui| length(ui, u, &mut r.min_drill));
+            field(ui, "Min ring", |ui| length(ui, u, &mut r.min_ring));
+            field(ui, "Edge gap", |ui| length(ui, u, &mut r.edge_clearance));
             field(ui, "Mask margin", |ui| length(ui, u, &mut r.mask_margin));
             field(ui, "Name height", |ui| length(ui, u, &mut r.text_height));
             if odd > 0
@@ -758,7 +774,7 @@ impl App {
                 "Keeps clear of other nets' holes by the clearance, measured from the hole, and keeps every piece",
             );
             field(ui, if v.plane { "Clear of holes" } else { "Clearance" }, |ui| length(ui, u, &mut v.clearance));
-            field(ui, "From the edge", |ui| length(ui, u, &mut v.edge));
+            field(ui, "Edge gap", |ui| length(ui, u, &mut v.edge));
             field(ui, "Pads join", |ui| segmented(ui, &mut v.connect, &[(Connect::Direct, "Solid"), (Connect::Relief, "Relief")]));
             if v.connect == Connect::Relief {
                 field(ui, "Spoke width", |ui| length(ui, u, &mut v.spoke));
