@@ -295,6 +295,8 @@ pub struct App {
     prefs_saved: Option<Prefs>,
     /// The keyboard shortcuts window.
     pub show_keys: bool,
+    /// The window of net classes, pairs and the rules asked of them.
+    pub show_classes: bool,
     /// The schematics and libraries open in tabs beside the board.
     pub docs: Vec<Doc>,
     /// Which tab is on show: one of `docs`, or the board (None).
@@ -418,6 +420,7 @@ impl App {
             filter: prefs.filter,
             prefs_saved: None,
             show_keys: false,
+            show_classes: false,
             docs: Vec::new(),
             active: None,
             pending_close: None,
@@ -2017,6 +2020,97 @@ pub(crate) fn merge_straight(b: &mut Board) {
     b.tracks.retain(|_| keep.next().unwrap_or(true));
 }
 
+/// What two straight tracks make when they lie on one line and overlap: the
+/// track that spans both, running the way `t` does. `None` if they're not
+/// parallel, not on one line, or only touch.
+fn overlap_union(t: &Track, u: &Track) -> Option<(P, P)> {
+    let d = t.b.sub(t.a);
+    let e = u.b.sub(u.a);
+    let (len, elen) = (d.len(), e.len());
+    if len < 1e-9 || elen < 1e-9 || d.cross(e).abs() > 1e-6 * len * elen {
+        return None;
+    }
+    let n = d.scale(1.0 / len);
+    let off = |q: P| q.sub(t.a).cross(n).abs();
+    if off(u.a) > 1e-4 || off(u.b) > 1e-4 {
+        return None;
+    }
+    let s = |q: P| q.sub(t.a).dot(n);
+    let (ulo, uhi) = (s(u.a).min(s(u.b)), s(u.a).max(s(u.b)));
+    if ulo.max(0.0) + 1e-6 >= uhi.min(len) {
+        return None;
+    }
+    let ends = [(t.a, 0.0), (t.b, len), (u.a, s(u.a)), (u.b, s(u.b))];
+    let lo = ends.iter().min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)?;
+    let hi = ends.iter().max_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)?;
+    Some((lo, hi))
+}
+
+/// Joins straight tracks that lie on top of one another (same layer, net and
+/// width, on one line, overlapping) into one, as happens when a trace is moved
+/// along another. Of two, the one in `prefer` (what's picked) keeps its number.
+/// Returns how many were taken out.
+pub(crate) fn merge_overlapping(b: &mut Board, prefer: &std::collections::HashSet<u32>) -> usize {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(u8, u32, i64), Vec<usize>> = HashMap::new();
+    for (i, t) in b.tracks.iter().enumerate() {
+        if t.mid.is_none() && !t.a.same(t.b) {
+            groups.entry((t.layer, t.net, (t.w * 1e6).round() as i64)).or_default().push(i);
+        }
+    }
+    let mut dead = vec![false; b.tracks.len()];
+    let mut merged = 0;
+    for mut idx in groups.into_values().filter(|g| g.len() >= 2) {
+        // Left to right, so a track is only compared with those that can reach it;
+        // one that grows leftwards upsets the order, so go round until nothing joins.
+        loop {
+            let mut changed = false;
+            let (lo, hi) = (|t: &Track| t.a.x.min(t.b.x), |t: &Track| t.a.x.max(t.b.x));
+            idx.sort_by(|&p, &q| lo(&b.tracks[p]).total_cmp(&lo(&b.tracks[q])));
+            for ai in 0..idx.len() {
+                let i = idx[ai];
+                if dead[i] {
+                    continue;
+                }
+                for bi in ai + 1..idx.len() {
+                    let j = idx[bi];
+                    if dead[j] {
+                        continue;
+                    }
+                    if lo(&b.tracks[j]) > hi(&b.tracks[i]) + 1e-4 {
+                        break;
+                    }
+                    let Some((a, e)) = overlap_union(&b.tracks[i], &b.tracks[j]) else { continue };
+                    let (keep, gone) = if prefer.contains(&b.tracks[j].id) && !prefer.contains(&b.tracks[i].id) { (j, i) } else { (i, j) };
+                    b.tracks[keep].a = a;
+                    b.tracks[keep].b = e;
+                    dead[gone] = true;
+                    merged += 1;
+                    changed = true;
+                    if gone == i {
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    if merged > 0 {
+        let mut keep = dead.into_iter().map(|d| !d);
+        b.tracks.retain(|_| keep.next().unwrap_or(true));
+    }
+    merged
+}
+
+/// Tidies tracks after a move or a route: those on top of one another become
+/// one, and straight runs in pieces join up.
+pub(crate) fn tidy_tracks(b: &mut Board, prefer: &std::collections::HashSet<u32>) {
+    merge_overlapping(b, prefer);
+    merge_straight(b);
+}
+
 /// What `merge_straight` was before it used an index: the same joins, found by
 /// comparing every pair of tracks. Kept to check the quick one against.
 #[cfg(test)]
@@ -2123,6 +2217,7 @@ impl eframe::App for App {
         Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui));
         self.shortcuts_window(&ctx);
+        self.classes_window(&ctx);
         self.keep_layout();
         // A change made this frame shows its effect straight away.
         if self.copper_rev != self.rev || self.checked_rev != self.rev {
@@ -2314,6 +2409,62 @@ mod tests {
         let pad2 = f.pad_center(1);
         assert!(b.tracks.iter().any(|t| t.net == led && (t.a.same(pad2) || t.b.same(pad2))), "{pad2:?}");
         assert!(b.tracks.iter().filter(|t| t.net == led).all(|t| crate::pcb::slide::octilinear(t.b.sub(t.a))));
+    }
+
+    fn track(id: u32, a: P, e: P, w: f64, net: u32) -> Track {
+        Track { mid: None, id, a, b: e, w, layer: TOP, net }
+    }
+
+    #[test]
+    fn tracks_lying_on_one_another_become_one() {
+        let none = std::collections::HashSet::new();
+        // Overlapping, one inside another, and a third that carries on past them.
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1),
+            track(2, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1),
+            track(3, p(2.0, 0.0), p(3.0, 0.0), 0.25, 1),
+            track(4, p(9.0, 0.0), p(15.0, 0.0), 0.25, 1),
+        ];
+        assert_eq!(merge_overlapping(&mut b, &none), 3);
+        assert_eq!(b.tracks.len(), 1);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(15.0, 0.0)), "{:?}", b.tracks[0]);
+        // Slanted ones, whichever way they run.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(4.0, 4.0), 0.25, 1), track(2, p(6.0, 6.0), p(2.0, 2.0), 0.25, 1)];
+        assert_eq!(merge_overlapping(&mut b, &none), 1);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(6.0, 6.0)));
+    }
+
+    #[test]
+    fn tracks_that_differ_or_only_touch_are_left_alone() {
+        let none = std::collections::HashSet::new();
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1),
+            track(2, p(4.0, 0.0), p(10.0, 0.0), 0.30, 1),
+            track(3, p(4.0, 0.0), p(10.0, 0.0), 0.25, 2),
+            track(4, p(4.0, 0.1), p(10.0, 0.1), 0.25, 1),
+            track(5, p(4.0, 0.0), p(8.0, 1.0), 0.25, 1),
+            track(6, p(6.0, 0.0), p(9.0, 0.0), 0.25, 1),
+        ];
+        b.tracks.push(Track { layer: BOTTOM, ..track(7, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1) });
+        assert_eq!(merge_overlapping(&mut b, &none), 0, "other width, net, layer, a gap sideways, another angle, and one only touching");
+        assert_eq!(b.tracks.len(), 7);
+        // The one that only touches is joined by the usual end-to-end merge.
+        tidy_tracks(&mut b, &none);
+        assert_eq!(b.tracks.len(), 6);
+    }
+
+    #[test]
+    fn what_is_picked_keeps_its_number_when_it_merges() {
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1), track(2, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1)];
+        let picked: std::collections::HashSet<u32> = [2].into_iter().collect();
+        merge_overlapping(&mut b, &picked);
+        assert_eq!(b.tracks.len(), 1);
+        assert_eq!(b.tracks[0].id, 2);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(10.0, 0.0)));
     }
 
     #[test]

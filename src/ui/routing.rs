@@ -654,7 +654,8 @@ impl App {
                 router::remove_loops(b, r.net, &spare_before, &new);
                 removed = count - b.tracks.len();
             }
-            crate::ui::app::merge_straight(b);
+            // The new route may run along an old track of the net: one track, not two.
+            crate::ui::app::tidy_tracks(b, &new.iter().copied().collect());
         }
         self.doc = board;
         if self.doc != before {

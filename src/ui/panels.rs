@@ -248,7 +248,7 @@ pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
 }
 
 /// "0.172 – 0.178 mm", or whichever end the rule gives.
-fn span(u: Unit, lo: Option<f64>, hi: Option<f64>) -> Option<String> {
+pub(crate) fn span(u: Unit, lo: Option<f64>, hi: Option<f64>) -> Option<String> {
     match (lo, hi) {
         (Some(a), Some(b)) if (a - b).abs() < 1e-6 => Some(u.len(a)),
         (Some(a), Some(b)) => Some(format!("{} – {}", u.num(a), u.len(b))),
@@ -374,7 +374,7 @@ pub fn net_lengths(board: &Board, sel: &[Sel]) -> Vec<NetLength> {
 }
 
 /// Every track and via of a net.
-fn whole_net(board: &Board, net: u32) -> Vec<Sel> {
+pub(crate) fn whole_net(board: &Board, net: u32) -> Vec<Sel> {
     let tracks = board.tracks.iter().filter(|t| t.net == net).map(|t| Sel::Track(t.id));
     let vias = board.vias.iter().filter(|v| v.net == net).map(|v| Sel::Via(v.id));
     tracks.chain(vias).collect()

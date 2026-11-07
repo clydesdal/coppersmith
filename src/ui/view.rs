@@ -828,7 +828,10 @@ impl App {
                 // Straight runs left in pieces by the move join up again; a name,
                 // a pour or a keepout moved has left no tracks in pieces.
                 if self.sel.iter().any(|s| matches!(s, Sel::Fp(_) | Sel::Via(_) | Sel::Track(_))) {
-                    crate::ui::app::merge_straight(&mut self.doc);
+                    // Tracks moved on top of others of the same net and width become one.
+                    let picked: std::collections::HashSet<u32> =
+                        self.sel.iter().filter_map(|s| if let Sel::Track(id) = s { Some(*id) } else { None }).collect();
+                    crate::ui::app::tidy_tracks(&mut self.doc, &picked);
                 }
                 let doc = &self.doc;
                 self.sel.retain(|s| match *s {

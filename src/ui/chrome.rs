@@ -254,6 +254,7 @@ impl App {
                 Mode::Board => {
                     ui.menu_button("Place", |ui| self.place_menu(ui));
                     ui.menu_button("Route", |ui| self.route_menu(ui));
+                    ui.menu_button("Rules", |ui| self.rules_menu(ui));
                     ui.menu_button("Tools", |ui| self.tools_menu(ui));
                 }
                 Mode::View3d => {}
@@ -624,11 +625,147 @@ impl App {
                 }
             });
         }
-        ui.separator();
+        if item(ui, "Join tracks lying on one another", "", !self.doc.tracks.is_empty()) {
+            let mut joined = 0;
+            self.edit(|b| {
+                joined = crate::ui::app::merge_overlapping(b, &Default::default());
+                crate::ui::app::merge_straight(b);
+            });
+            self.notice = Some(match joined {
+                0 => "No tracks lie on one another.".to_string(),
+                1 => "Joined 1 track that lay on another.".to_string(),
+                n => format!("Joined {n} tracks that lay on others."),
+            });
+        }
+    }
+
+    /// The checks and the rules they check against.
+    fn rules_menu(&mut self, ui: &mut Ui) {
         let errors = self.errors();
-        let text = if errors == 0 { "The checks find no errors".to_string() } else { format!("The checks find {errors} errors") };
+        let text = if errors == 0 { "Design rule check: no errors".to_string() } else { format!("Design rule check: {errors} errors") };
         if item(ui, &text, "", true) {
             self.right_tab = RightTab::Checks;
+            self.show_right = true;
+        }
+        ui.separator();
+        if item(ui, "Board rules", "", true) {
+            self.sel.clear();
+            self.show_properties();
+            self.show_right = true;
+        }
+        let b = &self.doc;
+        let any = !(b.net_classes.is_empty() && b.diff_pairs.is_empty() && b.pair_classes.is_empty() && b.class_rules.is_empty());
+        let text = if any {
+            format!("Net classes and rules ({} classes, {} pairs)", b.net_classes.len() + b.pair_classes.len(), b.diff_pairs.len())
+        } else {
+            "Net classes and rules".to_string()
+        };
+        if item(ui, &text, "", true) {
+            self.show_classes = true;
+        }
+    }
+
+    /// The window of net classes, differential pairs, classes of pairs, and the
+    /// rules asked of them.
+    pub fn classes_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_classes;
+        let mut pick: Option<Vec<u32>> = None;
+        let u = self.unit;
+        egui::Window::new("Net classes and rules").open(&mut open).collapsible(false).resizable(true).default_width(470.0).show(ctx, |ui| {
+            let b = &self.doc;
+            if b.net_classes.is_empty() && b.diff_pairs.is_empty() && b.pair_classes.is_empty() && b.class_rules.is_empty() {
+                ui.label(RichText::new("This board has no net classes, pairs or rules for them. Boards from Altium bring theirs.").color(DIM));
+                return;
+            }
+            ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                let names = |nets: &[u32]| nets.iter().map(|n| b.net_name(*n)).collect::<Vec<_>>().join(", ");
+                if !b.net_classes.is_empty() {
+                    ui.label(RichText::new("Net classes").font(semibold(14.0)));
+                    for c in &b.net_classes {
+                        egui::CollapsingHeader::new(format!("{}   {} nets", c.name, c.nets.len())).id_salt(("nc", &c.name)).show(ui, |ui| {
+                            ui.label(RichText::new(names(&c.nets)).size(12.0).color(DIM));
+                            if ui.small_button("Pick them on the board").clicked() {
+                                pick = Some(c.nets.clone());
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
+                if !b.pair_classes.is_empty() {
+                    ui.label(RichText::new("Classes of differential pairs").font(semibold(14.0)));
+                    for c in &b.pair_classes {
+                        egui::CollapsingHeader::new(format!("{}   {} pairs", c.name, c.pairs.len())).id_salt(("pc", &c.name)).show(ui, |ui| {
+                            ui.label(RichText::new(c.pairs.join(", ")).size(12.0).color(DIM));
+                            if ui.small_button("Pick them on the board").clicked() {
+                                pick = Some(b.pair_class_nets(&c.name));
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
+                if !b.diff_pairs.is_empty() {
+                    egui::CollapsingHeader::new(RichText::new(format!("Differential pairs ({})", b.diff_pairs.len())).font(semibold(14.0)))
+                        .id_salt("pairs")
+                        .show(ui, |ui| {
+                            for d in &b.diff_pairs {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&d.name).color(FG));
+                                    ui.label(RichText::new(format!("{} / {}", b.net_name(d.pos), b.net_name(d.neg))).size(12.0).color(FAINT));
+                                });
+                            }
+                        });
+                    ui.add_space(8.0);
+                }
+                if !b.class_rules.is_empty() {
+                    ui.label(RichText::new("Rules asked of classes").font(semibold(14.0)));
+                    for r in &b.class_rules {
+                        let (what, scope) = (
+                            match r.kind {
+                                ClassRuleKind::Width => "Width",
+                                ClassRuleKind::PairRouting => "Pair routing",
+                                ClassRuleKind::MatchedLengths => "Matched lengths",
+                            },
+                            match &r.scope {
+                                ClassScope::NetClass(n) => format!("net class {n}"),
+                                ClassScope::PairClass(n) => format!("pair class {n}"),
+                            },
+                        );
+                        egui::CollapsingHeader::new(format!("{}   {what} for {scope}", r.name)).id_salt(("cr", &r.name, &scope)).show(ui, |ui| {
+                            if let Some(t) = r.tolerance {
+                                ui.label(RichText::new(format!("Lengths match within {}", u.len(t))).size(12.0).color(DIM));
+                            }
+                            if let Some(v) = r.max_uncoupled {
+                                ui.label(RichText::new(format!("At most {} uncoupled", u.len(v))).size(12.0).color(DIM));
+                            }
+                            for l in &r.layers {
+                                let layer = if l.layer == u8::MAX { "All layers".to_string() } else { Layer::Cu(l.layer).name() };
+                                let mut parts: Vec<String> = Vec::new();
+                                if let Some(s) = crate::ui::panels::span(u, l.min_width, l.max_width) {
+                                    parts.push(format!("width {s}"));
+                                }
+                                if let Some(p) = l.pref_width {
+                                    parts.push(format!("prefer {}", u.len(p)));
+                                }
+                                if let Some(s) = crate::ui::panels::span(u, l.min_gap, l.max_gap) {
+                                    parts.push(format!("gap {s}"));
+                                }
+                                if let Some(p) = l.pref_gap {
+                                    parts.push(format!("prefer gap {}", u.len(p)));
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(layer).size(12.0).color(FG));
+                                    ui.label(RichText::new(parts.join(" · ")).size(12.0).color(DIM));
+                                });
+                            }
+                        });
+                    }
+                }
+            });
+        });
+        self.show_classes = open;
+        if let Some(nets) = pick {
+            self.sel = nets.into_iter().flat_map(|n| crate::ui::panels::whole_net(&self.doc, n)).collect();
+            self.show_properties();
             self.show_right = true;
         }
     }
