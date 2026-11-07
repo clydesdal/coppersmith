@@ -827,8 +827,10 @@ impl App {
                         for island in &v.fill {
                             tri_mesh(painter, tr, &island.tris, c);
                         }
-                        if layer == active && v.outline.len() >= 3 {
-                            closed_line(painter, tr, &v.outline, Stroke::new(1.0, fade(base, 0.8)), true);
+                        // A pour without copper still shows where it is, planes too.
+                        let area = if self.flood { &v.outline[..] } else { v.area(doc) };
+                        if layer == active && area.len() >= 3 {
+                            closed_line(painter, tr, area, Stroke::new(1.0, fade(base, 0.8)), true);
                         }
                     }
                     for v in doc.fills.iter().filter(|v| v.layer == l) {

@@ -130,6 +130,8 @@ pub enum Then {
 }
 
 pub const GRIDS: [f64; 8] = [0.05, 0.1, 0.25, 0.5, 1.0, 0.635, 1.27, 2.54];
+/// While something is dragged or routed, the rule check runs this often at most.
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_millis(300);
 pub const WIDTHS: [f64; 9] = [0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.8, 1.0, 1.5];
 
 pub struct App {
@@ -144,6 +146,13 @@ pub struct App {
     copper_rev: u64,
     /// The board change the pours were last poured for.
     poured_rev: u64,
+    /// The board change the rule check last ran for.
+    checked_rev: u64,
+    last_check: std::time::Instant,
+    /// Whether pours are filled. Off, they keep their areas and settings but
+    /// have no copper, so routing and moving run unimpeded and quickly;
+    /// switching it on pours them again.
+    pub flood: bool,
     pub problems: Vec<Problem>,
     pub lib: Library,
     pub lib_filter: String,
@@ -231,6 +240,9 @@ impl App {
             copper: Copper::default(),
             copper_rev: 0,
             poured_rev: u64::MAX,
+            checked_rev: 0,
+            last_check: std::time::Instant::now(),
+            flood: true,
             problems: Vec::new(),
             lib: Library::load(),
             lib_filter: String::new(),
@@ -304,23 +316,51 @@ impl App {
         // Pours pour again once a change is finished, not on every step of
         // a drag or route; until then they keep their old shape.
         let busy = self.drag.is_some() || self.route.is_some() || self.placing.is_some();
-        let repour = !busy && self.poured_rev != self.rev;
+        // Pours switched off stay empty, whatever undo or a drag brings back.
+        if !self.flood && self.doc.clear_fills() {
+            self.rev += 1;
+        }
+        let repour = self.flood && !busy && self.poured_rev != self.rev;
         if repour {
             let started = std::time::Instant::now();
             self.doc.repour();
             self.poured_rev = self.rev;
             note_slow("pouring", started);
         }
-        if self.copper_rev != self.rev || repour {
+        let changed = self.copper_rev != self.rev || repour;
+        if changed {
             let started = std::time::Instant::now();
             self.copper = copper::analyse(&self.doc);
-            self.problems = drc::check(&self.doc, &self.copper);
             self.copper_rev = self.rev;
+            note_slow("connections", started);
+        }
+        // The rule check looks at the whole board, so while something is being
+        // dragged or routed it runs a few times a second rather than at every
+        // step, and once more as soon as it's let go.
+        let due = !busy || self.last_check.elapsed() >= CHECK_EVERY;
+        if (self.checked_rev != self.rev || repour) && due {
+            let started = std::time::Instant::now();
+            self.problems = drc::check(&self.doc, &self.copper);
+            self.checked_rev = self.rev;
+            self.last_check = std::time::Instant::now();
             note_slow("checks", started);
             if self.focus.is_some_and(|i| i >= self.problems.len()) {
                 self.focus = None;
             }
         }
+    }
+
+    /// Switches the pours' copper on or off; on, they're poured again.
+    pub fn set_flood(&mut self, on: bool) {
+        self.flood = on;
+        if on {
+            self.poured_rev = u64::MAX;
+        }
+        self.notice = Some(if on {
+            "Pours filled again.".into()
+        } else {
+            "Pours emptied: their areas stay, so tracks can go anywhere. Switch Pour fills back on to pour them.".into()
+        });
     }
 
     pub fn errors(&self) -> usize {
@@ -958,6 +998,15 @@ impl App {
     }
 
     pub fn export_to(&mut self, dir: PathBuf) {
+        // Gerbers of a board whose pours are empty or out of date would be wrong.
+        if !self.flood {
+            self.flood = true;
+            self.poured_rev = u64::MAX;
+        }
+        if self.poured_rev != self.rev {
+            self.doc.repour();
+            self.poured_rev = self.rev;
+        }
         self.refresh();
         match crate::pcb::gerber::write(&self.doc, &dir) {
             Ok(files) => {
@@ -1407,7 +1456,7 @@ impl eframe::App for App {
         Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui));
         // A change made this frame shows its effect straight away.
-        if self.copper_rev != self.rev {
+        if self.copper_rev != self.rev || self.checked_rev != self.rev {
             ctx.request_repaint();
         }
     }

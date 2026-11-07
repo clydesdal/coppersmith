@@ -601,6 +601,43 @@ pub fn drag_joint(board: &mut Board, from: P, to: P) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcb::drc;
+
+    /// Times the pieces of one drag step on a real board:
+    /// COPPERSMITH_BENCH_BOARD=/path/to/board cargo test --release bench_drag -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_drag_step() {
+        let Ok(path) = std::env::var("COPPERSMITH_BENCH_BOARD") else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&path)).unwrap().board;
+        let t = |what: &str, f: &mut dyn FnMut()| {
+            let s = std::time::Instant::now();
+            f();
+            eprintln!("{what:<40} {:?}", s.elapsed());
+        };
+        let mut c = b.clone();
+        t("Board::clone", &mut || c = b.clone());
+        t("Board == Board", &mut || assert!(c == b));
+        // A straight track on a layer with no pours.
+        let pour_layers: Vec<u8> = b.pours.iter().map(|p| p.layer).collect();
+        let id = b.tracks.iter().find(|t| t.mid.is_none() && !pour_layers.contains(&t.layer) && t.a.dist(t.b) > 3.0).map(|t| t.id).unwrap();
+        eprintln!("sliding track {id} on layer {}", b.track(id).unwrap().layer);
+        let before = b.clone();
+        let mut moved = b.clone();
+        t("slide()", &mut || assert!(slide(&mut moved, id, p(0.0, 0.1))));
+        let mut pushed = None;
+        t("push_after_move()", &mut || pushed = push_after_move(&before, moved.clone(), true));
+        eprintln!("pushed ok: {}", pushed.is_some());
+        t("analyse (with pours)", &mut || drop(analyse(&b)));
+        let cu = analyse(&b);
+        t("drc::check", &mut || drop(drc::check(&b, &cu)));
+        t("analyse_fixed (no pours)", &mut || drop(crate::pcb::copper::analyse_fixed(&b)));
+        let cf = crate::pcb::copper::analyse_fixed(&b);
+        t("drc::check on fixed", &mut || drop(drc::check(&b, &cf)));
+        let mut nopour = b.clone();
+        nopour.pours.clear();
+        t("analyse+drc with pours removed", &mut || drop(drc::check(&nopour, &analyse(&nopour))));
+    }
 
     fn track(b: &mut Board, a: (f64, f64), e: (f64, f64)) -> u32 {
         let id = b.new_id();

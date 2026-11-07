@@ -506,6 +506,29 @@ mod tests {
     }
 
     #[test]
+    fn emptied_pours_keep_their_areas_and_pour_again_the_same() {
+        let mut b = two_pours();
+        b.repour();
+        let poured: Vec<_> = b.pours.iter().map(|p| p.fill.clone()).collect();
+        let settings: Vec<_> = b.pours.iter().map(|p| (p.id, p.layer, p.net, p.outline.clone(), p.clearance)).collect();
+        assert!(b.clear_fills());
+        assert!(!b.clear_fills(), "nothing left to take out");
+        assert!(b.pours.iter().all(|p| p.fill.is_empty()));
+        assert_eq!(settings, b.pours.iter().map(|p| (p.id, p.layer, p.net, p.outline.clone(), p.clearance)).collect::<Vec<_>>());
+        // With no copper they're not in the way of a track laid right through them…
+        let sig = b.net("SIG");
+        b.tracks.push(Track { mid: None, id: 950, a: p(2.0, 12.0), b: p(40.0, 12.0), w: 0.25, layer: TOP, net: sig });
+        let c = copper::analyse(&b);
+        assert!(c.items.iter().all(|cu| !matches!(cu.item, Item::Pour(..))));
+        // …and poured again they work round it.
+        b.repour();
+        assert!(b.pours[0].copper_area() < poured[0].iter().map(|i| i.area).sum::<f64>());
+        b.tracks.pop();
+        b.repour();
+        assert_eq!(poured, b.pours.iter().map(|p| p.fill.clone()).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn pouring_layers_side_by_side_gives_what_pouring_each_alone_does() {
         let mut both = two_pours();
         both.repour();

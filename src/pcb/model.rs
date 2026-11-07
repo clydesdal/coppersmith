@@ -612,6 +612,20 @@ impl Board {
     }
 
     /// Pours every pour afresh from the board as it is.
+    /// Takes the copper out of every pour, leaving the pours themselves
+    /// (their areas and settings). True if there was any to take out.
+    pub fn clear_fills(&mut self) -> bool {
+        let mut any = false;
+        for pour in &mut self.pours {
+            if !pour.fill.is_empty() || pour.sig != 0 {
+                pour.fill = Vec::new();
+                pour.sig = 0;
+                any = true;
+            }
+        }
+        any
+    }
+
     pub fn repour(&mut self) {
         crate::pcb::pour::repour(self);
     }

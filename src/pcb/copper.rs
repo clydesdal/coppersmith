@@ -201,7 +201,7 @@ pub fn collect_fixed(board: &Board) -> Vec<Cu> {
     items
 }
 
-/// Pairs of items whose boxes come within `margin` of each other.
+/// Pairs of items on a layer in common whose boxes come within `margin` of each other.
 pub fn near_pairs(items: &[Cu], margin: f64) -> Vec<(usize, usize)> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|a, b| items[*a].bbox.min.x.total_cmp(&items[*b].bbox.min.x));
@@ -212,7 +212,7 @@ pub fn near_pairs(items: &[Cu], margin: f64) -> Vec<(usize, usize)> {
             if items[j].bbox.min.x > grown.max.x {
                 break;
             }
-            if grown.touches(&items[j].bbox) {
+            if grown.touches(&items[j].bbox) && items[i].on.shares(items[j].on) {
                 pairs.push((i.min(j), i.max(j)));
             }
         }

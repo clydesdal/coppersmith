@@ -369,6 +369,18 @@ impl App {
                     self.show_problems = !self.show_problems;
                 }
             });
+            if !self.doc.pours.is_empty() {
+                ui.horizontal(|ui| {
+                    if chip(ui, "Pour fills", self.flood)
+                        .on_hover_text(
+                            "Off: pours keep their areas and settings but lose their copper, so routing and moving run freely and fast. On: they pour again.",
+                        )
+                        .clicked()
+                    {
+                        self.set_flood(!self.flood);
+                    }
+                });
+            }
             ui.add_space(14.0);
             ui.separator();
             ui.add_space(6.0);
