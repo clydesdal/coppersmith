@@ -5,6 +5,7 @@
 use crate::pcb::altium::schlib::{Drawing, Pin, PinKind, Symbol};
 use crate::pcb::geom::*;
 use crate::pcb::schematic::{LabelKind, Placed, Schematic, Sel, elbow, transform};
+use crate::ui::dock::EditorCmd;
 use crate::ui::icons::Icon;
 use crate::ui::panels::{card, chip, field, small_icon};
 use crate::ui::theme::{self, ACCENT, DIM, FAINT, FG, GREEN, RED, YELLOW, semibold};
@@ -366,6 +367,58 @@ impl SchWindow {
         }
         self.add_symbols(&got.symbols);
         format!("{} symbols added from {}", got.symbols.len(), path.file_name().unwrap_or_default().to_string_lossy())
+    }
+
+    /// What a menu item asks of the editor.
+    pub fn command(&mut self, cmd: EditorCmd, ctx: &egui::Context, out: &mut Outcome) {
+        match cmd {
+            EditorCmd::New => {
+                self.remember();
+                self.sch = Schematic::default();
+                self.path = None;
+                self.sel = None;
+                self.fit = true;
+            }
+            EditorCmd::Open => self.ask_open(ctx),
+            EditorCmd::Save => self.save(ctx, out),
+            EditorCmd::SaveAs => self.ask_save_as(ctx),
+            EditorCmd::SaveToParts => {}
+            EditorCmd::Undo => self.undo(),
+            EditorCmd::Redo => self.redo(),
+            EditorCmd::Delete => self.delete_selected(),
+            EditorCmd::Turn => {
+                if let Some(sel) = self.sel {
+                    self.remember();
+                    self.sch.rotate(sel);
+                }
+            }
+            EditorCmd::Mirror => {
+                if let Some(Sel::Part(id)) = self.sel {
+                    self.remember();
+                    self.sch.mirror(id);
+                }
+            }
+            EditorCmd::Fit => self.fit = true,
+            EditorCmd::Tool(n) => {
+                self.wire.clear();
+                self.tool = [Tool::Select, Tool::Place, Tool::Wire, Tool::Net, Tool::Power][(n as usize).min(4)];
+                if self.tool != Tool::Place {
+                    self.ghost = None;
+                }
+            }
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.sel.is_some()
     }
 
     fn pump(&mut self, out: &mut Outcome) {

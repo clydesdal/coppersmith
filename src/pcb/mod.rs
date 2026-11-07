@@ -12,6 +12,7 @@ pub mod gerber;
 pub mod library;
 pub mod model;
 pub mod pour;
+pub mod project;
 pub mod router;
 pub mod schematic;
 pub mod sample;

@@ -126,8 +126,17 @@ pub struct Launch {
     pub schematic: Option<PathBuf>,
 }
 
+/// Which window is on show: the board, or one of the editors that replace it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Board,
+    Library,
+    Schematic,
+}
+
 pub enum Asked {
     AddLibrary(PathBuf),
+    Project(PathBuf),
     Open(PathBuf),
     SaveAs(PathBuf),
     Export(PathBuf),
@@ -229,6 +238,12 @@ pub struct App {
     pub libwin: Option<crate::ui::libview::LibWindow>,
     /// The schematic editor, likewise.
     pub schwin: Option<crate::ui::schview::SchWindow>,
+    /// The schematics, boards and libraries that go together.
+    pub project: Option<crate::pcb::project::Project>,
+    /// Whether the project's files show beside the editors.
+    pub show_project: bool,
+    /// The file picked (once) in the project panel.
+    pub project_sel: Option<PathBuf>,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
     after_save: Option<Then>,
@@ -329,6 +344,9 @@ impl App {
             show_keys: false,
             libwin: None,
             schwin: None,
+            project: None,
+            show_project: true,
+            project_sel: None,
             last_field_edit: -10.0,
             confirm: None,
             after_save: None,
@@ -977,6 +995,15 @@ impl App {
 
     // -- Files ---------------------------------------------------------------
 
+    /// The file the window on show has open, if it has one.
+    pub fn open_file_path(&self) -> Option<PathBuf> {
+        match self.mode() {
+            Mode::Board => self.path.clone(),
+            Mode::Library => self.libwin.as_ref().and_then(|w| w.ed.path().map(|p| p.to_path_buf())),
+            Mode::Schematic => self.schwin.as_ref().and_then(|w| w.path.clone()),
+        }
+    }
+
     pub fn title(&self) -> String {
         let name = match &self.path {
             Some(p) => p.file_name().unwrap_or_default().to_string_lossy().to_string(),
@@ -1002,6 +1029,14 @@ impl App {
     }
 
     pub fn open(&mut self, path: PathBuf) {
+        if crate::pcb::project::is_project_file(&path) {
+            self.open_project(&path);
+            return;
+        }
+        // Opening a board is going back to the board.
+        self.libwin = None;
+        self.schwin = None;
+        self.note_file(&path);
         // An Altium or Circuit Studio board opens as a new, unsaved board.
         if crate::pcb::altium::is_board(&path) {
             match crate::pcb::altium::read_board(&path) {
@@ -1078,10 +1113,11 @@ impl App {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             use crate::pcb::altium::with_cases as cases;
-            // Boards first; schematics and libraries open in their editors.
+            // Boards first; projects, schematics and libraries open in their own places.
             let dialog = rfd::FileDialog::new()
                 .set_title("Open")
-                .add_filter("Boards, schematics and libraries", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib"]))
+                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb"]))
+                .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb"]))
                 .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc"]))
                 .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch"]))
                 .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib"]));
@@ -1247,7 +1283,9 @@ impl App {
         while let Ok(asked) = self.asked_rx.try_recv() {
             match asked {
                 Asked::AddLibrary(path) => self.add_library(path),
-                // Schematics and libraries open in their editors, not as a board.
+                Asked::Project(path) => self.open_project(&path),
+                // A project file shows the project; schematics and libraries open in their editors.
+                Asked::Open(path) if crate::pcb::project::is_project_file(&path) => self.open_project(&path),
                 Asked::Open(path) if crate::pcb::altium::is_schematic(&path) => self.open_schematic_editor(Some(&path)),
                 Asked::Open(path) if crate::pcb::altium::is_library(&path) => self.open_library_editor(Some(&path)),
                 Asked::Open(path) if self.dirty => self.confirm = Some(Then::Open(path)),
@@ -1520,7 +1558,18 @@ impl App {
             Some(e) if e == "schlib" => crate::ui::libedit::Kind::Symbols,
             _ => crate::ui::libedit::Kind::Footprints,
         };
+        // A file opened over unsaved work would lose it: ask for that to be saved first.
+        if let (Some(path), Some(w)) = (path, &self.libwin)
+            && w.ed.dirty
+            && !w.ed.path().is_some_and(|p| crate::pcb::project::same_file(p, path))
+        {
+            self.notice = Some("The library has unsaved changes: save it (Ctrl+S), then open the next".into());
+            return;
+        }
         self.schwin = None;
+        if let Some(path) = path {
+            self.note_file(path);
+        }
         let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(kind));
         if let Some(path) = path {
             self.notice = win.open_file(path);
@@ -1545,6 +1594,16 @@ impl App {
     /// Opens the schematic editor, on a file if given. The footprint and
     /// symbol libraries the library editor holds come along.
     pub fn open_schematic_editor(&mut self, path: Option<&std::path::Path>) {
+        if let (Some(path), Some(w)) = (path, &self.schwin)
+            && w.dirty
+            && !w.path.as_deref().is_some_and(|p| crate::pcb::project::same_file(p, path))
+        {
+            self.notice = Some("The sheet has unsaved changes: save it (Ctrl+S), then open the next".into());
+            return;
+        }
+        if let Some(path) = path {
+            self.note_file(path);
+        }
         let win = self.schwin.get_or_insert_with(crate::ui::schview::SchWindow::new);
         if let Some(lib) = &self.libwin {
             win.add_symbols(&lib.ed.symbols);
@@ -1553,6 +1612,76 @@ impl App {
             self.notice = Some(win.open_file(path));
         }
         self.libwin = None;
+    }
+
+    /// Which window is on show.
+    pub fn mode(&self) -> Mode {
+        if self.schwin.is_some() {
+            Mode::Schematic
+        } else if self.libwin.is_some() {
+            Mode::Library
+        } else {
+            Mode::Board
+        }
+    }
+
+    /// Runs a menu command on the editor that's open, and takes in what it says.
+    pub fn editor_command(&mut self, ctx: &egui::Context, cmd: crate::ui::dock::EditorCmd) {
+        if let Some(mut w) = self.libwin.take() {
+            let mut out = crate::ui::libview::Outcome::default();
+            w.command(cmd, ctx, &mut out);
+            if out.notice.is_some() {
+                self.notice = out.notice;
+            }
+            if out.reload_parts {
+                self.lib = Library::load();
+            }
+            if !out.close {
+                self.libwin = Some(w);
+            }
+        } else if let Some(mut w) = self.schwin.take() {
+            let mut out = crate::ui::schview::Outcome::default();
+            w.command(cmd, ctx, &mut out);
+            if out.notice.is_some() {
+                self.notice = out.notice;
+            }
+            if !out.close {
+                self.schwin = Some(w);
+            }
+        }
+    }
+
+    /// Remembers which project a file is in, when it isn't the one on show.
+    pub fn note_file(&mut self, path: &std::path::Path) {
+        if self.project.as_ref().is_some_and(|p| p.contains(path)) || path.parent().is_none() {
+            return;
+        }
+        self.project = Some(crate::pcb::project::Project::around(path));
+    }
+
+    /// Takes a project file as the project, and shows its files.
+    pub fn open_project(&mut self, path: &std::path::Path) {
+        match crate::pcb::project::Project::from_file(path) {
+            Ok(p) => {
+                self.notice = Some(format!("Project {}: {} files", p.name, p.files.len()));
+                self.project = Some(p);
+                self.left_tab = LeftTab::Project;
+                self.show_left = true;
+                self.show_project = true;
+            }
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    pub fn ask_open_project(&self, ctx: &egui::Context) {
+        let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let dialog = rfd::FileDialog::new().set_title("Open a project").add_filter("Altium or Circuit Studio project", &crate::pcb::altium::with_cases(&["PrjPcb", "CSPrjPcb"]));
+            if let Some(path) = dialog.pick_file() {
+                let _ = tx.send(Asked::Project(path));
+                ctx.request_repaint();
+            }
+        });
     }
 
     fn show_schematic_editor(&mut self, ui: &mut Ui) {
@@ -1769,6 +1898,10 @@ impl eframe::App for App {
             Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
+            if self.show_project && width >= 900.0 {
+                let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
+                Panel::left("project_files").resizable(true).default_size(230.0).size_range(170.0..=380.0).frame(frame).show(ui, |ui| self.project_page(ui));
+            }
             if self.schwin.is_some() {
                 self.show_schematic_editor(ui);
             } else {

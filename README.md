@@ -338,6 +338,27 @@ as well as made-up ones; **it hasn't been opened in Altium Designer or Circuit
 Studio**, which fill in the bookkeeping they keep (unique ids, embedded models)
 when they next save.
 
+### Projects and the menus
+
+**Projects.** The **Project** tab (first on the left, and a panel beside the
+library and schematic editors) lists the schematics, boards and libraries that
+go together; **double-click** one to open it (a board in the board view, a sheet
+in the schematic editor, a library in the library editor; right-click for
+*Show in its folder*). **File ▸ Open project…**, **File ▸ Open…** and
+`coppersmith PROJECT.PrjPcb` read an Altium or Circuit Studio project file
+(`.PrjPcb`, `.CSPrjPcb`) and list the documents it names (outputs and reports are
+left out; a missing file is shown as such). Open any board, sheet or library and
+the project it belongs to is found the same way: the project file in its folder
+that lists it, or else the folder's files.
+
+**Menus follow the window.** In the library and schematic editors the menus are
+about what they edit: File has New, Open, Save, Save as…, Open project… and
+Back to the board (no Gerbers; *Save to my footprints* only for footprints); Edit
+has Undo, Redo, Delete, Turn and (sheets) Mirror; View has Fit and the Project
+panel; Place lists the drawing tools. Route and Tools appear only on the board.
+On the board, *Add footprints to the Parts list…* is the old "add a library", and
+*Library editor* and *Schematic editor* open the editors.
+
 ### The schematic editor
 
 **File ▸ Schematic editor…** (or `coppersmith --schematic FILE`) opens a sheet to

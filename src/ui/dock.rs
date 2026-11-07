@@ -9,21 +9,44 @@ use std::path::PathBuf;
 /// The pages of the left panel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LeftTab {
+    /// The project's schematics, boards and libraries.
+    Project,
     Layers,
     Parts,
     Select,
 }
 
 impl LeftTab {
-    pub const ALL: [LeftTab; 3] = [LeftTab::Layers, LeftTab::Parts, LeftTab::Select];
+    pub const ALL: [LeftTab; 4] = [LeftTab::Project, LeftTab::Layers, LeftTab::Parts, LeftTab::Select];
 
     pub fn name(self) -> &'static str {
         match self {
+            LeftTab::Project => "Project",
             LeftTab::Layers => "Layers",
             LeftTab::Parts => "Parts",
             LeftTab::Select => "Select",
         }
     }
+}
+
+/// What a menu asks of whichever editor (library or schematic) is open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditorCmd {
+    /// A new footprint, symbol or sheet.
+    New,
+    Open,
+    Save,
+    SaveAs,
+    /// Footprints into the folder the Parts list reads.
+    SaveToParts,
+    Undo,
+    Redo,
+    Delete,
+    Turn,
+    Mirror,
+    Fit,
+    /// A tool by its place in the toolbar: 0 select, then the drawing tools.
+    Tool(u8),
 }
 
 /// The pages of the right panel.

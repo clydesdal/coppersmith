@@ -5,6 +5,7 @@
 use crate::pcb::altium::schlib::{Drawing, PinKind};
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
+use crate::ui::dock::EditorCmd;
 use crate::ui::icons::Icon;
 use crate::ui::libedit::{FOOTPRINT_GRIDS, Item, Kind, LibEditor, SYMBOL_GRIDS, Tool};
 use crate::ui::panels::{card, chip, field, segmented, small_icon};
@@ -130,6 +131,39 @@ impl LibWindow {
         self.ed.kind = was;
     }
 
+    /// What a menu item asks of the editor.
+    pub fn command(&mut self, cmd: EditorCmd, ctx: &egui::Context, out: &mut Outcome) {
+        match cmd {
+            EditorCmd::New => self.ed.new_item(),
+            EditorCmd::Open => self.ask_open(ctx),
+            EditorCmd::Save => self.save(ctx, out),
+            EditorCmd::SaveAs => self.ask_save_as(ctx),
+            EditorCmd::SaveToParts => self.save_to_parts(out),
+            EditorCmd::Undo => self.ed.undo(),
+            EditorCmd::Redo => self.ed.redo(),
+            EditorCmd::Delete => {
+                if let Some(item) = self.ed.sel {
+                    self.ed.delete(item);
+                }
+            }
+            EditorCmd::Turn => {
+                if let Some(item) = self.ed.sel {
+                    self.ed.rotate(item);
+                }
+            }
+            EditorCmd::Mirror => {}
+            EditorCmd::Fit => self.fit = true,
+            EditorCmd::Tool(n) => {
+                self.ed.tool = [Tool::Select, Tool::Pad, Tool::Line, Tool::Shape][(n as usize).min(3)];
+                self.ed.pending = None;
+            }
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.ed.sel.is_some()
+    }
+
     fn pump(&mut self, out: &mut Outcome) {
         while let Ok(d) = self.rx.try_recv() {
             match d {
@@ -224,9 +258,6 @@ impl LibWindow {
             }
             if chip(ui, "Save as…", false).clicked() {
                 self.ask_save_as(ctx);
-            }
-            if !symbols && chip(ui, "Save to my footprints", false).on_hover_text("Write a PcbLib into the folder the Parts list reads, so they can be placed on a board").clicked() {
-                self.save_to_parts(out);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if chip(ui, "Back to the board", false).clicked() {
