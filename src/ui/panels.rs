@@ -234,6 +234,19 @@ fn preview(ui: &mut Ui, def: &FootprintDef, size: Vec2) {
     }
 }
 
+/// How many tracks and vias are picked, and the total length of the tracks
+/// (an arc counts along its curve).
+pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
+    let ids: std::collections::HashSet<u32> = sel.iter().filter_map(|s| if let Sel::Track(id) = s { Some(*id) } else { None }).collect();
+    let vias = sel.iter().filter(|s| matches!(s, Sel::Via(_))).count();
+    let (mut tracks, mut length) = (0, 0.0);
+    for t in board.tracks.iter().filter(|t| ids.contains(&t.id)) {
+        tracks += 1;
+        length += t.length();
+    }
+    (tracks, vias, length)
+}
+
 /// Looking at inner layers only, the silkscreen is in the way: this hides it,
 /// remembering which layers it hid (not those already hidden). With any other
 /// pick it brings back just those.
@@ -936,8 +949,17 @@ impl App {
 
     fn many_card(&mut self, ui: &mut Ui, n: usize) {
         let mut act = None;
+        let (tracks, vias, total) = picked_tracks(&self.doc, &self.sel);
+        let u = self.unit;
         card(ui, |ui| {
             heading(ui, &format!("{n} things picked"));
+            if tracks > 0 {
+                row(ui, "Tracks", &tracks.to_string());
+                row(ui, "Track length", &u.len(total));
+            }
+            if vias > 0 {
+                row(ui, "Vias", &vias.to_string());
+            }
             ui.horizontal_wrapped(|ui| {
                 if tool_button(ui, Icon::Rotate, "Turn", true).clicked() {
                     act = Some('r');
@@ -1074,6 +1096,23 @@ impl App {
 mod quick_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn the_total_track_length_adds_up_what_is_picked() {
+        let mut b = Board::default();
+        let n = b.net("N");
+        for (id, a, e) in [(1, p(0.0, 0.0), p(3.0, 0.0)), (2, p(3.0, 0.0), p(3.0, 4.0)), (3, p(10.0, 10.0), p(20.0, 10.0))] {
+            b.tracks.push(Track { mid: None, id, a, b: e, w: 0.2, layer: TOP, net: n });
+        }
+        let (t, v, len) = picked_tracks(&b, &[Sel::Track(1), Sel::Track(2), Sel::Via(9)]);
+        assert_eq!((t, v), (2, 1));
+        assert!((len - 7.0).abs() < 1e-9, "3 + 4 = {len}");
+        assert_eq!(picked_tracks(&b, &[]), (0, 0, 0.0));
+        // An arc is measured along its curve, which is longer than its chord.
+        b.tracks.push(Track { mid: Some(p(5.0, 2.0)), id: 4, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.2, layer: TOP, net: n });
+        let (_, _, arc) = picked_tracks(&b, &[Sel::Track(4)]);
+        assert!(arc > 10.0 && arc < 15.0, "{arc}");
+    }
 
     #[test]
     fn an_inner_pick_hides_the_silk_and_the_next_pick_brings_it_back() {

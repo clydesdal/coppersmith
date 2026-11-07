@@ -35,7 +35,7 @@ pub fn layer_color(layer: Layer) -> Color32 {
         Layer::Cu(BOTTOM) => rgb(0x4f8cff),
         Layer::Cu(n) => INNER[(n as usize + 3) % 4],
         Layer::Silk(Side::Top) => rgb(0xf2d24b),
-        Layer::Silk(Side::Bottom) => rgb(0xffffff),
+        Layer::Silk(Side::Bottom) => rgb(0xfdf2d0),
         Layer::Court(_) => rgb(0x8a6fb0),
         Layer::Fab(_) => rgb(0x8d8e8e),
         Layer::Mask(_) | Layer::Paste(_) => rgb(0xa8adb5),
@@ -511,6 +511,20 @@ impl App {
                                 _ => None,
                             })
                             .collect();
+                        // The totals are in the Properties panel, with the rest of what's picked.
+                        self.show_properties();
+                        let (tracks, vias, total) = crate::ui::panels::picked_tracks(&self.doc, &self.sel);
+                        let net = match self.sel.first() {
+                            Some(Sel::Track(id)) => self.doc.tracks.iter().find(|t| t.id == *id).map(|t| self.doc.net_name(t.net).to_string()),
+                            _ => None,
+                        };
+                        self.notice = Some(format!(
+                            "{}: {tracks} track{} and {vias} via{} joined · total track length {}",
+                            net.unwrap_or_else(|| "Joined copper".into()),
+                            if tracks == 1 { "" } else { "s" },
+                            if vias == 1 { "" } else { "s" },
+                            self.unit.len(total)
+                        ));
                     }
                 }
                 if self.hover.is_some() && self.drag.is_none() {
