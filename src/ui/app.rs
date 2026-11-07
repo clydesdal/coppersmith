@@ -331,7 +331,11 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Self {
         theme::install_fonts(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(theme::visuals());
+        // The look is its own dark one, whatever the system's light or dark setting is:
+        // both themes get it, and the dark one is always used.
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        cc.egui_ctx.set_visuals_of(egui::Theme::Dark, theme::visuals());
+        cc.egui_ctx.set_visuals_of(egui::Theme::Light, theme::visuals());
         cc.egui_ctx.all_styles_mut(|s| {
             s.spacing.item_spacing = vec2(8.0, 6.0);
             s.spacing.button_padding = vec2(10.0, 5.0);

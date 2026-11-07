@@ -280,9 +280,54 @@ impl App {
     // -- Left: layers and library ----------------------------------------------
 
     /// The Layers tab: the layers, and what to show on them.
+    /// What the quick choices at the top of the layer list show: which of the
+    /// copper layers (the rest are left as they are). "Middle signals" are the
+    /// inner layers that aren't planes; with only planes inside, all the inner ones.
+    fn quick_layer_sets(&self) -> Vec<(&'static str, Vec<u8>)> {
+        let all = self.doc.copper_layers();
+        let inner: Vec<u8> = all.iter().copied().filter(|l| *l != TOP && *l != BOTTOM).collect();
+        let signals: Vec<u8> = inner.iter().copied().filter(|l| !self.doc.pours.iter().any(|p| p.layer == *l && p.plane)).collect();
+        let signals = if signals.is_empty() { inner } else { signals };
+        vec![("All", all), ("Top copper", vec![TOP]), ("Bottom copper", vec![BOTTOM]), ("Middle signals", signals)]
+    }
+
+    /// Shows only these copper layers, and works on the first if the one being
+    /// worked on has gone.
+    fn show_copper_only(&mut self, shown: &[u8]) {
+        for l in self.doc.copper_layers() {
+            if shown.contains(&l) {
+                self.hidden.remove(&Layer::Cu(l));
+            } else {
+                self.hidden.insert(Layer::Cu(l));
+            }
+        }
+        if (self.silk.is_some() || !shown.contains(&self.layer))
+            && let Some(&first) = shown.first()
+        {
+            self.switch_layer(first);
+        }
+    }
+
     pub fn layers_page(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Layers").size(14.0).color(DIM));
         ui.add_space(2.0);
+        // Quick choices: all the copper, just the top, just the bottom, or the inner signal layers.
+        let sets = self.quick_layer_sets();
+        let showing: Vec<u8> = self.doc.copper_layers().into_iter().filter(|l| !self.hidden.contains(&Layer::Cu(*l))).collect();
+        let mut chosen: Option<Vec<u8>> = None;
+        ui.horizontal_wrapped(|ui| {
+            for (name, set) in &sets {
+                let usable = !set.is_empty();
+                let on = usable && *set == showing;
+                if ui.add_enabled_ui(usable, |ui| chip(ui, name, on)).inner.on_hover_text(if usable { "Show just these copper layers" } else { "This board has no inner layers" }).clicked() {
+                    chosen = Some(set.clone());
+                }
+            }
+        });
+        if let Some(set) = chosen {
+            self.show_copper_only(&set);
+        }
+        ui.add_space(4.0);
         for l in self.doc.copper_layers() {
             self.layer_row(ui, Layer::Cu(l), true);
         }

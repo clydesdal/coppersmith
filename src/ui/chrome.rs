@@ -7,7 +7,7 @@ use crate::pcb::project::FileKind;
 use crate::ui::app::{App, Asked, Doc, GRIDS, Mode, Tool, Unit, WIDTHS};
 use crate::ui::dock::{EditorCmd, EditorLeft, Filter, LeftTab, Pick, RightTab};
 use crate::ui::icons::Icon;
-use crate::ui::panels::{chip, icon_button, segmented, small_icon, tool_button};
+use crate::ui::panels::{chip, segmented, small_icon};
 use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
@@ -678,45 +678,14 @@ impl App {
     }
 
     pub fn ribbon_bar(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
         // In a window too narrow for all of it, it scrolls sideways rather than being cut off.
-        ScrollArea::horizontal().auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| self.ribbon_row(ui, &ctx));
+        ScrollArea::horizontal().auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| self.ribbon_row(ui));
     }
 
-    fn ribbon_row(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+    fn ribbon_row(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            App::group(ui, "File", |ui| {
-                if icon_button(ui, Icon::New, false).on_hover_text("New board (Ctrl+N)").clicked() {
-                    self.new_board();
-                }
-                if icon_button(ui, Icon::Folder, false).on_hover_text("Open a board (Ctrl+O)").clicked() {
-                    self.ask_open(ctx);
-                }
-                if icon_button(ui, Icon::Save, false).on_hover_text("Save (Ctrl+S)").clicked() {
-                    self.save(ctx);
-                }
-                if tool_button(ui, Icon::Export, "Gerbers", true).on_hover_text("Write Gerber and drill files (Ctrl+E)").clicked() {
-                    self.ask_export(ctx);
-                }
-            });
-            ui.separator();
-            App::group(ui, "Edit", |ui| {
-                let (undo, redo, picked) = (self.can_undo(), self.can_redo(), !self.sel.is_empty());
-                if ui.add_enabled(undo, egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
-                    self.undo();
-                }
-                if ui.add_enabled(redo, egui::Button::new("Redo")).on_hover_text("Ctrl+Shift+Z").clicked() {
-                    self.redo();
-                }
-                if ui.add_enabled(picked, egui::Button::new("Copy")).on_hover_text("Ctrl+D").clicked() {
-                    self.duplicate_selection();
-                }
-                if ui.add_enabled(picked, egui::Button::new("Delete")).on_hover_text("Delete").clicked() {
-                    self.delete_selection();
-                }
-            });
-            ui.separator();
+            // File and Edit are in the menus (and their keys); the ribbon keeps what needs to be at hand.
             App::group(ui, "Pick", |ui| self.filter_chip(ui, true));
             ui.separator();
             App::group(ui, "Tools", |ui| self.tool_controls(ui, true));
