@@ -1984,36 +1984,50 @@ pub(crate) fn merge_straight(b: &mut Board) {
     }
     let mut alive = vec![true; b.tracks.len()];
     for i in 0..b.tracks.len() {
-        // Joins on whatever carries straight on from its end, again and again.
+        // Joins on whatever carries straight on from either end, again and
+        // again, however each piece happens to be laid: two that meet head on
+        // (both running towards the joint) are as much one run as head to tail.
         while alive[i] && b.tracks[i].mid.is_none() {
-            let mid = b.tracks[i].b;
-            // What's joined here: tracks with an end here, and vias.
-            let mut at: Vec<usize> = Vec::new();
-            for c in round(mid) {
-                for &k in ends.get(&c).into_iter().flatten() {
-                    if alive[k] && (b.tracks[k].a.same(mid) || b.tracks[k].b.same(mid)) && !at.contains(&k) {
-                        at.push(k);
+            let mut joined = false;
+            for at_b in [true, false] {
+                let (mid, far_t) = if at_b { (b.tracks[i].b, b.tracks[i].a) } else { (b.tracks[i].a, b.tracks[i].b) };
+                // What's joined here: tracks with an end here, and vias.
+                let mut at: Vec<usize> = Vec::new();
+                for c in round(mid) {
+                    for &k in ends.get(&c).into_iter().flatten() {
+                        if alive[k] && (b.tracks[k].a.same(mid) || b.tracks[k].b.same(mid)) && !at.contains(&k) {
+                            at.push(k);
+                        }
                     }
                 }
-            }
-            let via_count = round(mid).iter().filter_map(|c| vias.get(c)).flatten().filter(|v| v.same(mid)).count();
-            // Something else joining in the middle keeps the corner.
-            if at.len() + via_count != 2 {
+                let via_count = round(mid).iter().filter_map(|c| vias.get(c)).flatten().filter(|v| v.same(mid)).count();
+                // Something else joining in the middle keeps the corner.
+                if at.len() + via_count != 2 {
+                    continue;
+                }
+                let Some(&j) = at.iter().find(|&&k| k != i) else { continue };
+                let (t, u) = (&b.tracks[i], &b.tracks[j]);
+                if u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 {
+                    continue;
+                }
+                let far_u = if u.a.same(mid) { u.b } else { u.a };
+                let (d1, d2) = (mid.sub(far_t), far_u.sub(mid));
+                if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
+                    continue;
+                }
+                if at_b {
+                    b.tracks[i].b = far_u;
+                } else {
+                    b.tracks[i].a = far_u;
+                }
+                alive[j] = false;
+                ends.entry(cell(far_u)).or_default().push(i);
+                joined = true;
                 break;
             }
-            let Some(&j) = at.iter().find(|&&k| k != i) else { break };
-            let (t, u) = (&b.tracks[i], &b.tracks[j]);
-            if u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+            if !joined {
                 break;
             }
-            let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
-            if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
-                break;
-            }
-            let end = u.b;
-            b.tracks[i].b = end;
-            alive[j] = false;
-            ends.entry(cell(end)).or_default().push(i);
         }
     }
     let mut keep = alive.into_iter();
@@ -2123,25 +2137,35 @@ pub(crate) fn merge_straight_slow(b: &mut Board) {
                     continue;
                 }
                 let (t, u) = (&b.tracks[i], &b.tracks[j]);
-                if t.mid.is_some() || u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+                if t.mid.is_some() || u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 {
                     continue;
                 }
-                let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
-                if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
-                    continue;
+                // Each end of one against each end of the other.
+                for at_b in [true, false] {
+                    let (mid, far_t) = if at_b { (t.b, t.a) } else { (t.a, t.b) };
+                    if !(u.a.same(mid) || u.b.same(mid)) {
+                        continue;
+                    }
+                    let far_u = if u.a.same(mid) { u.b } else { u.a };
+                    let (d1, d2) = (mid.sub(far_t), far_u.sub(mid));
+                    if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
+                        continue;
+                    }
+                    // Something else joining in the middle keeps the corner.
+                    let others = b.tracks.iter().filter(|o| o.a.same(mid) || o.b.same(mid)).count()
+                        + b.vias.iter().filter(|v| v.at.same(mid)).count();
+                    if others != 2 {
+                        continue;
+                    }
+                    if at_b {
+                        b.tracks[i].b = far_u;
+                    } else {
+                        b.tracks[i].a = far_u;
+                    }
+                    b.tracks.remove(j);
+                    joined = true;
+                    break 'outer;
                 }
-                // Something else joining in the middle keeps the corner.
-                let mid = t.b;
-                let others = b.tracks.iter().filter(|o| o.a.same(mid) || o.b.same(mid)).count()
-                    + b.vias.iter().filter(|v| v.at.same(mid)).count();
-                if others != 2 {
-                    continue;
-                }
-                let end = u.b;
-                b.tracks[i].b = end;
-                b.tracks.remove(j);
-                joined = true;
-                break 'outer;
             }
         }
         if !joined {
@@ -2301,7 +2325,16 @@ mod tests {
     /// A board's tracks in a form that doesn't depend on their numbering or order.
     fn shape(b: &Board) -> Vec<(u8, u32, i64, [i64; 4])> {
         let k = |v: f64| (v * 10_000.0).round() as i64;
-        let mut out: Vec<_> = b.tracks.iter().map(|t| (t.layer, t.net, k(t.w), [k(t.a.x), k(t.a.y), k(t.b.x), k(t.b.y)])).collect();
+        // Whichever way round a track is laid, it's the same track.
+        let mut out: Vec<_> = b
+            .tracks
+            .iter()
+            .map(|t| {
+                let (a, e) = ((k(t.a.x), k(t.a.y)), (k(t.b.x), k(t.b.y)));
+                let (a, e) = if a <= e { (a, e) } else { (e, a) };
+                (t.layer, t.net, k(t.w), [a.0, a.1, e.0, e.1])
+            })
+            .collect();
         out.sort();
         out
     }
@@ -2331,7 +2364,7 @@ mod tests {
                     // A different width or net: the run stops being one.
                     0 => t.w = 0.3,
                     1 => t.net = nets[1 - (net == nets[1]) as usize],
-                    // Laid the other way round: it doesn't carry on.
+                    // Laid the other way round: it still carries on, meeting the last head on.
                     2 => std::mem::swap(&mut t.a, &mut t.b),
                     // Something joined in the middle.
                     3 => {
@@ -2465,6 +2498,59 @@ mod tests {
         assert_eq!(b.tracks.len(), 1);
         assert_eq!(b.tracks[0].id, 2);
         assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(10.0, 0.0)));
+    }
+
+    #[test]
+    fn tracks_meeting_head_on_become_one_whichever_way_they_are_laid() {
+        // Both running towards the joint, as a slide leaves them when the track between vanishes.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, 1), track(2, p(9.0, 0.0), p(5.0, 0.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 1);
+        let t = &b.tracks[0];
+        let ends = [t.a, t.b];
+        assert!(ends.iter().any(|q| q.same(p(0.0, 0.0))) && ends.iter().any(|q| q.same(p(9.0, 0.0))), "{t:?}");
+        // Both running away from the joint.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(5.0, 0.0), p(0.0, 0.0), 0.25, 1), track(2, p(5.0, 0.0), p(9.0, 3.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 2, "a corner isn't a run");
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(5.0, 0.0), p(0.0, 0.0), 0.25, 1), track(2, p(5.0, 0.0), p(9.0, 0.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 1);
+        // A branch at the joint keeps it, as before.
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, 1),
+            track(2, p(9.0, 0.0), p(5.0, 0.0), 0.25, 1),
+            track(3, p(5.0, 0.0), p(5.0, 4.0), 0.25, 1),
+        ];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 3);
+    }
+
+    #[test]
+    fn a_slid_track_that_vanishes_leaves_one_run() {
+        // X ─ A ┐        sliding the middle track along its neighbours' line, so it
+        //       │ T      shrinks to nothing, leaves X and Y meeting head on.
+        //   Y ─ B ┘
+        let mut b = Board::default();
+        let n = b.net("N");
+        // X runs right to the joint, the track between has shrunk to a point, and Y
+        // runs left to it from the far side.
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, n),
+            track(2, p(5.0, 0.0), p(5.0, 0.0), 0.25, n),
+            track(3, p(10.0, 0.0), p(5.0, 0.0), 0.25, n),
+        ];
+        let dots = std::collections::HashSet::new();
+        crate::pcb::slide::tidy(&mut b, &dots);
+        assert_eq!(b.tracks.len(), 2, "the vanished track is taken out");
+        tidy_tracks(&mut b, &dots);
+        assert_eq!(b.tracks.len(), 1, "{:?}", b.tracks);
+        let t = &b.tracks[0];
+        assert!([t.a, t.b].iter().any(|q| q.same(p(0.0, 0.0))) && [t.a, t.b].iter().any(|q| q.same(p(10.0, 0.0))));
     }
 
     #[test]
