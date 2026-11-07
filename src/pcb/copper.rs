@@ -191,6 +191,11 @@ pub fn collect(board: &Board) -> Vec<Cu> {
 
 /// The copper that stays put: everything but pours.
 pub fn collect_fixed(board: &Board) -> Vec<Cu> {
+    collect_fixed_with(board, true)
+}
+
+/// As `collect_fixed`, with the tracks left out unless `tracks`.
+fn collect_fixed_with(board: &Board, tracks: bool) -> Vec<Cu> {
     let mut items = Vec::new();
     for f in &board.footprints {
         for (i, pad) in f.pads.iter().enumerate() {
@@ -202,7 +207,7 @@ pub fn collect_fixed(board: &Board) -> Vec<Cu> {
             items.push(Cu::new(Item::Pad(f.id, i as u16), blob.clone(), vec![blob], on, pad.net, vec![f.pad_center(i)]));
         }
     }
-    for t in &board.tracks {
+    for t in board.tracks.iter().filter(|_| tracks) {
         items.push(Cu::new(Item::Track(t.id), t.blob(), t.blobs(), On::One(t.layer), t.net, vec![t.a, t.b]));
     }
     for v in &board.vias {
@@ -264,9 +269,19 @@ pub fn analyse_again(board: &Board, last: &Copper) -> Copper {
 /// Just the copper that stays put, listed, without working out what touches
 /// what or what's still to connect: all a router `Scene` reads, and much
 /// quicker than `analyse`, which is the wrong thing to run on every step of
-/// a push. Its `group` and `rats` are empty.
+/// a push. Its `group` and `rats` are empty. Kept for tests, as the reference
+/// a `Scene::for_push` is checked against.
+#[cfg(test)]
 pub fn scene_copper(board: &Board) -> Copper {
     let items = collect_fixed(board);
+    let index = items.iter().enumerate().map(|(i, c)| (c.item, i)).collect();
+    Copper { items, group: Vec::new(), rats: Vec::new(), index, touching: Vec::new(), analysed: false }
+}
+
+/// As `scene_copper`, without the tracks: for `Scene::for_push`, which finds
+/// the tracks it needs on the board itself.
+pub fn push_copper(board: &Board) -> Copper {
+    let items = collect_fixed_with(board, false);
     let index = items.iter().enumerate().map(|(i, c)| (c.item, i)).collect();
     Copper { items, group: Vec::new(), rats: Vec::new(), index, touching: Vec::new(), analysed: false }
 }

@@ -851,8 +851,9 @@ pub fn straighten(obs: &[Obstacle], pts: Vec<P>, w: f64, corner: Corner) -> Vec<
 /// What the router knows about one layer while routing one net.
 #[derive(Clone, Default)]
 pub struct Scene {
-    /// Everything on the layer, every net.
-    pub all: Vec<Obstacle>,
+    /// Everything on the layer, every net. Shared, so a list that hasn't
+    /// changed can be handed from one scene to the next.
+    pub all: std::sync::Arc<Vec<Obstacle>>,
     /// What the route has to keep clear of.
     pub own: Vec<Obstacle>,
     /// Other nets' tracks, as runs that can be pushed.
@@ -862,7 +863,7 @@ pub struct Scene {
     pub clearance: f64,
     /// The other copper layers, for vias that are pushed: everything on
     /// each, and its tracks as runs (which follow a via that moves).
-    pub others: Vec<(u8, Vec<Obstacle>, Vec<Line>)>,
+    pub others: Vec<(u8, std::sync::Arc<Vec<Obstacle>>, Vec<Line>)>,
     /// Other nets' vias: id, centre, pad size, net.
     pub vias: Vec<(u32, P, f64, u32)>,
     /// Whether Push may move vias too (Altium's "Allow via pushing").
@@ -874,6 +875,103 @@ pub struct Scene {
     /// The point before the route's end, when the route carries on from a
     /// placed piece on this layer: the joint can be cut back along it.
     pub lead: Option<P>,
+}
+
+thread_local! {
+    /// The push base last used; see `PushBase`.
+    static PUSH_BASE: std::cell::RefCell<Option<PushBase>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the push base, so the next scene is made from scratch.
+#[cfg(test)]
+pub fn forget_push_base() {
+    PUSH_BASE.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// What a push reads that stays as it is while tracks are dragged and pushed:
+/// the pads, vias, fills, holes and edge, listed as obstacles for each layer.
+/// It keeps a copy of the parts, vias, fills, outline and rules it was made
+/// from, and is used only while the board's are equal to that copy (compared
+/// field for field), so a part or via moved, or a rule changed, makes a new
+/// one. A layer's list also notes the tracks outside every run that it
+/// includes as walls, and is used only while those are unchanged.
+struct PushBase {
+    footprints: Vec<Footprint>,
+    vias: Vec<Via>,
+    fills: Vec<Fill>,
+    outline: Vec<P>,
+    rules: Rules,
+    layers: u8,
+    copper: Copper,
+    pinned: std::collections::HashSet<(i64, i64)>,
+    per_layer: std::collections::HashMap<u8, PushLayer>,
+}
+
+struct PushLayer {
+    /// Pads, vias, fills, holes and the edge on the layer.
+    fixed: Vec<Obstacle>,
+    /// The tracks in no run when `all` was made, which it includes as walls.
+    walls: Vec<Track>,
+    all: std::sync::Arc<Vec<Obstacle>>,
+}
+
+impl PushBase {
+    fn new(board: &Board) -> PushBase {
+        let copper = crate::pcb::copper::push_copper(board);
+        PushBase {
+            footprints: board.footprints.clone(),
+            vias: board.vias.clone(),
+            fills: board.fills.clone(),
+            outline: board.outline.clone(),
+            rules: board.rules.clone(),
+            layers: board.copper,
+            pinned: pinned_ends(&copper),
+            copper,
+            per_layer: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Is this still what the board's untracked copper is?
+    fn holds_for(&self, board: &Board) -> bool {
+        self.layers == board.copper
+            && self.rules == board.rules
+            && self.outline == board.outline
+            && self.vias == board.vias
+            && self.fills == board.fills
+            && self.footprints == board.footprints
+    }
+
+    /// The obstacles and the runs on a layer.
+    fn side(&mut self, board: &Board, layer: u8) -> (std::sync::Arc<Vec<Obstacle>>, Vec<Line>) {
+        let runs = lines_with(board, &self.pinned, layer, 0);
+        let in_runs: std::collections::HashSet<u32> = runs.iter().flat_map(|r| r.ids.iter().copied()).collect();
+        let walls: Vec<Track> = board.tracks.iter().filter(|t| t.layer == layer && !in_runs.contains(&t.id)).cloned().collect();
+        if let Some(have) = self.per_layer.get(&layer)
+            && have.walls == walls
+        {
+            return (have.all.clone(), runs);
+        }
+        let fixed = match self.per_layer.remove(&layer) {
+            Some(have) => have.fixed,
+            None => obstacles_all(board, &self.copper, layer),
+        };
+        let mut all = fixed.clone();
+        for t in &walls {
+            for part in t.blobs() {
+                all.push(Obstacle {
+                    bbox: part.bbox(),
+                    blob: part,
+                    gap: board.rules.clearance,
+                    item: Some(Item::Track(t.id)),
+                    net: t.net,
+                    movable: false,
+                });
+            }
+        }
+        let all = std::sync::Arc::new(all);
+        self.per_layer.insert(layer, PushLayer { fixed, walls, all: all.clone() });
+        (all, runs)
+    }
 }
 
 impl Scene {
@@ -895,7 +993,7 @@ impl Scene {
                         o.movable = false;
                     }
                 }
-                (l, all, runs)
+                (l, std::sync::Arc::new(all), runs)
             })
             .collect();
         let lines = lines(board, copper, layer, net);
@@ -912,7 +1010,7 @@ impl Scene {
         Scene {
             own: for_net(&all, net),
             lines,
-            all,
+            all: std::sync::Arc::new(all),
             net,
             layer,
             clearance: board.rules.clearance,
@@ -923,6 +1021,49 @@ impl Scene {
             min_diag: board.rules.min_diag,
             lead: None,
         }
+    }
+
+    /// A scene for pushing tracks aside on `layer`. A push never reads the
+    /// obstacles of tracks that are in runs, as it moves those runs; so only
+    /// tracks that are in none, which can't move and are walls, are listed
+    /// with the pads, vias, fills, holes and edge. The same pushes come of
+    /// this as of `Scene::new(.., 0)`, for much less work.
+    ///
+    /// What doesn't change from one push to the next (those pads, vias and so
+    /// on, while the parts and vias stay where they are, as when a track is
+    /// dragged) is listed once and handed on: see `PushBase`.
+    pub fn for_push(board: &Board, layer: u8) -> Scene {
+        PUSH_BASE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if !slot.as_ref().is_some_and(|b| b.holds_for(board)) {
+                *slot = Some(PushBase::new(board));
+            }
+            let base = slot.as_mut().expect("just made");
+            let (all, lines) = base.side(board, layer);
+            let others = board
+                .copper_layers()
+                .into_iter()
+                .filter(|l| *l != layer)
+                .map(|l| {
+                    let (all, runs) = base.side(board, l);
+                    (l, all, runs)
+                })
+                .collect();
+            Scene {
+                own: Vec::new(),
+                lines,
+                all,
+                net: 0,
+                layer,
+                clearance: board.rules.clearance,
+                others,
+                vias: board.vias.iter().map(|v| (v.id, v.at, v.dia, v.net)).collect(),
+                via_push: true,
+                arc_radius: 1.0,
+                min_diag: board.rules.min_diag,
+                lead: None,
+            }
+        })
     }
 
     /// Can this be moved by a push?
@@ -1131,19 +1272,28 @@ fn key(q: P) -> (i64, i64) {
 
 /// Other nets' tracks on a layer, joined into runs.
 pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Line> {
-    use std::collections::{HashMap, HashSet};
+    lines_with(board, &pinned_ends(copper), layer, skip_net)
+}
+
+/// Where pads and vias pin a run's end, whatever the net.
+pub fn pinned_ends(copper: &Copper) -> std::collections::HashSet<(i64, i64)> {
+    let mut pinned = std::collections::HashSet::new();
+    for c in &copper.items {
+        if matches!(c.item, Item::Pad(..) | Item::Via(_)) {
+            pinned.insert(key(c.anchors[0]));
+        }
+    }
+    pinned
+}
+
+/// As `lines`, given the ends that are pinned.
+pub fn lines_with(board: &Board, pinned: &std::collections::HashSet<(i64, i64)>, layer: u8, skip_net: u32) -> Vec<Line> {
+    use std::collections::HashMap;
     let tracks: Vec<&Track> = board.tracks.iter().filter(|t| t.layer == layer && (t.net != skip_net || skip_net == 0)).collect();
     let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         ends.entry(key(t.a)).or_default().push(i);
         ends.entry(key(t.b)).or_default().push(i);
-    }
-    // Pads and vias pin a run's end, whatever the net.
-    let mut pinned: HashSet<(i64, i64)> = HashSet::new();
-    for c in &copper.items {
-        if matches!(c.item, Item::Pad(..) | Item::Via(_)) {
-            pinned.insert(key(c.anchors[0]));
-        }
     }
     let fixed = |q: P| pinned.contains(&key(q)) || ends.get(&key(q)).is_none_or(|v| v.len() != 2);
     let mut used = vec![false; tracks.len()];
@@ -1653,7 +1803,7 @@ mod tests {
     use super::*;
 
     fn scene(obs: Vec<Obstacle>) -> Scene {
-        Scene { all: obs.clone(), own: obs, net: 1, layer: TOP, clearance: 0.2, ..Default::default() }
+        Scene { all: std::sync::Arc::new(obs.clone()), own: obs, net: 1, layer: TOP, clearance: 0.2, ..Default::default() }
     }
 
     fn wall() -> Vec<Obstacle> {
