@@ -18,6 +18,7 @@ pub mod pcblib;
 pub mod prims;
 pub mod schdoc;
 pub mod schlib;
+pub mod write;
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek};
@@ -288,5 +289,25 @@ mod tests {
         let pcb = read(&data("DAL_LIB.PcbLib")).unwrap();
         assert_eq!(int.footprints.len(), pcb.footprints.len());
         assert!(!int.symbols.is_empty());
+    }
+
+    /// Lists a file's storages and streams, to see how Altium lays one out:
+    /// COPPERSMITH_DUMP=file cargo test dump_structure -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_structure() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let entries: Vec<(String, bool, u64)> = file.walk().map(|e| (e.path().to_string_lossy().to_string(), e.is_stream(), e.len())).collect();
+        for (p, s, n) in entries.iter().take(60) {
+            println!("{} {p} {n}", if *s { "S" } else { "D" });
+        }
+        println!("{} entries", entries.len());
+        for p in ["/FileHeader", "/Library/Data", "/Library/Header", "/SectionKeys"] {
+            if let Ok(d) = stream(&mut file, p) {
+                println!("--- {p}\n{}", String::from_utf8_lossy(&d[..d.len().min(700)]).escape_debug());
+            }
+        }
     }
 }
