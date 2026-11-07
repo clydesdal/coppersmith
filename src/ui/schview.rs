@@ -8,17 +8,41 @@ use crate::pcb::schematic::{LabelKind, Placed, Schematic, Sel, elbow, transform}
 use crate::ui::dock::EditorCmd;
 use crate::ui::icons::Icon;
 use crate::ui::panels::{card, chip, field, small_icon};
-use crate::ui::theme::{self, ACCENT, DIM, FAINT, FG, GREEN, RED, YELLOW, semibold};
+use crate::ui::theme::{self, ACCENT, DIM, FAINT, FG, GREEN, YELLOW, semibold};
 use crate::ui::view::{self, Tr};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Panel, PointerButton, Rect, RichText, ScrollArea, Sense, Stroke, Ui, pos2, vec2};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 const GRID: f64 = 2.54;
-const WIRE: Color32 = theme::rgb(0x4d_db_7a);
-const BODY: Color32 = theme::rgb(0xe6_c0_7b);
-const PIN: Color32 = theme::rgb(0xd9_5a_55);
-const PAPER: Color32 = theme::rgb(0x14_16_1b);
+// The sheet is warm off-white paper with ink on it: deep green wires, brown-red
+// outlines over a see-through gold, blue pins, dark text, teal net labels, red
+// supply symbols, a strong blue for what's picked.
+const PAPER: Color32 = theme::rgb(0xf6_f2_e6);
+const DOTS: Color32 = theme::rgb(0xd8_d2_bf);
+const WIRE: Color32 = theme::rgb(0x1c_7a_3f);
+const BODY: Color32 = theme::rgb(0x8d_3b_1c);
+const PIN: Color32 = theme::rgb(0x3a_63_ad);
+const TEXT: Color32 = theme::rgb(0x23_21_1d);
+const TEXT_DIM: Color32 = theme::rgb(0x5e_59_4d);
+const TEXT_PIN: Color32 = theme::rgb(0x44_55_74);
+const NET: Color32 = theme::rgb(0x0b_6a_5b);
+const POWER: Color32 = theme::rgb(0xb0_2a_30);
+const PICK: Color32 = theme::rgb(0x17_68_e0);
+const LOOSE: Color32 = theme::rgb(0xd3_2f_2f);
+
+/// A line of words over the sheet, on a little paper of its own so it reads over the drawing.
+fn note(painter: &egui::Painter, at: egui::Pos2, align: Align2, text: &str, font: FontId, color: Color32) {
+    let galley = painter.layout_no_wrap(text.to_string(), font, color);
+    let rect = align.anchor_size(at, galley.size()).expand2(vec2(6.0, 3.0));
+    painter.rect_filled(rect, 5.0, PAPER.gamma_multiply(0.92));
+    painter.galley(rect.min + vec2(6.0, 3.0), galley, color);
+}
+
+/// What a symbol's closed shapes are filled with: a gold that lets the paper show through.
+fn body_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(238, 190, 70, 90)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -804,7 +828,7 @@ impl SchWindow {
         self.draw_tool(&painter, &tr);
         if let Some(q) = self.hover {
             let q = self.snap(q);
-            painter.text(rect.left_bottom() + vec2(10.0, -8.0), Align2::LEFT_BOTTOM, format!("X {:.2}  Y {:.2} mm", q.x, q.y), theme::mono(12.0), DIM);
+            note(&painter, rect.left_bottom() + vec2(10.0, -8.0), Align2::LEFT_BOTTOM, &format!("X {:.2}  Y {:.2} mm", q.x, q.y), theme::mono(12.0), TEXT_DIM);
         }
         let hint = match self.tool {
             Tool::Select => "Click to pick · drag to move (wires follow) · R turns · X mirrors · Delete removes",
@@ -813,7 +837,7 @@ impl SchWindow {
             Tool::Net => "Click a wire or pin to name it",
             Tool::Power => "Click a pin or wire to attach it",
         };
-        painter.text(rect.right_bottom() + vec2(-10.0, -8.0), Align2::RIGHT_BOTTOM, hint, FontId::proportional(12.0), FAINT);
+        note(&painter, rect.right_bottom() + vec2(-10.0, -8.0), Align2::RIGHT_BOTTOM, hint, FontId::proportional(12.0), TEXT_DIM);
     }
 
     fn draw_grid(&self, painter: &egui::Painter, tr: &Tr, rect: Rect) {
@@ -822,7 +846,7 @@ impl SchWindow {
             step *= 2.0;
         }
         let (lo, hi) = (tr.board(rect.left_bottom()), tr.board(rect.right_top()));
-        let dot = Color32::from_gray(44);
+        let dot = DOTS;
         let mut x = (lo.x / step).floor() * step;
         while x <= hi.x {
             let mut y = (lo.y / step).floor() * step;
@@ -839,7 +863,7 @@ impl SchWindow {
         for w in &self.sch.wires {
             let on = self.sel == Some(Sel::Wire(w.id));
             let pts: Vec<egui::Pos2> = w.pts.iter().map(|q| tr.pt(*q)).collect();
-            painter.add(egui::Shape::line(pts, Stroke::new(if on { 2.8 } else { 1.8 }, if on { ACCENT } else { WIRE })));
+            painter.add(egui::Shape::line(pts, Stroke::new(if on { 2.8 } else { 1.8 }, if on { PICK } else { WIRE })));
         }
         for j in &self.sch.junctions {
             painter.circle_filled(tr.pt(*j), 3.2, WIRE);
@@ -849,7 +873,7 @@ impl SchWindow {
         }
         for q in &loose {
             let c = tr.pt(*q);
-            let s = Stroke::new(1.6, RED);
+            let s = Stroke::new(1.6, LOOSE);
             painter.line_segment([c + vec2(-4.0, -4.0), c + vec2(4.0, 4.0)], s);
             painter.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], s);
         }
@@ -869,7 +893,7 @@ impl SchWindow {
                 }
             }
             Tool::Wire => {
-                let ink = Stroke::new(1.6, ACCENT);
+                let ink = Stroke::new(1.6, PICK);
                 if let Some(last) = self.wire.last() {
                     let mut pts = self.wire.clone();
                     pts.extend(elbow(*last, q, self.x_first).into_iter().skip(1));
@@ -906,9 +930,27 @@ fn nudge(tr: &Tr) -> f32 {
     (tr.s / 11.0).clamp(0.2, 4.0) as f32
 }
 
+/// A shape filled with a see-through colour, cut into triangles so one with a
+/// notch in it (an arrow head) fills as it should.
+fn fill_ring(painter: &egui::Painter, ring: &[P], to_screen: &dyn Fn(P) -> egui::Pos2, color: Color32) {
+    let cut = triangulate(ring);
+    if cut.is_empty() {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    for q in ring {
+        mesh.colored_vertex(to_screen(*q), color);
+    }
+    for t in cut.chunks(3) {
+        mesh.add_triangle(t[0], t[1], t[2]);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: bool) {
     let fade = |c: Color32| if ghost { c.gamma_multiply(0.6) } else { c };
-    let body = fade(if on && !ghost { ACCENT } else { BODY });
+    let body = fade(if on && !ghost { PICK } else { BODY });
+    let fill = fade(body_fill());
     let stroke = Stroke::new(1.6, body);
     let t = |q: P| tr.pt(transform(q, part.at, part.turns, part.mirror));
     for d in part.drawings() {
@@ -918,12 +960,14 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
             }
             Drawing::Rect(a, b) => {
                 let corners = [*a, p(b.x, a.y), *b, p(a.x, b.y)];
+                fill_ring(painter, &corners, &t, fill);
                 painter.add(egui::Shape::closed_line(corners.iter().map(|q| t(*q)).collect(), stroke));
             }
             Drawing::Polyline(v) => {
                 painter.add(egui::Shape::line(v.iter().map(|q| t(*q)).collect(), stroke));
             }
             Drawing::Polygon(v) => {
+                fill_ring(painter, v, &t, fill);
                 painter.add(egui::Shape::closed_line(v.iter().map(|q| t(*q)).collect(), stroke));
             }
             Drawing::Arc { c, r, start, end } => {
@@ -939,11 +983,14 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
                 painter.add(egui::Shape::line(pts.collect(), stroke));
             }
             Drawing::Ellipse { c, rx, ry } => {
-                let pts = (0..40).map(|k| {
-                    let a = k as f64 * std::f64::consts::TAU / 40.0;
-                    t(c.add(p(a.cos() * rx, a.sin() * ry)))
-                });
-                painter.add(egui::Shape::closed_line(pts.collect(), stroke));
+                let ring: Vec<P> = (0..40)
+                    .map(|k| {
+                        let a = k as f64 * std::f64::consts::TAU / 40.0;
+                        c.add(p(a.cos() * rx, a.sin() * ry))
+                    })
+                    .collect();
+                fill_ring(painter, &ring, &t, fill);
+                painter.add(egui::Shape::closed_line(ring.iter().map(|q| t(*q)).collect(), stroke));
             }
             Drawing::Text { at, text } => {
                 if let Some(font) = sized(tr, 1.1) {
@@ -963,7 +1010,7 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
         let mid = (a + tip.to_vec2()) / 2.0;
         let k = nudge(tr);
         if let Some(font) = sized(tr, 0.95) {
-            painter.text(mid + vec2(-dir.y, dir.x) * 8.0 * k, Align2::CENTER_CENTER, &pin.number, font, fade(DIM));
+            painter.text(mid + vec2(-dir.y, dir.x) * 8.0 * k, Align2::CENTER_CENTER, &pin.number, font, fade(TEXT_PIN));
         }
         if !pin.name.is_empty()
             && let Some(font) = sized(tr, 1.05)
@@ -974,24 +1021,30 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
                 1 => (a + vec2(0.0, -5.0 * k), Align2::CENTER_BOTTOM),
                 _ => (a + vec2(0.0, 5.0 * k), Align2::CENTER_TOP),
             };
-            painter.text(anchor, align, &pin.name, font, fade(FG));
+            painter.text(anchor, align, &pin.name, font, fade(TEXT));
         }
     }
     let bb = part.bbox();
     if !part.designator.is_empty() {
         if let Some(font) = sized(tr, 1.2) {
-            painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -3.0 * nudge(tr)), Align2::LEFT_BOTTOM, &part.designator, font, fade(FG));
+            painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -3.0 * nudge(tr)), Align2::LEFT_BOTTOM, &part.designator, font, fade(TEXT));
         }
     }
     if !part.value.is_empty() {
         if let Some(font) = sized(tr, 1.1) {
-            painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 3.0 * nudge(tr)), Align2::LEFT_TOP, &part.value, font, fade(DIM));
+            painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 3.0 * nudge(tr)), Align2::LEFT_TOP, &part.value, font, fade(TEXT_DIM));
         }
     }
 }
 
 fn draw_label(painter: &egui::Painter, tr: &Tr, at: P, text: &str, kind: LabelKind, turns: u8, on: bool) {
-    let color = if on { ACCENT } else { WIRE };
+    let color = if on {
+        PICK
+    } else if kind == LabelKind::Power {
+        POWER
+    } else {
+        NET
+    };
     let c = tr.pt(at);
     // The way it points, as a unit step on screen.
     let step = match turns & 3 {
