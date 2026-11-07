@@ -20,13 +20,13 @@ const GRID: f64 = 2.54;
 // supply symbols, a strong blue for what's picked.
 const PAPER: Color32 = theme::rgb(0xf6_f2_e6);
 const DOTS: Color32 = theme::rgb(0xd8_d2_bf);
-const WIRE: Color32 = theme::rgb(0x1c_7a_3f);
+const WIRE: Color32 = theme::rgb(0x17_17_1a);
 const BODY: Color32 = theme::rgb(0x8d_3b_1c);
 const PIN: Color32 = theme::rgb(0x3a_63_ad);
 const TEXT: Color32 = theme::rgb(0x23_21_1d);
 const TEXT_DIM: Color32 = theme::rgb(0x5e_59_4d);
 const TEXT_PIN: Color32 = theme::rgb(0x44_55_74);
-const NET: Color32 = theme::rgb(0x0b_6a_5b);
+const NET: Color32 = theme::rgb(0x1c_2b_4a);
 const POWER: Color32 = theme::rgb(0xb0_2a_30);
 const PICK: Color32 = theme::rgb(0x17_68_e0);
 const LOOSE: Color32 = theme::rgb(0xd3_2f_2f);
@@ -709,7 +709,7 @@ impl SchWindow {
                 self.scale = 11.0;
             } else {
                 self.center = bb.center();
-                self.scale = ((rect.width() as f64 / (bb.w().max(10.0) * 1.3)).min(rect.height() as f64 / (bb.h().max(10.0) * 1.3))).clamp(2.0, 60.0);
+                self.scale = ((rect.width() as f64 / (bb.w().max(10.0) * 1.5)).min(rect.height() as f64 / (bb.h().max(10.0) * 1.5))).clamp(2.0, 60.0);
             }
         }
         if let Some(at) = resp.hover_pos() {
@@ -994,7 +994,9 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
             }
             Drawing::Text { at, text } => {
                 if let Some(font) = sized(tr, 1.1) {
-                    painter.text(t(*at), Align2::LEFT_BOTTOM, text, font, body);
+                    // In from the corner the text is anchored to, so it doesn't sit on the line.
+                    let inset = vec2(0.6 * tr.s as f32, -0.5 * tr.s as f32);
+                    painter.text(t(*at) + inset, Align2::LEFT_BOTTOM, text, font, fade(TEXT));
                 }
             }
         }
@@ -1010,16 +1012,18 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
         let mid = (a + tip.to_vec2()) / 2.0;
         let k = nudge(tr);
         if let Some(font) = sized(tr, 0.95) {
-            painter.text(mid + vec2(-dir.y, dir.x) * 8.0 * k, Align2::CENTER_CENTER, &pin.number, font, fade(TEXT_PIN));
+            painter.text(mid + vec2(-dir.y, dir.x) * 9.0 * k, Align2::CENTER_CENTER, &pin.number, font, fade(TEXT_PIN));
         }
         if !pin.name.is_empty()
             && let Some(font) = sized(tr, 1.05)
         {
+            // Inside the body, in from its edge: the pin reaches out from `a` the way it
+            // points, so the name goes the other way.
             let (anchor, align) = match ((pin.angle / 90.0).round() as i32) & 3 {
-                0 => (a + vec2(5.0 * k, 0.0), Align2::LEFT_CENTER),
-                2 => (a + vec2(-5.0 * k, 0.0), Align2::RIGHT_CENTER),
-                1 => (a + vec2(0.0, -5.0 * k), Align2::CENTER_BOTTOM),
-                _ => (a + vec2(0.0, 5.0 * k), Align2::CENTER_TOP),
+                0 => (a + vec2(-10.0 * k, 0.0), Align2::RIGHT_CENTER),
+                2 => (a + vec2(10.0 * k, 0.0), Align2::LEFT_CENTER),
+                1 => (a + vec2(0.0, 10.0 * k), Align2::CENTER_TOP),
+                _ => (a + vec2(0.0, -10.0 * k), Align2::CENTER_BOTTOM),
             };
             painter.text(anchor, align, &pin.name, font, fade(TEXT));
         }
@@ -1027,12 +1031,12 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
     let bb = part.bbox();
     if !part.designator.is_empty() {
         if let Some(font) = sized(tr, 1.2) {
-            painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -3.0 * nudge(tr)), Align2::LEFT_BOTTOM, &part.designator, font, fade(TEXT));
+            painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -7.0 * nudge(tr)), Align2::LEFT_BOTTOM, &part.designator, font, fade(TEXT));
         }
     }
     if !part.value.is_empty() {
         if let Some(font) = sized(tr, 1.1) {
-            painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 3.0 * nudge(tr)), Align2::LEFT_TOP, &part.value, font, fade(TEXT_DIM));
+            painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 7.0 * nudge(tr)), Align2::LEFT_TOP, &part.value, font, fade(TEXT_DIM));
         }
     }
 }
