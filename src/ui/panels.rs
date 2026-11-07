@@ -332,6 +332,7 @@ impl App {
                         Tool::Via => "Click to drop a via; it joins the net under it · Right-click stops",
                         Tool::Outline => "Click each corner · Click the first one or Enter to close · Backspace takes one back",
                         Tool::Pour => "Click each corner of the pour · Click the first one or Enter to close · It takes the lit-up net, or the net under its first corner",
+                        Tool::Keepout => "Click each corner of the keepout · Click the first one or Enter to close · Pours keep out of it; its card says what else",
                         Tool::Place => "Click to place · R turn · L other side · Esc or right-click stops",
                     };
                     ui.add(egui::Label::new(RichText::new(hint).size(12.5).color(FAINT)).truncate());
@@ -528,6 +529,7 @@ impl App {
                 [Sel::Via(id)] => self.via_card(ui, *id),
                 [Sel::Pour(id)] => self.pour_card(ui, *id),
                 [Sel::Fill(id)] => self.fill_card(ui, *id),
+                [Sel::Keepout(id)] => self.keepout_card(ui, *id),
                 many => self.many_card(ui, many.len()),
             }
             self.checks_card(ui);
@@ -790,6 +792,41 @@ impl App {
                     }
                 });
             });
+            row(ui, "Area", &format!("{:.2} mm²", ring_area(&v.pts).abs()));
+            row(ui, "Corners", &v.pts.len().to_string());
+            ui.add_space(4.0);
+            if tool_button(ui, Icon::Trash, "Remove", true).clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            self.delete_selection();
+        }
+    }
+
+    fn keepout_card(&mut self, ui: &mut Ui, id: u32) {
+        let layers = self.doc.copper_layers();
+        let mut remove = false;
+        let Some(v) = self.doc.keepouts.iter_mut().find(|v| v.id == id) else { return };
+        card(ui, |ui| {
+            heading(ui, "Keepout");
+            field(ui, "Layer", |ui| {
+                let shown = v.layer.map(|l| Layer::Cu(l).name()).unwrap_or_else(|| "Every layer".into());
+                egui::ComboBox::from_id_salt(("keepout-layer", id)).selected_text(shown).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut v.layer, None, "Every layer");
+                    for l in layers {
+                        ui.selectable_value(&mut v.layer, Some(l), Layer::Cu(l).name());
+                    }
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new("Keeps out").size(12.5).color(DIM));
+            ui.checkbox(&mut v.restrict.pours, "Copper pours").on_hover_text("Pours stop short of it by their clearance");
+            ui.checkbox(&mut v.restrict.tracks, "Tracks").on_hover_text("The router goes round it, and the rule check flags a track in it");
+            ui.checkbox(&mut v.restrict.vias, "Vias");
+            ui.checkbox(&mut v.restrict.smd_pads, "Surface pads");
+            ui.checkbox(&mut v.restrict.th_pads, "Through-hole pads");
+            ui.add_space(2.0);
             row(ui, "Area", &format!("{:.2} mm²", ring_area(&v.pts).abs()));
             row(ui, "Corners", &v.pts.len().to_string());
             ui.add_space(4.0);

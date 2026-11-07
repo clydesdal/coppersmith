@@ -19,7 +19,7 @@ use crate::pcb::router::{self, Conflict, Corner, Plan, Scene};
 use crate::ui::app::App;
 
 /// The rule check's names for copper too close to something.
-const CLEARANCE: [&str; 4] = ["Too close", "Short circuit", "Too close to the edge", "Off the board"];
+const CLEARANCE: [&str; 5] = ["Too close", "Short circuit", "Too close to the edge", "Off the board", "In a keepout"];
 
 /// A route being laid: the segments and vias placed so far.
 #[derive(Clone, Debug)]

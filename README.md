@@ -20,6 +20,7 @@ to it.
 | Via | V | Click to drop a via; it takes the net of what it lands on. |
 | Outline | O | Click the board's corners; click the first corner (or Enter) to close. |
 | Pour | P | Click a copper pour's corners on the layer in use; click the first corner (or Enter) to close. It takes the lit-up net, or the net under its first corner, or GND. See below. |
+| Keepout | K | Click an area's corners on the layer in use; click the first corner (or Enter) to close. Pours keep out of it. See below. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
 
 ### Copper pours and planes
@@ -47,6 +48,19 @@ Routing treats it like any other copper.
 
 Gerbers write each poured piece as one region, its holes joined to the
 outline by cut-ins.
+
+### Keepouts
+
+A **keepout** is an area kept free of copper on one layer, or on every layer.
+Drawn with the Keepout tool it keeps **pours** out and nothing else: pours
+stop short of it by their clearance, and are poured again when it changes.
+Its card on the right says what else it keeps out (tracks, vias, surface pads,
+through-hole pads) and on which layer; the router goes round a keepout that
+keeps tracks out, and the rule check flags tracks, vias and pads in one that
+keeps them out ("In a keepout"; touching its edge is allowed). A part can carry
+keepouts of its own, which move, turn and flip to the other side with it; a part's
+own pads aren't held to its own keepouts. Keepouts aren't written to the Gerbers:
+they only shape what is.
 
 ### Moving keeps the corners
 
@@ -253,6 +267,12 @@ editor still to come. Writing Altium libraries is next.
 unsaved, as a new Coppersmith board: outline, copper layers, parts (with
 their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (clearance from the
 clearance table, track widths, via sizes, mask and edge clearance).
+
+Keepouts come in as keepouts: fills, regions and tracks flagged as keepouts,
+on the board and on parts, and shapes on the Keep-Out layer. They keep pours
+out and nothing else, since tracks, vias and pads are wanted there; one whose
+restrictions don't include copper pours is left out. A shape on the Keep-Out
+layer that covers most of the board is the board's boundary, not a keepout.
 
 Pours come in as pours, from their outlines and settings (pour order,
 dead copper and small-island removal, neck width), with the clearance the

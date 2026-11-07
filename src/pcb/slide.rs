@@ -664,6 +664,7 @@ mod tests {
                 graphics: vec![],
                 label_at: P::default(),
                 locked: false,
+                keepouts: vec![],
             });
         };
         // Tracks from pad to pad, side by side, of three nets in turn.
@@ -780,6 +781,13 @@ mod tests {
         let id = b.new_id();
         b.fills.push(Fill { id, layer: TOP, net: 1, pts: rect_outline(p(44.0, 2.0), p(48.0, 6.0)) });
         variants.push(("a fill", b));
+        let mut b = base.clone();
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer: Some(TOP), pts: rect_outline(p(1.0, 1.0), p(4.0, 4.0)), restrict: Restrict::default() });
+        variants.push(("a keepout", b));
+        let mut b = base.clone();
+        b.footprints[0].keepouts.push(Keepout { id: 0, layer: None, pts: rect_outline(p(-1.0, -1.0), p(1.0, 1.0)), restrict: Restrict::default() });
+        variants.push(("a keepout on a part", b));
         let mut b = base.clone();
         b.copper = 4;
         variants.push(("four copper layers", b));
@@ -1071,6 +1079,7 @@ mod pushing_while_sliding {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -1164,6 +1173,7 @@ mod pushing_while_moving {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
         id
     }
@@ -1454,6 +1464,7 @@ mod vias_push_on_other_layers {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -1530,6 +1541,7 @@ mod timing {
                     graphics: vec![],
                     label_at: P::default(),
                     locked: false,
+                    keepouts: vec![],
                 });
             }
             let pts = [p(0.0, y), p(20.0, y), p(22.0, y + 2.0), p(45.0, y + 2.0), p(47.0, y), p(70.0, y)];

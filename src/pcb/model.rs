@@ -166,6 +166,10 @@ pub struct Footprint {
     pub label_at: P,
     #[serde(default)]
     pub locked: bool,
+    /// Areas kept free of copper, in the footprint's own coordinates: they
+    /// move, turn and flip with the part.
+    #[serde(default)]
+    pub keepouts: Vec<Keepout>,
 }
 
 impl Footprint {
@@ -173,6 +177,28 @@ impl Footprint {
     pub fn place(&self, q: P) -> P {
         let q = if self.side == Side::Bottom { p(-q.x, q.y) } else { q };
         self.at.add(q.rot(self.rot)).rounded()
+    }
+
+    /// A keepout layer of the part's, on the board: a part underneath has its
+    /// top and bottom the other way round.
+    pub fn keepout_layer(&self, layer: Option<u8>) -> Option<u8> {
+        match (self.side, layer) {
+            (Side::Bottom, Some(TOP)) => Some(BOTTOM),
+            (Side::Bottom, Some(BOTTOM)) => Some(TOP),
+            (_, l) => l,
+        }
+    }
+
+    /// Its keepouts, where they sit on the board.
+    pub fn placed_keepouts(&self) -> impl Iterator<Item = PlacedKeepout> + '_ {
+        self.keepouts.iter().map(|k| {
+            let mut pts: Vec<P> = k.pts.iter().map(|q| self.place(*q)).collect();
+            // A mirror turns the corners round the other way.
+            if ring_area(&pts) < 0.0 {
+                pts.reverse();
+            }
+            PlacedKeepout { owner: Some(self.id), layer: self.keepout_layer(k.layer), pts, restrict: k.restrict }
+        })
     }
 
     pub fn place_blob(&self, b: Blob) -> Blob {
@@ -459,17 +485,100 @@ pub struct Fill {
 impl Fill {
     /// The shape as convex pieces: itself if it's convex, or triangles.
     pub fn pieces(&self) -> Vec<Vec<P>> {
-        if is_convex(&self.pts) {
-            return vec![self.pts.clone()];
-        }
-        let idx = triangulate(&self.pts);
-        idx.chunks(3).map(|t| {
-            let mut tri = vec![self.pts[t[0] as usize], self.pts[t[1] as usize], self.pts[t[2] as usize]];
+        convex_pieces(&self.pts)
+    }
+}
+
+/// A shape as convex pieces, counter-clockwise: itself if it's convex, or
+/// triangles.
+pub fn convex_pieces(pts: &[P]) -> Vec<Vec<P>> {
+    if is_convex(pts) {
+        return vec![pts.to_vec()];
+    }
+    let idx = triangulate(pts);
+    idx.chunks(3)
+        .map(|t| {
+            let mut tri = vec![pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]];
             if ring_area(&tri) < 0.0 {
                 tri.reverse();
             }
             tri
-        }).collect()
+        })
+        .collect()
+}
+
+/// What a keepout keeps out: Altium's five restrictions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Restrict {
+    pub vias: bool,
+    pub tracks: bool,
+    /// Copper pours.
+    pub pours: bool,
+    pub smd_pads: bool,
+    pub th_pads: bool,
+}
+
+impl Default for Restrict {
+    /// Everything, as a keepout is unless it says otherwise.
+    fn default() -> Self {
+        Restrict { vias: true, tracks: true, pours: true, smd_pads: true, th_pads: true }
+    }
+}
+
+impl Restrict {
+    /// Only pours: the area stays free of copper flooding in, and tracks, vias
+    /// and pads may go there.
+    pub fn pours_only() -> Restrict {
+        Restrict { vias: false, tracks: false, pours: true, smd_pads: false, th_pads: false }
+    }
+
+    /// From Altium's `KEEPOUTRESTRICTIONS` bits: via 1, track 2, copper 4,
+    /// surface pad 8, through-hole pad 16.
+    pub fn from_altium(bits: u32) -> Restrict {
+        Restrict { vias: bits & 1 != 0, tracks: bits & 2 != 0, pours: bits & 4 != 0, smd_pads: bits & 8 != 0, th_pads: bits & 16 != 0 }
+    }
+
+    pub fn any(&self) -> bool {
+        self.vias || self.tracks || self.pours || self.smd_pads || self.th_pads
+    }
+}
+
+/// An area kept free of some kinds of copper, on one layer or on every one.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Keepout {
+    pub id: u32,
+    /// The copper layer it's on; none for every layer. On a part, in the
+    /// part's terms: the top is the side the part is on.
+    #[serde(default)]
+    pub layer: Option<u8>,
+    /// Counter-clockwise.
+    pub pts: Vec<P>,
+    #[serde(default)]
+    pub restrict: Restrict,
+}
+
+/// A keepout where it sits on the board: a part's, moved to the board's
+/// coordinates and layers.
+#[derive(Clone, Debug)]
+pub struct PlacedKeepout {
+    /// The part it belongs to, if it's on one.
+    pub owner: Option<u32>,
+    pub layer: Option<u8>,
+    pub pts: Vec<P>,
+    pub restrict: Restrict,
+}
+
+impl PlacedKeepout {
+    pub fn pieces(&self) -> Vec<Vec<P>> {
+        convex_pieces(&self.pts)
+    }
+
+    pub fn applies_to(&self, layer: u8) -> bool {
+        self.layer.is_none_or(|l| l == layer)
+    }
+
+    pub fn bbox(&self) -> BBox {
+        BBox::of(&self.pts)
     }
 }
 
@@ -537,6 +646,9 @@ pub struct Board {
     pub pours: Vec<Pour>,
     #[serde(default)]
     pub fills: Vec<Fill>,
+    /// Areas kept free of copper; the parts have their own.
+    #[serde(default)]
+    pub keepouts: Vec<Keepout>,
     /// Net 0 is "not connected"; it's never stored here.
     pub nets: Vec<Net>,
     pub rules: Rules,
@@ -555,6 +667,7 @@ impl Default for Board {
             vias: Vec::new(),
             pours: Vec::new(),
             fills: Vec::new(),
+            keepouts: Vec::new(),
             nets: Vec::new(),
             rules: Rules::default(),
             next_id: 1,
@@ -644,6 +757,23 @@ impl Board {
     }
 
     /// Everything on the board, for fitting it to the window.
+    pub fn keepout(&self, id: u32) -> Option<&Keepout> {
+        self.keepouts.iter().find(|k| k.id == id)
+    }
+
+    /// Every keepout, the board's and the parts', where they sit.
+    pub fn placed_keepouts(&self) -> Vec<PlacedKeepout> {
+        let mut out: Vec<PlacedKeepout> = self
+            .keepouts
+            .iter()
+            .map(|k| PlacedKeepout { owner: None, layer: k.layer, pts: k.pts.clone(), restrict: k.restrict })
+            .collect();
+        for f in &self.footprints {
+            out.extend(f.placed_keepouts());
+        }
+        out
+    }
+
     pub fn extent(&self) -> BBox {
         let mut b = self.outline_bbox();
         for f in &self.footprints {
@@ -654,6 +784,9 @@ impl Board {
         }
         for f in &self.fills {
             b.union(&BBox::of(&f.pts));
+        }
+        for k in &self.keepouts {
+            b.union(&BBox::of(&k.pts));
         }
         if b.is_empty() {
             b = BBox::of(&[p(0.0, 0.0), p(50.0, 40.0)]);
@@ -715,6 +848,7 @@ mod tests {
             graphics: vec![],
             label_at: p(0.0, 2.0),
             locked: false,
+            keepouts: vec![],
         };
         assert_eq!(f.pad_center(0), p(9.0, 10.0));
         f.side = Side::Bottom;
@@ -730,6 +864,117 @@ mod tests {
         let again = Board::load(&b.save()).unwrap();
         assert_eq!(again.tracks, b.tracks);
         assert!(again.next_id > 7);
+    }
+
+    fn part_with_a_keepout(side: Side) -> Footprint {
+        Footprint {
+            id: 4,
+            def: "antenna".into(),
+            refdes: "ANT1".into(),
+            value: String::new(),
+            at: p(20.0, 10.0),
+            rot: 0.0,
+            side,
+            pads: vec![],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+            // Right of the part's centre, 4 wide and 2 tall, on its top side.
+            keepouts: vec![Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(1.0, -1.0), p(5.0, 1.0)), restrict: Restrict::default() }],
+        }
+    }
+
+    #[test]
+    fn keepouts_save_and_load_with_the_board_and_with_a_part() {
+        let mut b = Board::default();
+        let id = b.new_id();
+        b.keepouts.push(Keepout {
+            id,
+            layer: None,
+            pts: rect_outline(p(1.0, 1.0), p(3.0, 2.0)),
+            restrict: Restrict { vias: true, tracks: false, pours: true, smd_pads: false, th_pads: true },
+        });
+        b.footprints.push(part_with_a_keepout(Side::Top));
+        let again = Board::load(&b.save()).unwrap();
+        assert_eq!(again.keepouts, b.keepouts);
+        assert_eq!(again.footprints[0].keepouts, b.footprints[0].keepouts);
+        assert!(!again.keepouts[0].restrict.tracks && again.keepouts[0].restrict.th_pads);
+    }
+
+    #[test]
+    fn a_board_saved_before_keepouts_still_loads() {
+        // The board as an earlier version wrote it: no keepouts anywhere.
+        let mut b = Board::default();
+        b.footprints.push(part_with_a_keepout(Side::Top));
+        let mut v: serde_json::Value = serde_json::from_str(&b.save()).unwrap();
+        v.as_object_mut().unwrap().remove("keepouts");
+        v["footprints"][0].as_object_mut().unwrap().remove("keepouts");
+        let old = Board::load(&v.to_string()).unwrap();
+        assert!(old.keepouts.is_empty() && old.footprints[0].keepouts.is_empty());
+    }
+
+    #[test]
+    fn a_library_footprints_keepouts_come_with_the_part_placed() {
+        let def = crate::pcb::library::FootprintDef {
+            name: "antenna".into(),
+            category: String::new(),
+            description: String::new(),
+            prefix: "ANT".into(),
+            pads: vec![],
+            graphics: vec![],
+            label_at: P::default(),
+            keepouts: part_with_a_keepout(Side::Top).keepouts,
+            source: String::new(),
+        };
+        let f = def.instantiate(9, "ANT2".into(), p(30.0, 5.0));
+        assert_eq!(f.keepouts, def.keepouts);
+        let placed: Vec<PlacedKeepout> = f.placed_keepouts().collect();
+        assert_eq!(placed.len(), 1);
+        assert_eq!(BBox::of(&placed[0].pts), BBox::of(&[p(31.0, 4.0), p(35.0, 6.0)]));
+    }
+
+    #[test]
+    fn a_keepout_goes_with_its_part_turned_and_flipped() {
+        let mut f = part_with_a_keepout(Side::Top);
+        let at = |f: &Footprint| BBox::of(&f.placed_keepouts().next().unwrap().pts);
+        assert_eq!(at(&f), BBox::of(&[p(21.0, 9.0), p(25.0, 11.0)]));
+        // A quarter turn puts it above the part, 2 wide and 4 tall.
+        f.rot = 90.0;
+        let bb = at(&f);
+        assert!((bb.min.x - 19.0).abs() < 1e-9 && (bb.max.x - 21.0).abs() < 1e-9, "{bb:?}");
+        assert!((bb.min.y - 11.0).abs() < 1e-9 && (bb.max.y - 15.0).abs() < 1e-9, "{bb:?}");
+        // Underneath, it's mirrored across the part (to the left), with its
+        // top the board's bottom, and its corners still counter-clockwise.
+        let mut f = part_with_a_keepout(Side::Bottom);
+        assert_eq!(at(&f), BBox::of(&[p(15.0, 9.0), p(19.0, 11.0)]));
+        let k = f.placed_keepouts().next().unwrap();
+        assert_eq!(k.layer, Some(BOTTOM));
+        assert!(ring_area(&k.pts) > 0.0);
+        // A keepout of the part's bottom is the board's top; inner layers and all stay.
+        f.keepouts[0].layer = Some(BOTTOM);
+        assert_eq!(f.placed_keepouts().next().unwrap().layer, Some(TOP));
+        f.keepouts[0].layer = Some(1);
+        assert_eq!(f.placed_keepouts().next().unwrap().layer, Some(1));
+        f.keepouts[0].layer = None;
+        assert_eq!(f.placed_keepouts().next().unwrap().layer, None);
+    }
+
+    #[test]
+    fn restrictions_read_from_altium_bits() {
+        assert_eq!(Restrict::from_altium(31), Restrict::default());
+        let r = Restrict::from_altium(1 | 4);
+        assert!(r.vias && r.pours && !r.tracks && !r.smd_pads && !r.th_pads);
+        assert!(!Restrict::from_altium(0).any());
+    }
+
+    #[test]
+    fn a_concave_keepout_is_taken_as_convex_pieces_that_cover_it() {
+        // An L: 3 × 3 with the corner taken out.
+        let l = vec![p(0.0, 0.0), p(3.0, 0.0), p(3.0, 1.0), p(1.0, 1.0), p(1.0, 3.0), p(0.0, 3.0)];
+        let pieces = convex_pieces(&l);
+        assert!(pieces.len() >= 2 && pieces.iter().all(|c| is_convex(c) && ring_area(c) > 0.0));
+        let total: f64 = pieces.iter().map(|c| ring_area(c)).sum();
+        assert!((total - ring_area(&l)).abs() < 1e-9, "{total} vs {}", ring_area(&l));
     }
 }
 

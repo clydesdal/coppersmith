@@ -210,6 +210,13 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
         let blob = Blob::line(o[i], o[(i + 1) % o.len()], 0.0);
         out.push(Obstacle { bbox: blob.bbox(), blob, gap: r.edge_clearance, item: None, net: EDGE, movable: false });
     }
+    // Keepouts that keep tracks out: walls to every net, up to their edge.
+    for k in board.placed_keepouts().iter().filter(|k| k.restrict.tracks && k.applies_to(layer)) {
+        for piece in k.pieces() {
+            let blob = Blob { core: piece, r: 0.0 };
+            out.push(Obstacle { bbox: blob.bbox(), blob, gap: 0.0, item: None, net: EDGE, movable: false });
+        }
+    }
     out
 }
 
@@ -899,6 +906,7 @@ struct PushBase {
     footprints: Vec<Footprint>,
     vias: Vec<Via>,
     fills: Vec<Fill>,
+    keepouts: Vec<Keepout>,
     outline: Vec<P>,
     rules: Rules,
     layers: u8,
@@ -922,6 +930,7 @@ impl PushBase {
             footprints: board.footprints.clone(),
             vias: board.vias.clone(),
             fills: board.fills.clone(),
+            keepouts: board.keepouts.clone(),
             outline: board.outline.clone(),
             rules: board.rules.clone(),
             layers: board.copper,
@@ -938,6 +947,7 @@ impl PushBase {
             && self.outline == board.outline
             && self.vias == board.vias
             && self.fills == board.fills
+            && self.keepouts == board.keepouts
             && self.footprints == board.footprints
     }
 
@@ -1913,6 +1923,7 @@ mod pushing {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -2099,6 +2110,7 @@ mod via_pushing {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -2186,6 +2198,7 @@ fn pushing_board() -> (Board, u32, u32) {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
     }
     let id = b.new_id();
@@ -2396,6 +2409,7 @@ mod pushing_arcs {
                 graphics: vec![],
                 label_at: P::default(),
                 locked: false,
+                keepouts: vec![],
             });
         }
         for (s0, e, mid) in [
@@ -2475,5 +2489,96 @@ mod pushing_arcs {
         let b2 = after(&b, &moved);
         assert!(problems(&b2, &head).is_empty(), "{:?}", problems(&b2, &head));
         assert!(tangent(&b2), "{:?}", b2.tracks);
+    }
+}
+
+#[cfg(test)]
+mod keepout_walls {
+    use super::*;
+    use crate::pcb::copper::analyse;
+    use crate::pcb::drc;
+
+    fn board(layer: Option<u8>, restrict: Restrict) -> (Board, u32) {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer, pts: rect_outline(p(15.0, 17.0), p(19.0, 23.0)), restrict });
+        (b, n)
+    }
+
+    fn route(b: &Board, n: u32, layer: u8) -> Plan {
+        let scene = Scene::new(b, &analyse(b), layer, n);
+        plan(&scene, p(5.0, 20.0), p(30.0, 20.0), 0.25, Corner::D45, false, Conflict::Walkaround, b.outline_bbox(), &[])
+    }
+
+    /// What the rule check says of the board with the plan laid on it.
+    fn laid(b: &Board, n: u32, layer: u8, plan: &Plan) -> Vec<String> {
+        let mut b = b.clone();
+        for s in plan.pts.windows(2) {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: 0.25, layer, net: n });
+        }
+        drc::check(&b, &analyse(&b)).into_iter().filter(|p| p.title == "In a keepout").map(|p| p.detail).collect()
+    }
+
+    #[test]
+    fn a_keepout_is_a_wall_on_its_layer_and_no_other() {
+        let (b, _) = board(Some(TOP), Restrict::default());
+        let here = BBox::of(&[p(16.0, 20.0)]);
+        let top = obstacles_all(&b, &analyse(&b), TOP);
+        let walls: Vec<&Obstacle> = top.iter().filter(|o| o.item.is_none() && o.net == EDGE && o.bbox.touches(&here)).collect();
+        assert!(!walls.is_empty(), "a wall on the top");
+        assert!(walls.iter().all(|o| !o.movable && o.gap == 0.0));
+        let bottom = obstacles_all(&b, &analyse(&b), BOTTOM);
+        assert!(!bottom.iter().any(|o| o.net == EDGE && o.bbox.touches(&here)), "none underneath");
+    }
+
+    #[test]
+    fn a_route_walks_round_a_keepout_and_so_breaks_no_rule() {
+        let (b, n) = board(Some(TOP), Restrict::default());
+        let plan = route(&b, n, TOP);
+        assert!(!plan.blocked, "{plan:?}");
+        assert!(plan.pts.len() > 2, "it had to go round: {:?}", plan.pts);
+        assert!(plan.pts.last().unwrap().same(p(30.0, 20.0)));
+        assert!(laid(&b, n, TOP, &plan).is_empty(), "{:?}", laid(&b, n, TOP, &plan));
+    }
+
+    #[test]
+    fn a_route_goes_straight_where_the_keepout_isnt() {
+        // On the other layer.
+        let (b, n) = board(Some(TOP), Restrict::default());
+        assert_eq!(route(&b, n, BOTTOM).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+        // Or where it lets tracks through.
+        let (b, n) = board(Some(TOP), Restrict { tracks: false, ..Restrict::default() });
+        assert_eq!(route(&b, n, TOP).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+        // On every layer, it holds on the bottom too.
+        let (b, n) = board(None, Restrict::default());
+        assert!(route(&b, n, BOTTOM).pts.len() > 2);
+    }
+
+    #[test]
+    fn a_keepout_on_a_part_is_a_wall_where_the_part_is() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "K".into(),
+            refdes: "K1".into(),
+            value: String::new(),
+            at: p(17.0, 20.0),
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+            keepouts: vec![Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-2.0, -3.0), p(2.0, 3.0)), restrict: Restrict::default() }],
+        });
+        let plan = route(&b, n, TOP);
+        assert!(plan.pts.len() > 2 && laid(&b, n, TOP, &plan).is_empty(), "{:?}", plan.pts);
+        // Moved clear of the route's way, the route is straight again.
+        b.footprints[0].at = p(17.0, 35.0);
+        assert_eq!(route(&b, n, TOP).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
     }
 }

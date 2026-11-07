@@ -50,6 +50,8 @@ pub struct Skipped {
     pub octagons: usize,
     pub slots: usize,
     pub empty_pads: usize,
+    /// Keepouts that were arcs, which aren't taken.
+    pub keepout_arcs: usize,
 }
 
 impl Skipped {
@@ -72,6 +74,9 @@ impl Skipped {
         }
         if self.empty_pads > 0 {
             bits.push(format!("{} pads with no size", self.empty_pads));
+        }
+        if self.keepout_arcs > 0 {
+            bits.push(format!("{} keepout arcs (not taken)", self.keepout_arcs));
         }
         if !bits.is_empty() {
             notes.push(format!("{name}: {}", bits.join(", ")));
@@ -114,8 +119,22 @@ pub fn read(bytes: &[u8], lib: &str) -> Result<Imported, String> {
                 continue;
             }
         };
-        let (pads, graphics) = footprint(&prims, &names, &mut skipped, |q| q, 0.0, false);
-        if pads.is_empty() && graphics.is_empty() {
+        let (pads, graphics, raw_keepouts) = footprint(&prims, &names, &mut skipped, |q| q, 0.0, false);
+        // A library footprint has only a top and a bottom; an inner layer's keepout stands for every layer.
+        let lib_layer = |l: u8| match l {
+            prims::TOP => Some(TOP),
+            prims::BOTTOM => Some(BOTTOM),
+            _ => None,
+        };
+        let keepouts: Vec<Keepout> = raw_keepouts
+            .into_iter()
+            .filter_map(|k| {
+                let inner = (prims::TOP + 1..prims::BOTTOM).contains(&k.layer) || (39..=54).contains(&k.layer);
+                let k = if inner { prims::RawKeepout { layer: prims::MULTI_LAYER, ..k } } else { k };
+                prims::to_keepout(k, lib_layer, false)
+            })
+            .collect();
+        if pads.is_empty() && graphics.is_empty() && keepouts.is_empty() {
             out.notes.push(format!("{name}: empty, left out"));
             continue;
         }
@@ -128,6 +147,7 @@ pub fn read(bytes: &[u8], lib: &str) -> Result<Imported, String> {
             prefix: "U".into(),
             pads,
             graphics,
+            keepouts,
             source: format!("{lib} (Altium)"),
         });
     }
@@ -154,12 +174,23 @@ pub fn footprint(
     local: impl Fn(P) -> P,
     rot: f64,
     bottom: bool,
-) -> (Vec<Pad>, Vec<Graphic>) {
+) -> (Vec<Pad>, Vec<Graphic>, Vec<prims::RawKeepout>) {
     let mut pads = Vec::new();
     let mut graphics = Vec::new();
+    let mut keepouts = Vec::new();
     let layer_for = |l: u8| drawing_layer(l, names).map(|g| if bottom { g.flipped() } else { g });
     let turn = |r: f64| nm(if bottom { rot - r } else { r - rot }.rem_euclid(360.0));
     for prim in prims {
+        // A keepout isn't drawn or counted as copper: it's kept as an area.
+        if let Some(k) = prims::keepout_of(prim) {
+            let pts = k.pts.iter().map(|q| local(*q).rounded()).collect();
+            keepouts.push(prims::RawKeepout { pts, ..k });
+            continue;
+        }
+        if prims::is_keepout_arc(prim) {
+            skipped.keepout_arcs += 1;
+            continue;
+        }
         match prim {
             Prim::Pad { pad, slot, octagon, .. } => {
                 if pad.size.x <= 0.0 || pad.size.y <= 0.0 {
@@ -220,7 +251,7 @@ pub fn footprint(
             Prim::Via { .. } | Prim::Other { .. } => {}
         }
     }
-    (pads, graphics)
+    (pads, graphics, keepouts)
 }
 
 #[cfg(test)]

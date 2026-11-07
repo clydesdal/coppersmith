@@ -90,6 +90,8 @@ struct Around {
     /// Fixed copper (no pours), with its holes.
     items: Vec<(copper::Cu, f64)>,
     bare_holes: Vec<Blob>,
+    /// Keepouts that keep pours out, board's and parts', each as convex pieces.
+    keepouts: Vec<(PlacedKeepout, Vec<Vec<P>>)>,
 }
 
 fn around(board: &Board) -> Around {
@@ -112,7 +114,11 @@ fn around(board: &Board) -> Around {
             }
         }
     }
-    Around { items, bare_holes }
+    let keepouts = board.placed_keepouts().into_iter().filter(|k| k.restrict.pours).map(|k| {
+        let pieces = k.pieces();
+        (k, pieces)
+    }).collect();
+    Around { items, bare_holes, keepouts }
 }
 
 /// What a poured pour keeps for those poured after it on its layer.
@@ -145,6 +151,9 @@ fn signature(board: &Board, pour: &Pour, env: &Around, before: u64) -> u64 {
     for hole in &env.bare_holes {
         pts(&mut h, &hole.core);
         f(&mut h, hole.r);
+    }
+    for (k, _) in env.keepouts.iter().filter(|(k, _)| k.applies_to(pour.layer)) {
+        pts(&mut h, &k.pts);
     }
     for (cu, drill) in &env.items {
         if !cu.on.has(pour.layer) {
@@ -270,6 +279,14 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
                 let side = p(-d.y, d.x).scale(pour.spoke / 2.0);
                 let end = c.add(d.scale(reach));
                 spokes.push(to(&ccw(vec![c.add(side), end.add(side), end.sub(side), c.sub(side)])));
+            }
+        }
+    }
+    // Keepouts that keep pours out, on this layer or every one.
+    for (k, pieces) in &env.keepouts {
+        if k.applies_to(layer) {
+            for piece in pieces {
+                away.push(cut(&Blob { core: piece.clone(), r: 0.0 }, near));
             }
         }
     }
@@ -445,6 +462,7 @@ mod tests {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
         id
     }
@@ -504,6 +522,83 @@ mod tests {
         assert!(b.pours[0].copper_area() < areas[0] - 10.0, "the top pour gave way");
         assert_eq!(sigs[1], b.pours[1].sig);
         assert_eq!(areas[1], b.pours[1].copper_area());
+    }
+
+    fn keepout(b: &mut Board, layer: Option<u8>, restrict: Restrict) -> u32 {
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer, pts: rect_outline(p(15.0, 12.0), p(25.0, 22.0)), restrict });
+        id
+    }
+
+    fn poured_at(b: &Board, pour: usize, q: P) -> bool {
+        b.pours[pour].fill.iter().any(|i| in_shape(q, &i.rings))
+    }
+
+    #[test]
+    fn a_pour_keeps_out_of_a_keepout_and_clear_of_its_edge() {
+        let mut b = two_pours();
+        b.repour();
+        let before: Vec<f64> = b.pours.iter().map(|p| p.copper_area()).collect();
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && poured_at(&b, 1, p(20.0, 17.0)));
+        keepout(&mut b, Some(TOP), Restrict::default());
+        b.repour();
+        // The top pour has a hole where the keepout is; the bottom pour doesn't.
+        assert!(!poured_at(&b, 0, p(20.0, 17.0)), "nothing poured in the keepout");
+        assert!(b.pours[0].copper_area() < before[0] - 90.0, "{} -> {}", before[0], b.pours[0].copper_area());
+        assert!(poured_at(&b, 1, p(20.0, 17.0)) && (b.pours[1].copper_area() - before[1]).abs() < 1e-6);
+        // Held off by the pour's clearance (0.25) from its edge, and no further.
+        assert!(!poured_at(&b, 0, p(14.9, 17.0)), "0.1 from the edge is too near");
+        assert!(poured_at(&b, 0, p(14.5, 17.0)), "0.5 from the edge is fine");
+        // The pour is clear of it by the rule check's own measure too. (The
+        // board's SIG track crosses the keepout, and is rightly reported.)
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        let in_it: Vec<_> = found.iter().filter(|p| p.title == "In a keepout").collect();
+        assert!(in_it.iter().all(|p| p.items.iter().all(|i| matches!(i, Item::Track(_)))), "{in_it:?}");
+        assert!(found.iter().all(|p| !(p.title == "Too close" && p.items.iter().any(|i| matches!(i, Item::Pour(..))))), "{found:?}");
+    }
+
+    #[test]
+    fn a_keepout_on_every_layer_holds_every_pour_off_and_one_that_allows_pours_holds_none() {
+        let mut b = two_pours();
+        b.repour();
+        let k = keepout(&mut b, None, Restrict::default());
+        b.repour();
+        assert!(!poured_at(&b, 0, p(20.0, 17.0)) && !poured_at(&b, 1, p(20.0, 17.0)));
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().restrict = Restrict { pours: false, ..Restrict::default() };
+        b.repour();
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && poured_at(&b, 1, p(20.0, 17.0)), "a keepout that lets pours in isn't a hole");
+    }
+
+    #[test]
+    fn a_pour_is_poured_again_when_a_keepout_moves_and_not_when_nothing_changes() {
+        let mut b = two_pours();
+        let k = keepout(&mut b, Some(TOP), Restrict::default());
+        b.repour();
+        let sig = b.pours[0].sig;
+        b.repour();
+        assert_eq!(sig, b.pours[0].sig, "nothing changed, nothing redone");
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().pts = rect_outline(p(30.0, 5.0), p(35.0, 9.0));
+        b.repour();
+        assert_ne!(sig, b.pours[0].sig);
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && !poured_at(&b, 0, p(32.0, 7.0)));
+        // A keepout on another layer doesn't touch the bottom pour's fingerprint.
+        let bottom = b.pours[1].sig;
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().pts = rect_outline(p(30.0, 5.0), p(36.0, 9.0));
+        b.repour();
+        assert_eq!(bottom, b.pours[1].sig);
+    }
+
+    #[test]
+    fn a_keepout_on_a_part_keeps_pours_out_and_goes_with_the_part() {
+        let mut b = two_pours();
+        let f = pad(&mut b, p(20.0, 30.0), 0, 0.0);
+        b.fp_mut(f).unwrap().keepouts.push(Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-3.0, -3.0), p(3.0, 3.0)), restrict: Restrict::default() });
+        b.repour();
+        assert!(!poured_at(&b, 0, p(20.0, 30.0)) && !poured_at(&b, 0, p(22.0, 32.0)));
+        b.fp_mut(f).unwrap().at = p(40.0, 10.0);
+        b.repour();
+        assert!(poured_at(&b, 0, p(20.0, 30.0)), "where it was, poured again");
+        assert!(!poured_at(&b, 0, p(41.0, 11.0)), "where it is");
     }
 
     #[test]

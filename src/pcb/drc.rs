@@ -1,6 +1,6 @@
 //! Checking the board against its rules before it goes to the maker.
 
-use crate::pcb::copper::{Copper, Cu, Item};
+use crate::pcb::copper::{self, Copper, Cu, Item};
 use std::collections::{HashMap, HashSet};
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
@@ -217,6 +217,75 @@ fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Prob
     }
 }
 
+/// Copper in a keepout that keeps it out: tracks, vias and pads (pours are cut
+/// round keepouts when they're poured). Only what overlaps counts; touching
+/// the edge of a keepout is allowed.
+fn keepout_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
+    let keepouts: Vec<(PlacedKeepout, Vec<Blob>)> = board
+        .placed_keepouts()
+        .into_iter()
+        .filter(|k| k.restrict.any())
+        .map(|k| {
+            let pieces = k.pieces().into_iter().map(|core| Blob { core, r: 0.0 }).collect();
+            (k, pieces)
+        })
+        .collect();
+    if keepouts.is_empty() {
+        return;
+    }
+    for cu in &copper.items {
+        // What kind of copper it is, for what the keepout restricts.
+        let (kind, forbids): (&str, fn(&Restrict) -> bool) = match cu.item {
+            Item::Pour(..) => continue,
+            Item::Track(_) | Item::Fill(_) => ("track", |r| r.tracks),
+            Item::Via(_) => ("via", |r| r.vias),
+            Item::Pad(f, i) => match board.fp(f).and_then(|f| f.pads.get(i as usize)) {
+                Some(pad) if pad.through() => ("through-hole pad", |r| r.th_pads),
+                _ => ("pad", |r| r.smd_pads),
+            },
+        };
+        for (k, pieces) in &keepouts {
+            if !forbids(&k.restrict) {
+                continue;
+            }
+            // Its layers: a via and a through-hole pad are on all of them.
+            let on_layer = match cu.on {
+                copper::On::One(l) => k.applies_to(l),
+                copper::On::All => true,
+            };
+            // A part's own pads aren't held to the part's own keepouts.
+            if !on_layer || matches!((cu.item, k.owner), (Item::Pad(f, _), Some(o)) if f == o) {
+                continue;
+            }
+            let kb = k.bbox();
+            if !kb.touches(&cu.bbox) {
+                continue;
+            }
+            let mut worst: Option<(f64, P)> = None;
+            for (part, pb) in cu.parts.iter().zip(cu.boxes.iter()) {
+                if !kb.touches(pb) {
+                    continue;
+                }
+                for piece in pieces {
+                    let (gap, a, b) = part.gap(piece);
+                    if gap < -1e-6 && worst.is_none_or(|w| gap < w.0) {
+                        worst = Some((gap, a.lerp(b, 0.5)));
+                    }
+                }
+            }
+            if let Some((_, at)) = worst {
+                out.push(Problem {
+                    severity: Severity::Error,
+                    title: "In a keepout".into(),
+                    detail: format!("{} ({}) is in a keepout that keeps {kind}s out", describe(board, cu.item), board.net_name(cu.net)),
+                    at,
+                    items: vec![cu.item],
+                });
+            }
+        }
+    }
+}
+
 /// The problems that are quick to find, looked for afresh every time: thin
 /// tracks, small holes, a missing outline, parts on top of each other, and
 /// connections still to make.
@@ -276,6 +345,8 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
             }
         }
     }
+
+    keepout_problems(board, copper, out);
 
     if board.outline.len() < 3 {
         out.push(Problem {
@@ -402,6 +473,137 @@ mod tests {
         go(&mut b, "a smaller board");
         b.outline.clear();
         go(&mut b, "no outline");
+    }
+
+    fn square(b: &mut Board, layer: Option<u8>, lo: (f64, f64), hi: (f64, f64), restrict: Restrict) -> u32 {
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer, pts: rect_outline(p(lo.0, lo.1), p(hi.0, hi.1)), restrict });
+        id
+    }
+
+    fn part(b: &mut Board, at: P, net: u32, drill: f64) -> u32 {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            locked: false,
+            keepouts: vec![],
+        });
+        id
+    }
+
+    fn in_keepouts(b: &Board) -> Vec<Problem> {
+        check(b, &analyse(b)).into_iter().filter(|p| p.title == "In a keepout").collect()
+    }
+
+    #[test]
+    fn copper_in_a_keepout_is_caught_but_touching_its_edge_is_not() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let t = track(&mut b, (5.0, 10.0), (20.0, 10.0), TOP, n);
+        square(&mut b, Some(TOP), (10.0, 8.0), (15.0, 12.0), Restrict::default());
+        let found = in_keepouts(&b);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].items, vec![Item::Track(t)]);
+        assert_eq!(found[0].severity, Severity::Error);
+        // Moved so its edge just touches the top of the keepout: allowed.
+        b.tracks[0].a = p(5.0, 12.125);
+        b.tracks[0].b = p(20.0, 12.125);
+        assert!(in_keepouts(&b).is_empty());
+        // And a little further in, it isn't.
+        b.tracks[0].a = p(5.0, 12.0);
+        b.tracks[0].b = p(20.0, 12.0);
+        assert_eq!(in_keepouts(&b).len(), 1);
+    }
+
+    #[test]
+    fn a_keepout_holds_on_its_own_layer_or_on_every_one() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        track(&mut b, (5.0, 10.0), (20.0, 10.0), BOTTOM, n);
+        let k = square(&mut b, Some(TOP), (10.0, 8.0), (15.0, 12.0), Restrict::default());
+        assert!(in_keepouts(&b).is_empty(), "a track underneath isn't in a keepout on the top");
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().layer = Some(BOTTOM);
+        assert_eq!(in_keepouts(&b).len(), 1);
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().layer = None;
+        assert_eq!(in_keepouts(&b).len(), 1, "every layer");
+    }
+
+    #[test]
+    fn a_keepout_only_keeps_out_what_it_says() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        track(&mut b, (5.0, 10.0), (8.0, 10.0), TOP, n);
+        let vid = b.new_id();
+        b.vias.push(Via { id: vid, at: p(12.0, 10.0), dia: 0.6, drill: 0.3, net: n });
+        part(&mut b, p(12.0, 15.0), n, 0.0);
+        part(&mut b, p(12.0, 18.0), n, 0.5);
+        let k = square(&mut b, Some(TOP), (7.0, 5.0), (14.0, 20.0), Restrict::default());
+        let kinds = |b: &Board| in_keepouts(b).iter().map(|p| p.detail.clone()).collect::<Vec<_>>();
+        let all = kinds(&b);
+        assert_eq!(all.len(), 4, "a track, a via, a surface pad, a through-hole pad: {all:?}");
+        assert!(all.iter().any(|d| d.contains("track")) && all.iter().any(|d| d.contains("via")));
+        assert!(all.iter().any(|d| d.contains("through-hole pad")));
+        for (what, restrict, left) in [
+            ("tracks", Restrict { tracks: false, ..Restrict::default() }, 3),
+            ("vias", Restrict { vias: false, ..Restrict::default() }, 3),
+            ("surface pads", Restrict { smd_pads: false, ..Restrict::default() }, 3),
+            ("through-hole pads", Restrict { th_pads: false, ..Restrict::default() }, 3),
+            ("pours only", Restrict { vias: false, tracks: false, smd_pads: false, th_pads: false, pours: true }, 0),
+        ] {
+            b.keepouts.iter_mut().find(|x| x.id == k).unwrap().restrict = restrict;
+            assert_eq!(kinds(&b).len(), left, "{what} allowed");
+        }
+    }
+
+    #[test]
+    fn a_part_is_not_held_to_its_own_keepout_but_others_are() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let f = part(&mut b, p(20.0, 20.0), n, 0.0);
+        let mine = Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-2.0, -2.0), p(2.0, 2.0)), restrict: Restrict::default() };
+        b.footprints[0].keepouts.push(mine.clone());
+        assert!(in_keepouts(&b).is_empty(), "its own pad is inside its own keepout");
+        // Another part's pad in it is caught, and the keepout goes with the part.
+        part(&mut b, p(21.0, 20.0), n, 0.0);
+        assert_eq!(in_keepouts(&b).len(), 1);
+        b.fp_mut(f).unwrap().at = p(30.0, 30.0);
+        assert!(in_keepouts(&b).is_empty(), "the keepout moved away with its part");
+        // On a part underneath, the keepout's top is the board's bottom.
+        let under = part(&mut b, p(40.0, 20.0), n, 0.0);
+        b.fp_mut(under).unwrap().keepouts.push(mine);
+        b.fp_mut(under).unwrap().side = Side::Bottom;
+        let t = track(&mut b, (38.0, 20.0), (42.0, 20.0), BOTTOM, n);
+        let found = in_keepouts(&b);
+        assert!(found.iter().any(|p| p.items == vec![Item::Track(t)]), "{found:?}");
+        b.tracks.last_mut().unwrap().layer = TOP;
+        assert!(in_keepouts(&b).iter().all(|p| p.items != vec![Item::Track(t)]), "a track on the part's far side is clear");
+    }
+
+    #[test]
+    fn checking_again_notices_a_keepout_come_and_go() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        track(&mut b, (5.0, 10.0), (20.0, 10.0), TOP, n);
+        let c = analyse(&b);
+        let (none, cache) = check_again(&b, &c, None);
+        assert!(none.iter().all(|p| p.title != "In a keepout"));
+        let k = square(&mut b, Some(TOP), (10.0, 8.0), (15.0, 12.0), Restrict::default());
+        let c = analyse(&b);
+        let (found, cache) = check_again(&b, &c, Some(&cache));
+        assert_eq!(found.iter().filter(|p| p.title == "In a keepout").count(), 1);
+        b.keepouts.retain(|x| x.id != k);
+        let c = analyse(&b);
+        let (gone, _) = check_again(&b, &c, Some(&cache));
+        assert!(gone.iter().all(|p| p.title != "In a keepout"));
     }
 
     #[test]

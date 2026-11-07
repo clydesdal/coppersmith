@@ -336,7 +336,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     // Regions are kept twice, plainly and shape-based (with their arcs): one of each.
     let mut seen = std::collections::HashSet::new();
     prims.retain(|pr| match pr {
-        Prim::Region { head, pts, kind, cutout } => {
+        Prim::Region { head, pts, kind, cutout, .. } => {
             let bb = BBox::of(pts);
             let k = |v: f64| (v * 1000.0).round() as i64;
             seen.insert((head.layer, head.net, head.component, head.polygon, *kind, *cutout, k(bb.min.x), k(bb.min.y), k(bb.max.x), k(bb.max.y)))
@@ -408,7 +408,16 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             let d = at(q).sub(pos).rot(-rot);
             if bottom { p(-d.x, d.y) } else { d }
         };
-        let (mut pads, graphics) = footprint(&mine, &names, &mut skipped, local, rot, bottom);
+        let (mut pads, graphics, raw_keepouts) = footprint(&mine, &names, &mut skipped, local, rot, bottom);
+        // Its keepouts, in its own terms: layers swap for a part underneath.
+        let keepouts: Vec<Keepout> = raw_keepouts
+            .into_iter()
+            .filter_map(|k| {
+                let mut k = prims::to_keepout(k, &copper_of, bottom)?;
+                k.id = 0;
+                Some(k)
+            })
+            .collect();
         // Nets go on the pads.
         let pad_nets: Vec<u32> = mine.iter().filter_map(|pr| if let Prim::Pad { head, pad, .. } = pr { (pad.size.x > 0.0 && pad.size.y > 0.0).then(|| net(head.net)) } else { None }).collect();
         for (pad, n) in pads.iter_mut().zip(pad_nets) {
@@ -427,6 +436,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             pads,
             graphics,
             locked: rec.get("LOCKED").is_some_and(|v| v == "TRUE"),
+            keepouts,
         });
     }
     skipped.note(&mut notes, "Parts");
@@ -434,7 +444,29 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     // Free copper: tracks, arcs and vias. Pour fill (tracks and regions
     // belonging to polygons) is left out with the pours.
     let (mut pour_bits, mut free_pads, mut copper_fills, mut blind) = (0usize, 0usize, 0usize, 0usize);
+    let (mut keepout_arcs, mut keepout_outlines) = (0usize, 0usize);
     for prim in free {
+        // Areas kept free of copper, not copper: tracks, fills and regions
+        // flagged as keepouts, and what's drawn on the Keep-Out layer.
+        if let Some(raw) = prims::keepout_of(&prim) {
+            let raw = prims::RawKeepout { pts: raw.pts.iter().map(|q| at(*q)).collect(), ..raw };
+            // Altium boards often draw the board's shape on the Keep-Out layer, to
+            // mark where copper may go: a shape on it that covers most of the board
+            // is that boundary, not an area to keep out of.
+            if raw.layer == prims::KEEPOUT_LAYER && ring_area(&raw.pts).abs() >= 0.8 * ring_area(&b.outline).abs() {
+                keepout_outlines += 1;
+                continue;
+            }
+            if let Some(mut k) = prims::to_keepout(raw, copper_of, false) {
+                k.id = b.new_id();
+                b.keepouts.push(k);
+            }
+            continue;
+        }
+        if prims::is_keepout_arc(&prim) {
+            keepout_arcs += 1;
+            continue;
+        }
         match prim {
             Prim::Track { head, a, b: e, w } => {
                 if head.polygon != NONE {
@@ -458,7 +490,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
                 b.vias.push(Via { id, at: at(v), dia: nm(dia), drill: nm(hole), net: net(head.net) });
                 let _ = head;
             }
-            Prim::Region { head, pts, kind, cutout } if prims::is_copper(head.layer) => {
+            Prim::Region { head, pts, kind, cutout, .. } if prims::is_copper(head.layer) => {
                 if head.polygon != NONE {
                     // Poured copper: poured again from the pour's outline.
                     pour_bits += 1;
@@ -488,6 +520,12 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
         }
     }
     let _ = (&mut blind, pour_bits);
+    if keepout_arcs > 0 {
+        notes.push(format!("{keepout_arcs} keepout arcs weren't taken"));
+    }
+    if keepout_outlines > 0 {
+        notes.push(format!("{keepout_outlines} shapes on the Keep-Out layer outline the board, so aren't keepouts"));
+    }
 
     // Pours and split planes, poured again here from their outlines.
     let (mut pours, mut hatched, mut shelved) = (0usize, 0usize, 0usize);

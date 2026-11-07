@@ -21,6 +21,8 @@ pub enum Tool {
     Via,
     Outline,
     Pour,
+    /// An area kept free of copper pouring in (and more, if it says).
+    Keepout,
     Place,
 }
 
@@ -31,6 +33,7 @@ pub enum Sel {
     Via(u32),
     Pour(u32),
     Fill(u32),
+    Keepout(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -432,6 +435,7 @@ impl App {
             Sel::Via(id) => doc.via(id).is_some(),
             Sel::Pour(id) => doc.pour(id).is_some(),
             Sel::Fill(id) => doc.fill(id).is_some(),
+            Sel::Keepout(id) => doc.keepout(id).is_some(),
         });
     }
 
@@ -523,6 +527,9 @@ impl App {
             }
         }
         for v in board.fills.iter_mut().filter(|v| picked.contains(&Sel::Fill(v.id))) {
+            v.pts = v.pts.iter().map(shift).collect();
+        }
+        for v in board.keepouts.iter_mut().filter(|v| picked.contains(&Sel::Keepout(v.id))) {
             v.pts = v.pts.iter().map(shift).collect();
         }
         for t in board.tracks.iter_mut().filter(|t| picked.contains(&Sel::Track(t.id))) {
@@ -657,6 +664,7 @@ impl App {
             b.vias.retain(|v| !sel.contains(&Sel::Via(v.id)));
             b.pours.retain(|v| !sel.contains(&Sel::Pour(v.id)));
             b.fills.retain(|v| !sel.contains(&Sel::Fill(v.id)));
+            b.keepouts.retain(|v| !sel.contains(&Sel::Keepout(v.id)));
         });
     }
 
@@ -706,6 +714,13 @@ impl App {
                         v.pts = v.pts.iter().map(|q| q.add(p(step, -step)).rounded()).collect();
                         made.push(Sel::Fill(v.id));
                         b.fills.push(v);
+                    }
+                    Sel::Keepout(id) => {
+                        let Some(mut v) = b.keepout(id).cloned() else { continue };
+                        v.id = b.new_id();
+                        v.pts = v.pts.iter().map(|q| q.add(p(step, -step)).rounded()).collect();
+                        made.push(Sel::Keepout(v.id));
+                        b.keepouts.push(v);
                     }
                 }
             }
@@ -785,6 +800,31 @@ impl App {
         self.sel = vec![Sel::Pour(made)];
         let name = self.doc.net_name(net).to_string();
         self.notice = Some(format!("Poured {name} on {}; change its net and settings on the right", Layer::Cu(layer).name().to_lowercase()));
+    }
+
+    /// Closes the keepout being drawn: on the layer in use, keeping pours out.
+    /// Its card on the right says what else it keeps out, and on which layers.
+    pub fn close_keepout(&mut self) {
+        if self.outline.len() < 3 {
+            self.notice = Some("A keepout needs three corners or more.".into());
+            return;
+        }
+        let mut ring = std::mem::take(&mut self.outline);
+        if ring_area(&ring) < 0.0 {
+            ring.reverse();
+        }
+        let layer = self.layer;
+        let mut made = 0;
+        self.edit(|b| {
+            let id = b.new_id();
+            b.keepouts.push(Keepout { id, layer: Some(layer), pts: ring, restrict: Restrict::pours_only() });
+            made = id;
+        });
+        self.sel = vec![Sel::Keepout(made)];
+        self.notice = Some(format!(
+            "Keepout on {}: pours keep out of it. Change what it keeps out, and its layer, on the right",
+            Layer::Cu(layer).name().to_lowercase()
+        ));
     }
 
     pub fn close_outline(&mut self) {
@@ -1257,6 +1297,8 @@ impl App {
                 self.close_outline();
             } else if self.tool == Tool::Pour {
                 self.close_pour();
+            } else if self.tool == Tool::Keepout {
+                self.close_keepout();
             }
         }
         if pressed(Key::Backspace) {
@@ -1285,6 +1327,9 @@ impl App {
         }
         if pressed(Key::P) {
             self.set_tool(Tool::Pour);
+        }
+        if pressed(Key::K) {
+            self.set_tool(Tool::Keepout);
         }
         // Space turns a part being dragged or placed, as R does.
         if hit(Key::Space, false) || hit(Key::Space, true) {
@@ -1348,6 +1393,7 @@ impl App {
             Sel::Via(id) => net(Item::Via(id)),
             Sel::Pour(id) => self.doc.pour(id).map(|p| p.net),
             Sel::Fill(id) => self.doc.fill(id).map(|p| p.net),
+            Sel::Keepout(_) => None,
             Sel::Fp(id) => {
                 let q = self.hover_q?;
                 let f = self.doc.fp(id)?;

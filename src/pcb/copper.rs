@@ -425,6 +425,7 @@ mod tests {
             graphics: vec![],
             label_at: P::default(),
             locked: false,
+            keepouts: vec![],
         });
         id
     }

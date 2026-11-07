@@ -229,7 +229,7 @@ fn run() -> Result<(), String> {
         let t = std::time::Instant::now();
         let cu = copper::analyse(&board);
         eprintln!("[time] analyse {:?} ({} items, {} parts)", t.elapsed(), cu.items.len(), cu.items.iter().map(|c| c.parts.len()).sum::<usize>());
-        eprintln!("[count] tracks {} vias {} fps {} pours {} fills {}", board.tracks.len(), board.vias.len(), board.footprints.len(), board.pours.len(), board.fills.len());
+        eprintln!("[count] tracks {} vias {} fps {} pours {} fills {} keepouts {} (on parts {})", board.tracks.len(), board.vias.len(), board.footprints.len(), board.pours.len(), board.fills.len(), board.keepouts.len(), board.footprints.iter().map(|f| f.keepouts.len()).sum::<usize>());
         let t = std::time::Instant::now();
         let found = drc::check(&board, &cu);
         eprintln!("[time] drc {:?}", t.elapsed());
