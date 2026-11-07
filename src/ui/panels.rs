@@ -47,7 +47,7 @@ fn row(ui: &mut Ui, key: &str, value: &str) {
 }
 
 /// A label on the left and something to change on the right.
-fn field<R>(ui: &mut Ui, key: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn field<R>(ui: &mut Ui, key: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(key).color(DIM));

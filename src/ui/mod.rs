@@ -6,6 +6,8 @@ pub mod app;
 pub mod chrome;
 pub mod dock;
 pub mod icons;
+pub mod libedit;
+pub mod libview;
 pub mod panels;
 pub mod play;
 pub mod routing;

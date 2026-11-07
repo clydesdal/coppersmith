@@ -120,6 +120,8 @@ pub struct Launch {
     pub select: Option<String>,
     /// The window's layout in words, for `--layout`.
     pub layout: Option<String>,
+    /// A library to open in the library editor, for `--library`.
+    pub library: Option<PathBuf>,
 }
 
 pub enum Asked {
@@ -221,6 +223,8 @@ pub struct App {
     prefs_saved: Option<Prefs>,
     /// The keyboard shortcuts window.
     pub show_keys: bool,
+    /// The library editor, while it's open in place of the board.
+    pub libwin: Option<crate::ui::libview::LibWindow>,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
     after_save: Option<Then>,
@@ -319,6 +323,7 @@ impl App {
             filter: prefs.filter,
             prefs_saved: None,
             show_keys: false,
+            libwin: None,
             last_field_edit: -10.0,
             confirm: None,
             after_save: None,
@@ -1498,7 +1503,55 @@ impl App {
         .filter(|n| *n != 0)
     }
 
+    /// Opens the library editor, on a library file if given.
+    pub fn open_library_editor(&mut self, path: Option<&std::path::Path>) {
+        let kind = match path.and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()) {
+            Some(e) if e == "schlib" => crate::ui::libedit::Kind::Symbols,
+            _ => crate::ui::libedit::Kind::Footprints,
+        };
+        let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(kind));
+        if let Some(path) = path {
+            self.notice = win.open_file(path);
+        }
+    }
+
+    fn show_library_editor(&mut self, ui: &mut Ui) {
+        let Some(mut win) = self.libwin.take() else { return };
+        let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
+        let out = win.show(ui, &known);
+        if out.notice.is_some() {
+            self.notice = out.notice;
+        }
+        if out.reload_parts {
+            self.lib = Library::load();
+        }
+        if !out.close {
+            self.libwin = Some(win);
+        }
+    }
+
+    /// The bar under the library editor: just what was last said.
+    fn library_status(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.set_height(18.0);
+            match self.notice.clone() {
+                Some(n) => {
+                    if crate::ui::panels::small_icon(ui, crate::ui::icons::Icon::Close, "Dismiss", true).clicked() {
+                        self.notice = None;
+                    }
+                    ui.add(egui::Label::new(egui::RichText::new(n).size(12.5).color(theme::YELLOW)).truncate());
+                }
+                None => {
+                    ui.label(egui::RichText::new("Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them").size(12.0).color(theme::FAINT));
+                }
+            }
+        });
+    }
+
     fn apply_launch(&mut self) {
+        if !self.applied_launch && self.frames >= 8 && let Some(path) = self.launch.library.take() {
+            self.open_library_editor(Some(&path));
+        }
         if self.applied_launch || self.frames < 8 || self.canvas_rect == Rect::NOTHING {
             return;
         }
@@ -1646,13 +1699,23 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll();
         self.save_changes_dialog(&ctx);
-        if self.confirm.is_none() {
+        if self.confirm.is_none() && self.libwin.is_none() {
             self.keys(&ctx);
         }
         self.refresh();
         self.drive_screenshot(&ctx);
         self.apply_launch();
         let width = ctx.content_rect().width();
+        // The library editor takes the window below the menus.
+        if self.libwin.is_some() {
+            let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
+            Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
+            let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
+            Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
+            self.show_library_editor(ui);
+            self.shortcuts_window(&ctx);
+            return;
+        }
         // The menus; under them, if it's switched on, the ribbon of controls.
         let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
         Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
