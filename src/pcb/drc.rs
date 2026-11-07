@@ -142,14 +142,31 @@ pub fn check(board: &Board, copper: &Copper) -> Vec<Problem> {
     let edge = &board.outline;
     if edge.len() >= 3 {
         let n = edge.len();
+        let mut cand: Vec<u32> = Vec::new();
         for cu in items {
             let need = cu.keeps.map(|k| k.1).unwrap_or(r.edge_clearance);
             let mut worst: Option<(f64, P)> = None;
             for k in 0..n {
                 let (a, b) = (edge[k], edge[(k + 1) % n]);
                 let seg = BBox::of(&[a, b]);
-                for (part, bb) in cu.parts.iter().zip(&cu.boxes) {
-                    // Far pieces of a big pour needn't be measured.
+                // A pour's pieces far from this stretch of edge needn't be
+                // measured; the first is always taken so there's a reading.
+                match &cu.grid {
+                    Some(grid) => {
+                        grid.near(&seg.grown(need + 0.01), &mut cand);
+                        if worst.is_none() {
+                            cand.push(0);
+                            cand.sort_unstable();
+                            cand.dedup();
+                        }
+                    }
+                    None => {
+                        cand.clear();
+                        cand.extend(0..cu.parts.len() as u32);
+                    }
+                }
+                for &k in &cand {
+                    let (part, bb) = (&cu.parts[k as usize], &cu.boxes[k as usize]);
                     if cu.parts.len() > 1 && box_gap(bb, &seg) > need + 0.01 && worst.is_some() {
                         continue;
                     }

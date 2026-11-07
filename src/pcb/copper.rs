@@ -54,6 +54,8 @@ pub struct Cu {
     pub parts: Vec<Blob>,
     /// Each part's box.
     pub boxes: Vec<BBox>,
+    /// Finds the parts near a place, for copper made of many (a pour).
+    pub grid: Option<BoxGrid>,
     pub bbox: BBox,
     pub on: On,
     pub net: u32,
@@ -71,7 +73,8 @@ impl Cu {
         for b in &boxes {
             bbox.union(b);
         }
-        Cu { item, blob, parts, boxes, bbox, on, net, anchors, keeps: None }
+        let grid = (boxes.len() > 12).then(|| BoxGrid::new(&boxes));
+        Cu { item, blob, parts, boxes, grid, bbox, on, net, anchors, keeps: None }
     }
 
     /// The gap to another piece of copper and the nearest points, worked
@@ -80,21 +83,48 @@ impl Cu {
     pub fn gap_within(&self, o: &Cu, limit: f64) -> (f64, P, P) {
         let mut best = (f64::MAX, P::default(), P::default());
         let (small, big) = if self.parts.len() <= o.parts.len() { (self, o) } else { (o, self) };
+        let mut near: Vec<u32> = Vec::new();
         for (a, ab) in small.parts.iter().zip(&small.boxes) {
             if box_gap(ab, &big.bbox) >= best.0.min(limit) {
                 continue;
             }
-            for (b, bb) in big.parts.iter().zip(&big.boxes) {
-                if box_gap(ab, bb) >= best.0.min(limit) {
-                    continue;
+            let try_part =|k: usize, best: &mut (f64, P, P)| {
+                if box_gap(ab, &big.boxes[k]) >= best.0.min(limit) {
+                    return;
                 }
-                let g = a.gap(b);
+                let g = a.gap(&big.parts[k]);
                 if g.0 < best.0 {
-                    best = if std::ptr::eq(small, self) { g } else { (g.0, g.2, g.1) };
+                    *best = if std::ptr::eq(small, self) { g } else { (g.0, g.2, g.1) };
+                }
+            };
+            match &big.grid {
+                Some(grid) => {
+                    grid.near(&ab.grown(best.0.min(limit)), &mut near);
+                    for &k in &near {
+                        try_part(k as usize, &mut best);
+                    }
+                }
+                None => {
+                    for k in 0..big.parts.len() {
+                        try_part(k, &mut best);
+                    }
                 }
             }
         }
         best
+    }
+
+    /// The least distance from a point to this copper, worked out exactly
+    /// only where it could be within `tol`; otherwise anything more.
+    pub fn dist_within(&self, q: P, tol: f64) -> f64 {
+        match &self.grid {
+            Some(grid) => {
+                let mut near = Vec::new();
+                grid.near(&BBox { min: q, max: q }.grown(tol), &mut near);
+                near.iter().map(|&k| self.parts[k as usize].dist_to(q)).fold(f64::MAX, f64::min)
+            }
+            None => self.dist_to(q),
+        }
     }
 
     pub fn dist_to(&self, q: P) -> f64 {
@@ -290,7 +320,7 @@ impl Copper {
             .items
             .iter()
             .filter(|c| c.on.has(layer) && c.bbox.grown(tol).contains(q))
-            .map(|c| (c.dist_to(q), c))
+            .map(|c| (c.dist_within(q, tol), c))
             .filter(|(d, _)| *d <= tol)
             .collect();
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
