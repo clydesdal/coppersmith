@@ -895,6 +895,19 @@ impl Placed {
     }
 }
 
+/// A font of this height in millimetres on the sheet, so text grows and shrinks
+/// with the drawing as the footprints' does; none once it would be too small to read.
+fn sized(tr: &Tr, mm: f64) -> Option<FontId> {
+    let px = (mm * tr.s) as f32;
+    (px >= 3.5).then(|| FontId::proportional(px))
+}
+
+/// How far a small offset from a text's anchor goes at this zoom (the sheet's
+/// first zoom, 11 px to the millimetre, is 1).
+fn nudge(tr: &Tr) -> f32 {
+    (tr.s / 11.0).clamp(0.2, 4.0) as f32
+}
+
 fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: bool) {
     let fade = |c: Color32| if ghost { c.gamma_multiply(0.6) } else { c };
     let body = fade(if on && !ghost { ACCENT } else { BODY });
@@ -935,7 +948,9 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
                 painter.add(egui::Shape::closed_line(pts.collect(), stroke));
             }
             Drawing::Text { at, text } => {
-                painter.text(t(*at), Align2::LEFT_BOTTOM, text, FontId::proportional(12.0), body);
+                if let Some(font) = sized(tr, 1.1) {
+                    painter.text(t(*at), Align2::LEFT_BOTTOM, text, font, body);
+                }
             }
         }
     }
@@ -948,25 +963,32 @@ fn draw_part(painter: &egui::Painter, tr: &Tr, part: &Placed, on: bool, ghost: b
         let rad = pin.angle.to_radians();
         let dir = vec2(rad.cos() as f32, -(rad.sin() as f32));
         let mid = (a + tip.to_vec2()) / 2.0;
-        if tr.len(1.0) > 4.0 {
-            painter.text(mid + vec2(-dir.y, dir.x) * 8.0, Align2::CENTER_CENTER, &pin.number, FontId::proportional(10.5), fade(DIM));
+        let k = nudge(tr);
+        if let Some(font) = sized(tr, 0.95) {
+            painter.text(mid + vec2(-dir.y, dir.x) * 8.0 * k, Align2::CENTER_CENTER, &pin.number, font, fade(DIM));
         }
-        if tr.len(1.0) > 6.0 && !pin.name.is_empty() {
+        if !pin.name.is_empty()
+            && let Some(font) = sized(tr, 1.05)
+        {
             let (anchor, align) = match ((pin.angle / 90.0).round() as i32) & 3 {
-                0 => (a + vec2(5.0, 0.0), Align2::LEFT_CENTER),
-                2 => (a + vec2(-5.0, 0.0), Align2::RIGHT_CENTER),
-                1 => (a + vec2(0.0, -5.0), Align2::CENTER_BOTTOM),
-                _ => (a + vec2(0.0, 5.0), Align2::CENTER_TOP),
+                0 => (a + vec2(5.0 * k, 0.0), Align2::LEFT_CENTER),
+                2 => (a + vec2(-5.0 * k, 0.0), Align2::RIGHT_CENTER),
+                1 => (a + vec2(0.0, -5.0 * k), Align2::CENTER_BOTTOM),
+                _ => (a + vec2(0.0, 5.0 * k), Align2::CENTER_TOP),
             };
-            painter.text(anchor, align, &pin.name, FontId::proportional(11.5), fade(FG));
+            painter.text(anchor, align, &pin.name, font, fade(FG));
         }
     }
     let bb = part.bbox();
     if !part.designator.is_empty() {
-        painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -3.0), Align2::LEFT_BOTTOM, &part.designator, FontId::proportional(13.0), fade(FG));
+        if let Some(font) = sized(tr, 1.2) {
+            painter.text(tr.pt(p(bb.min.x, bb.max.y)) + vec2(0.0, -3.0 * nudge(tr)), Align2::LEFT_BOTTOM, &part.designator, font, fade(FG));
+        }
     }
     if !part.value.is_empty() {
-        painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 3.0), Align2::LEFT_TOP, &part.value, FontId::proportional(12.0), fade(DIM));
+        if let Some(font) = sized(tr, 1.1) {
+            painter.text(tr.pt(p(bb.min.x, bb.min.y)) + vec2(0.0, 3.0 * nudge(tr)), Align2::LEFT_TOP, &part.value, font, fade(DIM));
+        }
     }
 }
 
@@ -983,20 +1005,27 @@ fn draw_label(painter: &egui::Painter, tr: &Tr, at: P, text: &str, kind: LabelKi
     match kind {
         LabelKind::Net => {
             painter.circle_filled(c, 2.5, color);
-            painter.text(c + vec2(4.0, -3.0), Align2::LEFT_BOTTOM, text, FontId::proportional(13.0), color);
+            if let Some(font) = sized(tr, 1.2) {
+                let k = nudge(tr);
+                painter.text(c + vec2(4.0 * k, -3.0 * k), Align2::LEFT_BOTTOM, text, font, color);
+            }
         }
         LabelKind::Power => {
             let top = c + step * 14.0;
             let side = vec2(-step.y, step.x);
             painter.line_segment([c, top], Stroke::new(1.6, color));
             painter.line_segment([top + side * 7.0, top - side * 7.0], Stroke::new(2.0, color));
-            painter.text(top + step * 4.0, if step.y < 0.0 { Align2::CENTER_BOTTOM } else if step.y > 0.0 { Align2::CENTER_TOP } else if step.x > 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER }, text, FontId::proportional(12.5), color);
+            if let Some(font) = sized(tr, 1.15) {
+                painter.text(top + step * 4.0 * nudge(tr), if step.y < 0.0 { Align2::CENTER_BOTTOM } else if step.y > 0.0 { Align2::CENTER_TOP } else if step.x > 0.0 { Align2::LEFT_CENTER } else { Align2::RIGHT_CENTER }, text, font, color);
+            }
         }
         LabelKind::Port => {
-            let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(12.5), color);
-            let r = Rect::from_min_size(c + vec2(0.0, -galley.size().y / 2.0 - 3.0), galley.size() + vec2(14.0, 6.0));
+            let k = nudge(tr);
+            let font = sized(tr, 1.15).unwrap_or_else(|| FontId::proportional(3.5));
+            let galley = painter.layout_no_wrap(text.to_string(), font, color);
+            let r = Rect::from_min_size(c + vec2(0.0, -galley.size().y / 2.0 - 3.0 * k), galley.size() + vec2(14.0 * k, 6.0 * k));
             painter.rect_stroke(r, 2.0, Stroke::new(1.4, color), egui::StrokeKind::Middle);
-            painter.galley(r.min + vec2(7.0, 3.0), galley, color);
+            painter.galley(r.min + vec2(7.0 * k, 3.0 * k), galley, color);
         }
     }
     let _ = pos2(0.0, 0.0);
