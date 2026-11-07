@@ -1136,6 +1136,22 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    /// Prints the tracks and vias of one net:
+    /// COPPERSMITH_BOARD=file COPPERSMITH_NET=name cargo test dump_net -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_net() {
+        let (Some(f), Some(name)) = (std::env::var_os("COPPERSMITH_BOARD"), std::env::var("COPPERSMITH_NET").ok()) else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&f)).unwrap().board;
+        let Some(net) = b.net_by_name(&name) else { return println!("no net {name}") };
+        for t in b.tracks.iter().filter(|t| t.net == net) {
+            println!("track {} layer {} w {:.4} ({:.4},{:.4}) -> ({:.4},{:.4}) mid {:?}", t.id, t.layer, t.w, t.a.x, t.a.y, t.b.x, t.b.y, t.mid.map(|m| (m.x, m.y)));
+        }
+        for v in b.vias.iter().filter(|v| v.net == net) {
+            println!("via {} at ({:.4},{:.4})", v.id, v.at.x, v.at.y);
+        }
+    }
+
     /// Prints what's on each copper layer of a board, to see how planes and signals differ:
     /// COPPERSMITH_BOARD=file cargo test dump_layers -- --ignored --nocapture
     #[test]

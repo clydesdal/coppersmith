@@ -115,12 +115,22 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
             let nb = work.tracks[neighbours[0]].clone();
             let far = far_end(&nb, end);
             let v = end.sub(far);
-            if let Some(j) = meet(moved, u, far, v)
-                && j.sub(far).dot(v) > 1e-6
-            {
-                set_end(&mut work.tracks[neighbours[0]], end, j);
-                ends[k] = j;
-                continue;
+            if let Some(j) = meet(moved, u, far, v) {
+                // How far from its far end the neighbour would now reach (negative:
+                // it would turn inside out).
+                let reach = j.sub(far).dot(v) / v.len();
+                if reach > 1e-6 {
+                    set_end(&mut work.tracks[neighbours[0]], end, j);
+                    ends[k] = j;
+                    continue;
+                }
+                // It shrinks to nothing (to within a micron): the track now starts
+                // where the neighbour did, and carries on from whatever was there.
+                if reach > -1e-3 {
+                    set_end(&mut work.tracks[neighbours[0]], end, far);
+                    ends[k] = far;
+                    continue;
+                }
             }
         }
         // An arc corner: the arc keeps its radius and stays tangent, and the
@@ -633,6 +643,51 @@ pub fn drag_joint(board: &mut Board, from: P, to: P) {
 mod tests {
     use super::*;
     use crate::pcb::drc;
+
+    fn run(id: u32, a: P, b: P, net: u32) -> Track {
+        Track { mid: None, id, a, b, w: 0.25, layer: TOP, net }
+    }
+
+    /// The tracks of a net on top, each as its two ends in order, to compare whatever way they're laid.
+    fn ends(b: &Board) -> Vec<((i64, i64), (i64, i64))> {
+        let k = |q: P| ((q.x * 1000.0).round() as i64, (q.y * 1000.0).round() as i64);
+        let mut v: Vec<_> = b.tracks.iter().map(|t| if k(t.a) <= k(t.b) { (k(t.a), k(t.b)) } else { (k(t.b), k(t.a)) }).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn sliding_a_track_in_line_with_the_one_beyond_its_jog_makes_one_track() {
+        // A run down x = 2, a 45° jog over to x = 0, and on down x = 0 to a via.
+        let mut b = Board::default();
+        let n = b.net("N");
+        let id = b.new_id();
+        b.vias.push(Via { id, at: p(0.0, 10.0), dia: 0.6, drill: 0.3, net: n });
+        b.tracks = vec![run(1, p(2.0, 0.0), p(2.0, 5.0), n), run(2, p(2.0, 5.0), p(0.0, 7.0), n), run(3, p(0.0, 7.0), p(0.0, 10.0), n)];
+        // The lower run slides over to x = 2: the jog is gone, and it carries on from the upper one.
+        assert!(slide(&mut b, 3, p(2.0, 0.0)), "the slide is made");
+        crate::ui::app::tidy_tracks(&mut b, &HashSet::new());
+        // Down x = 2 as one track, then a 45° leg back to the via.
+        assert_eq!(ends(&b), vec![((0, 10_000), (2_000, 8_000)), ((2_000, 0), (2_000, 8_000))], "{:?}", b.tracks);
+    }
+
+    /// COPPERSMITH_BOARD=... cargo test net_j8_9 -- --nocapture : the case from the user's board.
+    #[test]
+    fn netj8_9_joins_when_its_lower_run_is_slid_in() {
+        let path = std::path::Path::new("/Users/dal/Layouts/EZDISP1V9_LAYOUTS/EZDisplay.PcbDoc");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let mut b = crate::pcb::altium::pcbdoc::read(&bytes, "EZDisplay").unwrap().board;
+        let net = b.net_by_name("NetJ8_9").unwrap();
+        let before = b.tracks.iter().filter(|t| t.net == net && t.layer == 2).count();
+        assert_eq!(before, 4);
+        assert!(slide(&mut b, 1623, p(0.2, 0.0)), "the slide is made");
+        crate::ui::app::tidy_tracks(&mut b, &HashSet::new());
+        let after: Vec<_> = b.tracks.iter().filter(|t| t.net == net && t.layer == 2).collect();
+        // The jog is gone, and the two verticals are one track.
+        let verticals = after.iter().filter(|t| (t.a.x - 176.5).abs() < 1e-3 && (t.b.x - 176.5).abs() < 1e-3).count();
+        assert_eq!(verticals, 1, "{after:?}");
+        assert!(after.iter().all(|t| !(t.a.same(p(176.3, 92.6123)) && t.b.same(p(176.5, 92.4124)))), "the jog is gone");
+    }
 
     #[test]
     fn a_scene_reads_the_same_from_the_quick_listing_as_from_the_full_analysis() {

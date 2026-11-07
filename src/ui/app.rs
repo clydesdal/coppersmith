@@ -1958,6 +1958,18 @@ pub fn note_slow(what: &str, started: std::time::Instant) {
     }
 }
 
+/// Whether a track from `from` to `mid` and another from `mid` to `to` carry on
+/// in one straight line, going the same way: the joint lies within half a
+/// micron of the line from end to end. (Boards from Altium are rounded to a
+/// nanometre or so, so the same line is never exact to the last digit.)
+fn carries_on(from: P, mid: P, to: P) -> bool {
+    let (d1, d2, whole) = (mid.sub(from), to.sub(mid), to.sub(from));
+    if d1.len() < 1e-9 || d2.len() < 1e-9 || d1.dot(d2) <= 0.0 {
+        return false;
+    }
+    whole.cross(mid.sub(from)).abs() / whole.len() <= 5e-4
+}
+
 /// Joins a track to the next when they carry straight on, so a route laid in
 /// clicks doesn't leave a string of short pieces.
 pub(crate) fn merge_straight(b: &mut Board) {
@@ -2011,8 +2023,7 @@ pub(crate) fn merge_straight(b: &mut Board) {
                     continue;
                 }
                 let far_u = if u.a.same(mid) { u.b } else { u.a };
-                let (d1, d2) = (mid.sub(far_t), far_u.sub(mid));
-                if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
+                if !carries_on(far_t, mid, far_u) {
                     continue;
                 }
                 if at_b {
@@ -2147,8 +2158,7 @@ pub(crate) fn merge_straight_slow(b: &mut Board) {
                         continue;
                     }
                     let far_u = if u.a.same(mid) { u.b } else { u.a };
-                    let (d1, d2) = (mid.sub(far_t), far_u.sub(mid));
-                    if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
+                    if !carries_on(far_t, mid, far_u) {
                         continue;
                     }
                     // Something else joining in the middle keeps the corner.
