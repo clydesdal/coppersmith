@@ -646,6 +646,81 @@ pub struct Net {
     pub name: String,
 }
 
+/// A named group of nets (Altium's net class), which rules can be asked of.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NetClass {
+    pub name: String,
+    pub nets: Vec<u32>,
+}
+
+/// Two nets routed as a differential pair.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DiffPair {
+    pub name: String,
+    pub pos: u32,
+    pub neg: u32,
+}
+
+/// A named group of differential pairs, such as a controlled-impedance bus.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PairClass {
+    pub name: String,
+    /// Names of the pairs in it.
+    pub pairs: Vec<String>,
+}
+
+/// What a class rule is about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClassRuleKind {
+    /// Track widths.
+    Width,
+    /// Width and gap for the two tracks of a pair.
+    PairRouting,
+    /// How alike in length the nets are to be.
+    MatchedLengths,
+}
+
+/// Which nets a class rule is for.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum ClassScope {
+    NetClass(String),
+    PairClass(String),
+}
+
+/// The widths and gaps a rule allows on one copper layer (mm); `None` where
+/// it says nothing.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LayerLimit {
+    pub layer: u8,
+    pub min_width: Option<f64>,
+    pub pref_width: Option<f64>,
+    pub max_width: Option<f64>,
+    pub min_gap: Option<f64>,
+    pub pref_gap: Option<f64>,
+    pub max_gap: Option<f64>,
+}
+
+/// A rule asked of a class of nets or pairs, rather than of the whole board.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ClassRule {
+    pub name: String,
+    pub kind: ClassRuleKind,
+    pub scope: ClassScope,
+    /// Per layer; layer `u8::MAX` stands for every layer.
+    pub layers: Vec<LayerLimit>,
+    /// For matched lengths: how far apart the lengths may be.
+    pub tolerance: Option<f64>,
+    /// For pair routing: the most that may run uncoupled.
+    pub max_uncoupled: Option<f64>,
+}
+
+impl ClassRule {
+    /// What it allows on a layer: that layer's own limits, or the all-layers ones.
+    pub fn on(&self, layer: u8) -> Option<&LayerLimit> {
+        self.layers.iter().find(|l| l.layer == layer).or_else(|| self.layers.iter().find(|l| l.layer == u8::MAX))
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Rules {
     pub clearance: f64,
@@ -770,6 +845,15 @@ pub struct Board {
     pub keepouts: Vec<Keepout>,
     /// Net 0 is "not connected"; it's never stored here.
     pub nets: Vec<Net>,
+    /// Groups of nets, differential pairs, groups of pairs, and the rules asked of them.
+    #[serde(default)]
+    pub net_classes: Vec<NetClass>,
+    #[serde(default)]
+    pub diff_pairs: Vec<DiffPair>,
+    #[serde(default)]
+    pub pair_classes: Vec<PairClass>,
+    #[serde(default)]
+    pub class_rules: Vec<ClassRule>,
     pub rules: Rules,
     pub next_id: u32,
 }
@@ -788,6 +872,10 @@ impl Default for Board {
             fills: Vec::new(),
             keepouts: Vec::new(),
             nets: Vec::new(),
+            net_classes: Vec::new(),
+            diff_pairs: Vec::new(),
+            pair_classes: Vec::new(),
+            class_rules: Vec::new(),
             rules: Rules::default(),
             next_id: 1,
         }
@@ -859,12 +947,56 @@ impl Board {
         self.nets.iter().find(|n| n.name.eq_ignore_ascii_case(name)).map(|n| n.id)
     }
 
+    /// The differential pair a net is one side of, if the board defines it.
+    pub fn pair_of(&self, net: u32) -> Option<&DiffPair> {
+        if net == 0 {
+            return None;
+        }
+        self.diff_pairs.iter().find(|d| d.pos == net || d.neg == net)
+    }
+
+    /// The net classes a net belongs to.
+    pub fn net_classes_of(&self, net: u32) -> Vec<&NetClass> {
+        self.net_classes.iter().filter(|c| c.nets.contains(&net)).collect()
+    }
+
+    /// The classes of pairs the net's pair belongs to.
+    pub fn pair_classes_of(&self, net: u32) -> Vec<&PairClass> {
+        match self.pair_of(net) {
+            Some(d) => self.pair_classes.iter().filter(|c| c.pairs.iter().any(|p| p.eq_ignore_ascii_case(&d.name))).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The rules asked of the classes a net is in.
+    pub fn class_rules_for(&self, net: u32) -> Vec<&ClassRule> {
+        let nets: Vec<&str> = self.net_classes_of(net).iter().map(|c| c.name.as_str()).collect();
+        let pairs: Vec<&str> = self.pair_classes_of(net).iter().map(|c| c.name.as_str()).collect();
+        self.class_rules
+            .iter()
+            .filter(|r| match &r.scope {
+                ClassScope::NetClass(n) => nets.iter().any(|x| x.eq_ignore_ascii_case(n)),
+                ClassScope::PairClass(n) => pairs.iter().any(|x| x.eq_ignore_ascii_case(n)),
+            })
+            .collect()
+    }
+
+    /// Every net of a pair class (both sides of each pair).
+    pub fn pair_class_nets(&self, class: &str) -> Vec<u32> {
+        let Some(c) = self.pair_classes.iter().find(|c| c.name.eq_ignore_ascii_case(class)) else { return Vec::new() };
+        c.pairs.iter().filter_map(|p| self.diff_pairs.iter().find(|d| d.name.eq_ignore_ascii_case(p))).flat_map(|d| [d.pos, d.neg]).collect()
+    }
+
     /// The other half of a differential pair, found by name (`USB_DP`/`USB_DN`,
     /// `CLK_P`/`CLK_N`, `RX+`/`RX-`, `TX0P`/`TX0N`): the same name with the
     /// polarity swapped, if the board has a net called that.
     pub fn diff_partner(&self, net: u32) -> Option<u32> {
         if net == 0 {
             return None;
+        }
+        // The board's own pairs first; names only where it has none for this net.
+        if let Some(d) = self.pair_of(net) {
+            return Some(if d.pos == net { d.neg } else { d.pos });
         }
         let name = self.nets.iter().find(|n| n.id == net)?.name.to_ascii_uppercase();
         const ENDS: [(&str, &str); 6] = [("_DP", "_DN"), ("DP", "DN"), ("_P", "_N"), ("+", "-"), ("P", "N"), ("_POS", "_NEG")];

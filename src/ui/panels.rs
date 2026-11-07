@@ -247,6 +247,83 @@ pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
     (tracks, vias, length)
 }
 
+/// "0.172 – 0.178 mm", or whichever end the rule gives.
+fn span(u: Unit, lo: Option<f64>, hi: Option<f64>) -> Option<String> {
+    match (lo, hi) {
+        (Some(a), Some(b)) if (a - b).abs() < 1e-6 => Some(u.len(a)),
+        (Some(a), Some(b)) => Some(format!("{} – {}", u.num(a), u.len(b))),
+        (Some(a), None) => Some(format!("from {}", u.len(a))),
+        (None, Some(b)) => Some(format!("up to {}", u.len(b))),
+        (None, None) => None,
+    }
+}
+
+/// The classes a net is in, the pair it's half of, and the rules asked of them:
+/// for a track, the widths and gaps on its layer, and whether its width keeps
+/// to them. Returns the nets of a class if its button is pressed.
+fn class_card(ui: &mut Ui, board: &Board, net: u32, track: Option<(u8, f64)>, u: Unit) -> Option<Vec<u32>> {
+    let mut pick = None;
+    if net == 0 {
+        return None;
+    }
+    if let Some(d) = board.pair_of(net) {
+        row(ui, "Pair", &d.name);
+    }
+    for c in board.net_classes_of(net) {
+        row(ui, "Net class", &c.name);
+        if ui.small_button(format!("Pick the {} nets of {}", c.nets.len(), c.name)).clicked() {
+            pick = Some(c.nets.clone());
+        }
+    }
+    for c in board.pair_classes_of(net) {
+        row(ui, "Pair class", &c.name);
+        let nets = board.pair_class_nets(&c.name);
+        if ui.small_button(format!("Pick the {} pairs of {}", c.pairs.len(), c.name)).clicked() {
+            pick = Some(nets);
+        }
+    }
+    for r in board.class_rules_for(net) {
+        ui.add_space(2.0);
+        ui.label(RichText::new(&r.name).size(12.0).color(FAINT));
+        match r.kind {
+            ClassRuleKind::Width | ClassRuleKind::PairRouting => {
+                let Some((layer, w)) = track else {
+                    if let Some(v) = r.max_uncoupled {
+                        row(ui, "Uncoupled at most", &u.len(v));
+                    }
+                    continue;
+                };
+                let Some(l) = r.on(layer) else { continue };
+                if let Some(s) = span(u, l.min_width, l.max_width) {
+                    row(ui, "Width allowed", &s);
+                    let (lo, hi) = (l.min_width.unwrap_or(0.0), l.max_width.unwrap_or(f64::MAX));
+                    if w < lo - 1e-6 || w > hi + 1e-6 {
+                        ui.label(RichText::new(format!("This track is {}: outside it", u.len(w))).size(12.0).color(theme::RED));
+                    }
+                }
+                if let Some(p) = l.pref_width {
+                    row(ui, "Preferred width", &u.len(p));
+                }
+                if let Some(s) = span(u, l.min_gap, l.max_gap) {
+                    row(ui, "Pair gap", &s);
+                }
+                if let Some(p) = l.pref_gap {
+                    row(ui, "Preferred gap", &u.len(p));
+                }
+                if let Some(v) = r.max_uncoupled {
+                    row(ui, "Uncoupled at most", &u.len(v));
+                }
+            }
+            ClassRuleKind::MatchedLengths => {
+                if let Some(t) = r.tolerance {
+                    row(ui, "Lengths match within", &u.len(t));
+                }
+            }
+        }
+    }
+    pick
+}
+
 /// What's picked of one net: its track length on each copper layer.
 pub struct NetLength {
     pub net: u32,
@@ -841,6 +918,7 @@ impl App {
         let layers = self.doc.copper_layers();
         let doc_nets = self.doc.clone();
         let mut pick_pair = false;
+        let mut pick_class: Option<Vec<u32>> = None;
         let Some(t) = self.doc.tracks.iter_mut().find(|t| t.id == id) else { return };
         let partner = doc_nets.diff_partner(t.net).map(|p| doc_nets.net_name(p).to_string());
         card(ui, |ui| {
@@ -855,6 +933,7 @@ impl App {
                 });
             });
             field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("track-net", id), &mut t.net));
+            pick_class = class_card(ui, &doc_nets, t.net, Some((t.layer, t.w)), u);
             row(ui, "Length", &u.len(t.length()));
             if t.mid.is_some() {
                 let r = arc_center(t.a, t.mid.unwrap_or_default(), t.b).map(|c| c.1).unwrap_or(0.0);
@@ -873,6 +952,10 @@ impl App {
         });
         if pick_pair {
             self.sel = with_partners(&self.doc, &[Sel::Track(id)]);
+        }
+        if let Some(nets) = pick_class {
+            self.sel = nets.into_iter().flat_map(|n| whole_net(&self.doc, n)).collect();
+            self.show_properties();
         }
     }
 
@@ -1059,19 +1142,51 @@ impl App {
             }
             // Net by net, with the length on each layer: for two nets (a pair), how far apart they are.
             let nets = net_lengths(&self.doc, &self.sel);
-            for n in nets.iter().filter(|n| n.total > 0.0 || n.vias > 0) {
+            let shown: Vec<&NetLength> = nets.iter().filter(|n| n.total > 0.0 || n.vias > 0).collect();
+            let board = &self.doc;
+            for n in &shown {
                 ui.add_space(4.0);
-                ui.label(RichText::new(self.doc.net_name(n.net)).strong());
-                for (l, len) in &n.layers {
-                    row(ui, &Layer::Cu(*l).name(), &u.len(*len));
+                let name = board.net_name(n.net);
+                let lines = |ui: &mut Ui| {
+                    for (l, len) in &n.layers {
+                        row(ui, &Layer::Cu(*l).name(), &u.len(*len));
+                    }
+                    row(ui, "Length", &u.len(n.total));
+                };
+                // A bus is many nets: fold each to its name and length.
+                if shown.len() <= 2 {
+                    ui.label(RichText::new(name).strong());
+                    lines(ui);
+                } else {
+                    egui::CollapsingHeader::new(RichText::new(format!("{name}   {}", u.len(n.total))).strong())
+                        .id_salt(("net-lengths", n.net))
+                        .show(ui, lines);
                 }
-                row(ui, "Length", &u.len(n.total));
             }
             let measured: Vec<&NetLength> = nets.iter().filter(|n| n.total > 0.0).collect();
-            if let [a, b] = measured[..] {
+            if measured.len() >= 2 {
                 ui.add_space(4.0);
-                let pair = self.doc.diff_partner(a.net) == Some(b.net);
-                row(ui, if pair { "Pair mismatch" } else { "Difference" }, &u.len((a.total - b.total).abs()));
+                let longest = measured.iter().max_by(|a, b| a.total.total_cmp(&b.total)).unwrap();
+                let shortest = measured.iter().min_by(|a, b| a.total.total_cmp(&b.total)).unwrap();
+                let spread = longest.total - shortest.total;
+                let pair = measured.len() == 2 && board.diff_partner(longest.net) == Some(shortest.net);
+                row(ui, if pair { "Pair mismatch" } else { "Longest − shortest" }, &u.len(spread));
+                // The match the rules ask of them, if any: the tightest asked of any picked net.
+                let tolerance = measured
+                    .iter()
+                    .flat_map(|n| board.class_rules_for(n.net))
+                    .filter(|r| r.kind == ClassRuleKind::MatchedLengths)
+                    .filter_map(|r| r.tolerance)
+                    .min_by(|a, b| a.total_cmp(b));
+                if let Some(t) = tolerance {
+                    row(ui, "Lengths match within", &u.len(t));
+                    let (text, colour) = if spread <= t + 1e-6 {
+                        ("Within the rule".to_string(), theme::GREEN)
+                    } else {
+                        (format!("Over by {}", u.len(spread - t)), theme::RED)
+                    };
+                    ui.label(RichText::new(text).size(12.0).color(colour));
+                }
             }
             ui.horizontal_wrapped(|ui| {
                 if tool_button(ui, Icon::Rotate, "Turn", true).clicked() {
