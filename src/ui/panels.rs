@@ -234,6 +234,20 @@ fn preview(ui: &mut Ui, def: &FootprintDef, size: Vec2) {
     }
 }
 
+/// A turn in degrees as it's read: up to two decimals, none when it's whole.
+pub(crate) fn format_degrees(deg: f64) -> String {
+    let d = deg.rem_euclid(360.0);
+    let d = if (360.0 - d) < 0.005 { 0.0 } else { d };
+    let s = format!("{d:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The angle of the line from `a` to `b`, in degrees from the X axis, 0 up to 180.
+pub(crate) fn track_angle(a: P, b: P) -> f64 {
+    let d = b.sub(a);
+    d.y.atan2(d.x).to_degrees().rem_euclid(180.0)
+}
+
 /// How many tracks and vias are picked, and the total length of the tracks
 /// (an arc counts along its curve).
 pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
@@ -870,11 +884,25 @@ impl App {
             field(ui, "Value", |ui| ui.add(egui::TextEdit::singleline(&mut f.value).desired_width(140.0)));
             field(ui, "X", |ui| length(ui, u, &mut f.at.x));
             field(ui, "Y", |ui| length(ui, u, &mut f.at.y));
-            field(ui, "Turn", |ui| {
+            // The rotation in degrees: type or drag it to set it, or turn it a quarter. The
+            // part is turned when the edit ends, not at every step of a drag.
+            field(ui, "Rotation", |ui| {
                 if icon_button(ui, Icon::Rotate, false).on_hover_text("Turn 90° (R)").clicked() {
                     rotate = 90.0;
                 }
-                ui.label(RichText::new(format!("{:.1}°", f.rot)).font(theme::mono(12.5)));
+                let key = ui.make_persistent_id(("rotation", id));
+                let mut deg: f64 = ui.data(|d| d.get_temp(key)).unwrap_or(f.rot.rem_euclid(360.0));
+                let r = ui.add(egui::DragValue::new(&mut deg).speed(0.5).range(0.0..=360.0).suffix("°").max_decimals(2));
+                if r.dragged() || r.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(key, deg));
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    ui.data_mut(|d| d.remove_temp::<f64>(key));
+                    let turn = (deg - f.rot).rem_euclid(360.0);
+                    if turn > 1e-6 && (360.0 - turn) > 1e-6 {
+                        rotate = turn;
+                    }
+                }
             });
             field(ui, "Side", |ui| {
                 let mut side = f.side;
@@ -896,6 +924,10 @@ impl App {
                     } else {
                         format!("{}×{}", u.num(pad.size.x), u.num(pad.size.y))
                     };
+                    // Its turn on the board (the part's and its own together), when it has one: a
+                    // pad square to the board says nothing more than the size.
+                    let turn = format_degrees(f.rot + pad.rot);
+                    let kind = if pad.bare_hole() || turn == "0" { kind } else { format!("{kind} · {turn}°") };
                     ui.label(RichText::new(kind).size(11.5).color(FAINT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !pad.bare_hole() {
@@ -935,6 +967,10 @@ impl App {
             field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("track-net", id), &mut t.net));
             pick_class = class_card(ui, &doc_nets, t.net, Some((t.layer, t.w)), u);
             row(ui, "Length", &u.len(t.length()));
+            // A straight track's angle, as a line: 0° along X, up to 180°.
+            if t.mid.is_none() && !t.a.same(t.b) {
+                row(ui, "Angle", &format!("{}°", format_degrees(track_angle(t.a, t.b))));
+            }
             if t.mid.is_some() {
                 let r = arc_center(t.a, t.mid.unwrap_or_default(), t.b).map(|c| c.1).unwrap_or(0.0);
                 row(ui, "Arc radius", &u.len(r));
@@ -1069,6 +1105,8 @@ impl App {
         card(ui, |ui| {
             heading(ui, &format!("Name of {}", f.refdes));
             field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut f.refdes).desired_width(140.0)));
+            // It turns with its part, and is kept readable: never upside down.
+            row(ui, "Rotation", &format!("{}°", format_degrees(f.label_rot())));
             field(ui, "Height", |ui| {
                 let mut h = f.label_height.unwrap_or(board_height);
                 if length(ui, u, &mut h) {
@@ -1324,6 +1362,22 @@ impl App {
 mod quick_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn rotations_read_as_degrees_and_a_tracks_angle_is_its_lines() {
+        assert_eq!(format_degrees(0.0), "0");
+        assert_eq!(format_degrees(90.0), "90");
+        assert_eq!(format_degrees(-90.0), "270");
+        assert_eq!(format_degrees(360.0), "0");
+        assert_eq!(format_degrees(359.999), "0");
+        assert_eq!(format_degrees(45.5), "45.5");
+        assert_eq!(format_degrees(12.345), "12.35");
+        assert!((track_angle(p(0.0, 0.0), p(5.0, 5.0)) - 45.0).abs() < 1e-9);
+        assert!((track_angle(p(5.0, 5.0), p(0.0, 0.0)) - 45.0).abs() < 1e-9, "the line's angle, not which end is first");
+        assert!((track_angle(p(0.0, 0.0), p(0.0, 3.0)) - 90.0).abs() < 1e-9);
+        assert!((track_angle(p(0.0, 0.0), p(-4.0, 4.0)) - 135.0).abs() < 1e-9);
+        assert!(track_angle(p(0.0, 0.0), p(7.0, 0.0)).abs() < 1e-9);
+    }
 
     #[test]
     fn a_pair_is_measured_net_by_net_and_layer_by_layer() {

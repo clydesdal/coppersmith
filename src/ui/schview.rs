@@ -854,6 +854,7 @@ impl SchWindow {
             if part.symbol.parts > 1 {
                 field(ui, "Part", |ui| ui.add(egui::DragValue::new(&mut part.part).range(1..=part.symbol.parts)));
             }
+            ui.label(RichText::new(format!("Rotation {}°{}", u32::from(part.turns & 3) * 90, if part.mirror { " · mirrored" } else { "" })).size(12.5).color(DIM));
             ui.horizontal(|ui| {
                 if ui.button("Turn (R)").clicked() {
                     part.turns = (part.turns + 1) & 3;
@@ -903,6 +904,9 @@ impl SchWindow {
                         }
                     })
                 });
+            }
+            if l.kind != LabelKind::Net {
+                ui.label(RichText::new(format!("Rotation {}°", u32::from(l.turns & 3) * 90)).size(12.5).color(DIM));
             }
             ui.horizontal(|ui| {
                 if ui.button("Turn (R)").clicked() {
