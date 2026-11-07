@@ -669,7 +669,21 @@ mod tests {
             let sc = Scene::new(&b, &cu, layer, 0);
             eprintln!("{name}: Scene::new {:?} ({} obstacles here, {} other layers)", s0.elapsed(), sc.all.len(), sc.others.len());
         }
-        t("analyse (with pours)", &mut || drop(analyse(&b)));
+        // One drag step as the app now does it: analyse, then check what changed.
+        {
+            let cu0 = analyse(&b);
+            let (_, cache) = drc::check_again(&b, &cu0, None);
+            let mut moved = b.clone();
+            assert!(slide(&mut moved, id, p(0.0, 0.1)));
+            let mut cu1 = None;
+            t("step: analyse after a slide", &mut || cu1 = Some(analyse(&moved)));
+            let cu1 = cu1.unwrap();
+            let mut again = None;
+            t("step: drc::check_again", &mut || again = Some(drc::check_again(&moved, &cu1, Some(&cache))));
+            let scratch = drc::check(&moved, &cu1);
+            assert_eq!(again.unwrap().0.len(), scratch.len());
+        }
+        t("analyse (with pours)",&mut || drop(analyse(&b)));
         let cu = analyse(&b);
         t("drc::check", &mut || drop(drc::check(&b, &cu)));
         t("analyse_fixed (no pours)", &mut || drop(crate::pcb::copper::analyse_fixed(&b)));

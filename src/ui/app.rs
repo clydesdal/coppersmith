@@ -131,7 +131,9 @@ pub enum Then {
 
 pub const GRIDS: [f64; 8] = [0.05, 0.1, 0.25, 0.5, 1.0, 0.635, 1.27, 2.54];
 /// While something is dragged or routed, the rule check runs this often at most.
-const CHECK_EVERY: std::time::Duration = std::time::Duration::from_millis(300);
+/// The check only redoes what changed, so this is just a stop against a very
+/// large move making every step wait for it.
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 pub const WIDTHS: [f64; 9] = [0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.8, 1.0, 1.5];
 
 pub struct App {
@@ -149,6 +151,8 @@ pub struct App {
     /// The board change the rule check last ran for.
     checked_rev: u64,
     last_check: std::time::Instant,
+    /// What the last rule check found out, so the next looks only at what changed.
+    check_cache: Option<drc::Cache>,
     /// Whether pours are filled. Off, they keep their areas and settings but
     /// have no copper, so routing and moving run unimpeded and quickly;
     /// switching it on pours them again.
@@ -241,6 +245,7 @@ impl App {
             copper_rev: 0,
             poured_rev: u64::MAX,
             checked_rev: 0,
+            check_cache: None,
             last_check: std::time::Instant::now(),
             flood: true,
             problems: Vec::new(),
@@ -340,7 +345,9 @@ impl App {
         let due = !busy || self.last_check.elapsed() >= CHECK_EVERY;
         if (self.checked_rev != self.rev || repour) && due {
             let started = std::time::Instant::now();
-            self.problems = drc::check(&self.doc, &self.copper);
+            let (problems, cache) = drc::check_again(&self.doc, &self.copper, self.check_cache.as_ref());
+            self.problems = problems;
+            self.check_cache = Some(cache);
             self.checked_rev = self.rev;
             self.last_check = std::time::Instant::now();
             note_slow("checks", started);

@@ -76,6 +76,18 @@ impl Cu {
         Cu { item, blob, parts: parts.blobs, boxes: parts.boxes, grid: parts.grid, bbox: parts.bbox, on, net, anchors, keeps: None }
     }
 
+    /// Is this the same copper, in the same place, on the same net and
+    /// layers, as `o`? What a check reads is all that's compared.
+    pub fn same_as(&self, o: &Cu) -> bool {
+        self.item == o.item
+            && self.net == o.net
+            && self.on == o.on
+            && self.keeps == o.keeps
+            && self.anchors == o.anchors
+            && self.blob == o.blob
+            && (std::sync::Arc::ptr_eq(&self.parts, &o.parts) || self.parts == o.parts)
+    }
+
     /// The gap to another piece of copper and the nearest points, worked
     /// out exactly only where it could be under `limit`;
     /// otherwise anything at least `limit`.
