@@ -157,6 +157,12 @@ pub struct Copper {
     pub group: Vec<usize>,
     pub rats: Vec<Rat>,
     pub index: HashMap<Item, usize>,
+    /// The pairs of items (as places in `items`) that touch and are of one
+    /// net: what the groups are made from. Kept so the next analysis need
+    /// only test pairs that involve copper that has changed.
+    touching: Vec<(usize, usize)>,
+    /// Worked out by `analyse`, so `touching` can be relied on.
+    analysed: bool,
 }
 
 /// All the copper, pours included.
@@ -214,8 +220,10 @@ pub fn collect_fixed(board: &Board) -> Vec<Cu> {
     items
 }
 
-/// Pairs of items on a layer in common whose boxes come within `margin` of each other.
-pub fn near_pairs(items: &[Cu], margin: f64) -> Vec<(usize, usize)> {
+/// Pairs of items on a layer in common whose boxes come within `margin` of
+/// each other, of those `wanted` says yes to. It's asked last, only of pairs
+/// that are near, so a caller wanting few pairs builds a short list.
+pub fn near_pairs_where(items: &[Cu], margin: f64, wanted: impl Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|a, b| items[*a].bbox.min.x.total_cmp(&items[*b].bbox.min.x));
     let mut pairs = Vec::new();
@@ -225,7 +233,7 @@ pub fn near_pairs(items: &[Cu], margin: f64) -> Vec<(usize, usize)> {
             if items[j].bbox.min.x > grown.max.x {
                 break;
             }
-            if grown.touches(&items[j].bbox) && items[i].on.shares(items[j].on) {
+            if grown.touches(&items[j].bbox) && items[i].on.shares(items[j].on) && wanted(i, j) {
                 pairs.push((i.min(j), i.max(j)));
             }
         }
@@ -243,7 +251,14 @@ fn find(parent: &mut [usize], mut i: usize) -> usize {
 
 /// Connectivity and still-to-connect lines, pours included.
 pub fn analyse(board: &Board) -> Copper {
-    analyse_items(collect(board))
+    analyse_items(collect(board), None)
+}
+
+/// The same as `analyse`, given the last one: pairs of copper that haven't
+/// changed since aren't tested again for touching. The answer is what
+/// `analyse` would give.
+pub fn analyse_again(board: &Board, last: &Copper) -> Copper {
+    analyse_items(collect(board), Some(last))
 }
 
 /// Just the copper that stays put, listed, without working out what touches
@@ -253,41 +268,67 @@ pub fn analyse(board: &Board) -> Copper {
 pub fn scene_copper(board: &Board) -> Copper {
     let items = collect_fixed(board);
     let index = items.iter().enumerate().map(|(i, c)| (c.item, i)).collect();
-    Copper { items, group: Vec::new(), rats: Vec::new(), index }
+    Copper { items, group: Vec::new(), rats: Vec::new(), index, touching: Vec::new(), analysed: false }
 }
 
 /// The same leaving pours out: for checking a change before the pours are
 /// poured again round it.
 pub fn analyse_fixed(board: &Board) -> Copper {
-    analyse_items(collect_fixed(board))
+    analyse_items(collect_fixed(board), None)
 }
 
-fn analyse_items(items: Vec<Cu>) -> Copper {
-    let mut parent: Vec<usize> = (0..items.len()).collect();
-    for (i, j) in near_pairs(&items, 0.0) {
+fn analyse_items(items: Vec<Cu>, last: Option<&Copper>) -> Copper {
+    // Which copper is new or different since last time, and the touching
+    // pairs among the rest, which are as they were.
+    let last = last.filter(|l| l.analysed);
+    let mut dirty = vec![true; items.len()];
+    let mut touching: Vec<(usize, usize)> = Vec::new();
+    if let Some(l) = last {
+        let mut now: Vec<Option<usize>> = vec![None; l.items.len()];
+        for (i, c) in items.iter().enumerate() {
+            if let Some(&k) = l.index.get(&c.item)
+                && l.items[k].same_as(c)
+            {
+                dirty[i] = false;
+                now[k] = Some(i);
+            }
+        }
+        touching.extend(l.touching.iter().filter_map(|&(a, b)| Some((now[a]?, now[b]?))));
+    }
+    for (i, j) in near_pairs_where(&items, 0.0, |i, j| dirty[i] || dirty[j]) {
         let (a, b) = (&items[i], &items[j]);
         if a.net == 0 || a.net != b.net || !a.on.shares(b.on) {
             continue;
         }
         if a.gap_within(b, 1e-6).0 <= 1e-6 {
-            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
-            parent[ri] = rj;
+            touching.push((i, j));
         }
+    }
+    let mut parent: Vec<usize> = (0..items.len()).collect();
+    for &(i, j) in &touching {
+        let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+        parent[ri] = rj;
     }
     let group: Vec<usize> = (0..items.len()).map(|i| find(&mut parent, i)).collect();
 
     // Each net's groups, joined up by the shortest lines that link them all.
-    let mut by_net: HashMap<u32, HashMap<usize, Vec<P>>> = HashMap::new();
+    // Groups are kept in the order their first item comes, so the same copper
+    // always gives the same lines.
+    let mut by_net: HashMap<u32, (HashMap<usize, usize>, Vec<Vec<P>>)> = HashMap::new();
     for (i, cu) in items.iter().enumerate() {
         if cu.net != 0 {
-            by_net.entry(cu.net).or_default().entry(group[i]).or_default().extend(cu.anchors.iter().copied());
+            let (slots, groups) = by_net.entry(cu.net).or_default();
+            let slot = *slots.entry(group[i]).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[slot].extend(cu.anchors.iter().copied());
         }
     }
     let mut rats = Vec::new();
     let mut nets: Vec<_> = by_net.into_iter().collect();
     nets.sort_by_key(|(n, _)| *n);
-    for (net, groups) in nets {
-        let groups: Vec<Vec<P>> = groups.into_values().collect();
+    for (net, (_, groups)) in nets {
         let k = groups.len();
         if k < 2 {
             continue;
@@ -326,7 +367,7 @@ fn analyse_items(items: Vec<Cu>) -> Copper {
         }
     }
     let index = items.iter().enumerate().map(|(i, c)| (c.item, i)).collect();
-    Copper { items, group, rats, index }
+    Copper { items, group, rats, index, touching, analysed: true }
 }
 
 impl Copper {
@@ -371,6 +412,85 @@ mod tests {
             locked: false,
         });
         id
+    }
+
+    fn laid(b: &mut Board, a: (f64, f64), e: (f64, f64), layer: u8, net: u32) -> u32 {
+        let id = b.new_id();
+        b.tracks.push(Track { mid: None, id, a: p(a.0, a.1), b: p(e.0, e.1), w: 0.25, layer, net });
+        id
+    }
+
+    /// Which items are joined, however the groups happen to be numbered.
+    fn partition(c: &Copper) -> Vec<usize> {
+        let mut first: HashMap<usize, usize> = HashMap::new();
+        c.group.iter().enumerate().map(|(i, g)| *first.entry(*g).or_insert(i)).collect()
+    }
+
+    /// Analysing again after each change gives what analysing from scratch does.
+    #[test]
+    fn analysing_again_gives_what_analysing_from_scratch_gives() {
+        let mut b = Board::default();
+        let (a, n, g) = (b.net("A"), b.net("B"), b.net("GND"));
+        let pa1 = dot(&mut b, p(5.0, 5.0), a);
+        let pa2 = dot(&mut b, p(30.0, 5.0), a);
+        dot(&mut b, p(5.0, 20.0), n);
+        dot(&mut b, p(30.0, 20.0), n);
+        let ta = laid(&mut b, (5.0, 5.0), (30.0, 5.0), TOP, a);
+        laid(&mut b, (5.0, 20.0), (17.0, 20.0), TOP, n);
+        let id = b.new_id();
+        b.pours.push(Pour::new(id, BOTTOM, g, Vec::new(), &b.rules));
+        b.repour();
+
+        let mut last = Copper::default();
+        let mut step = 0;
+        let mut go = |b: &mut Board, what: &str| -> usize {
+            b.repour();
+            let again = analyse_again(b, &last);
+            let scratch = analyse(b);
+            let items = |c: &Copper| c.items.iter().map(|x| x.item).collect::<Vec<_>>();
+            assert_eq!(items(&again), items(&scratch), "step {step}: {what}: items");
+            assert_eq!(partition(&again), partition(&scratch), "step {step}: {what}: groups");
+            assert_eq!(format!("{:?}", again.rats), format!("{:?}", scratch.rats), "step {step}: {what}: lines");
+            assert_eq!(again.index, scratch.index, "step {step}: {what}: index");
+            let rats = scratch.rats.len();
+            last = again;
+            step += 1;
+            rats
+        };
+        let start = go(&mut b, "the first time");
+        assert_eq!(start, 1, "B's two pads aren't joined yet");
+        assert_eq!(start, go(&mut b, "nothing changed"));
+
+        // Joining B's pads takes the line away.
+        let half = laid(&mut b, (17.0, 20.0), (30.0, 20.0), TOP, n);
+        assert_eq!(go(&mut b, "the second half of B"), 0);
+        // A gap opens in it and the line comes back, then the gap closes.
+        b.tracks.iter_mut().find(|t| t.id == half).unwrap().a = p(20.0, 20.0);
+        assert_eq!(go(&mut b, "a gap in B"), 1);
+        b.tracks.iter_mut().find(|t| t.id == half).unwrap().a = p(17.0, 20.0);
+        assert_eq!(go(&mut b, "the gap closed"), 0);
+        // A's track goes, and its pads are apart.
+        b.tracks.retain(|t| t.id != ta);
+        assert_eq!(go(&mut b, "A's track gone"), 1);
+        // A via where a track of A could join them: on its own it joins nothing.
+        let vid = b.new_id();
+        b.vias.push(Via { id: vid, at: p(17.0, 5.0), dia: 0.6, drill: 0.3, net: a });
+        go(&mut b, "a via");
+        // Tracks on both layers meeting at the via join A's pads.
+        laid(&mut b, (5.0, 5.0), (17.0, 5.0), TOP, a);
+        laid(&mut b, (17.0, 5.0), (30.0, 5.0), BOTTOM, a);
+        let joined = go(&mut b, "A joined through the via");
+        assert_eq!(joined, 1, "the second pad is on top and the track below only ends under it");
+        // A pad moves, and a part goes.
+        b.footprints.iter_mut().find(|f| f.id == pa2).unwrap().at = p(35.0, 8.0);
+        go(&mut b, "a pad moved");
+        b.footprints.retain(|f| f.id != pa1);
+        go(&mut b, "a part removed");
+        // The pour takes another net, and a track changes net.
+        b.pours[0].net = n;
+        go(&mut b, "a pour of another net");
+        b.tracks[0].net = g;
+        go(&mut b, "a track of another net");
     }
 
     #[test]

@@ -676,7 +676,8 @@ mod tests {
             let mut moved = b.clone();
             assert!(slide(&mut moved, id, p(0.0, 0.1)));
             let mut cu1 = None;
-            t("step: analyse after a slide", &mut || cu1 = Some(analyse(&moved)));
+            t("step: analyse after a slide (from scratch)", &mut || cu1 = Some(analyse(&moved)));
+            t("step: analyse_again after a slide", &mut || drop(crate::pcb::copper::analyse_again(&moved, &cu0)));
             let cu1 = cu1.unwrap();
             let mut again = None;
             t("step: drc::check_again", &mut || again = Some(drc::check_again(&moved, &cu1, Some(&cache))));

@@ -335,7 +335,7 @@ impl App {
         let changed = self.copper_rev != self.rev || repour;
         if changed {
             let started = std::time::Instant::now();
-            self.copper = copper::analyse(&self.doc);
+            self.copper = copper::analyse_again(&self.doc, &self.copper);
             self.copper_rev = self.rev;
             note_slow("connections", started);
         }

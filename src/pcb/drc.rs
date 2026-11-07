@@ -111,10 +111,7 @@ pub fn check_again(board: &Board, copper: &Copper, last: Option<&Cache>) -> (Vec
 fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Problem>) {
     let r = &board.rules;
     let widest = items.iter().filter_map(|c| c.keeps.map(|k| k.0)).fold(r.clearance, f64::max);
-    for (i, j) in crate::pcb::copper::near_pairs(items, widest) {
-        if !dirty[i] && !dirty[j] {
-            continue;
-        }
+    for (i, j) in crate::pcb::copper::near_pairs_where(items, widest, |i, j| dirty[i] || dirty[j]) {
         let (a, b) = (&items[i], &items[j]);
         if !a.on.shares(b.on) || (a.net == b.net && a.net != 0) {
             continue;
