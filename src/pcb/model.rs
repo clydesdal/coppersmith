@@ -23,7 +23,11 @@ impl Side {
 /// What an inner copper layer is used for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LayerRole {
+    /// A plane, whole and with nothing else on it.
     Plane,
+    /// A plane that's cut into several pieces, or has a trace or two run across it.
+    Split,
+    /// A layer for routing.
     Signal,
 }
 
@@ -802,7 +806,8 @@ impl Board {
 
     /// What each inner copper layer is for, worked out from what's on it: a
     /// plane (a plane pour, or a pour over most of the board with next to no
-    /// tracks) or one that carries signals.
+    /// tracks), a plane that is split up or has a trace on it, or one that
+    /// carries signals.
     pub fn inner_layer_roles(&self) -> Vec<(u8, LayerRole)> {
         let outline_area = if self.outline.len() >= 3 { ring_area(&self.outline).abs() } else { 0.0 };
         let area = if outline_area > 0.0 {
@@ -817,10 +822,19 @@ impl Board {
             .map(|l| {
                 let pours = self.pours.iter().filter(|p| p.layer == l);
                 let tracks = self.tracks.iter().filter(|t| t.layer == l).count();
+                // How much trace: a few stray dots from an import aren't a trace on a plane.
+                let trace_length: f64 = self.tracks.iter().filter(|t| t.layer == l).map(|t| t.a.dist(t.b)).sum();
                 let planed = pours.clone().any(|p| p.plane);
                 // Over most of the board: the whole of it (no outline given), or what's poured.
                 let broad = pours.clone().any(|p| p.outline.is_empty() || p.fill.iter().map(|i| i.area).sum::<f64>() >= 0.5 * area);
-                let role = if planed || (broad && tracks < 30) { LayerRole::Plane } else { LayerRole::Signal };
+                let role = if planed || (broad && tracks < 30) {
+                    // Cut up: several plane pours, or several pieces each a real share of the board.
+                    let pieces = pours.clone().flat_map(|p| p.fill.iter()).filter(|i| i.area >= 0.05 * area).count();
+                    let cut_up = pours.clone().filter(|p| p.plane).count() >= 2 || pieces >= 2;
+                    if trace_length >= 3.0 || cut_up { LayerRole::Split } else { LayerRole::Plane }
+                } else {
+                    LayerRole::Signal
+                };
                 (l, role)
             })
             .collect()
@@ -965,6 +979,24 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    /// Prints what's on each copper layer of a board, to see how planes and signals differ:
+    /// COPPERSMITH_BOARD=file cargo test dump_layers -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_layers() {
+        let Some(f) = std::env::var_os("COPPERSMITH_BOARD") else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&f)).unwrap().board;
+        let area = ring_area(&b.outline).abs();
+        for l in b.copper_layers() {
+            let tracks: Vec<f64> = b.tracks.iter().filter(|t| t.layer == l).map(|t| t.a.dist(t.b)).collect();
+            let total: f64 = tracks.iter().sum();
+            let pours: Vec<_> = b.pours.iter().filter(|p| p.layer == l).collect();
+            let mut islands: Vec<f64> = pours.iter().flat_map(|p| p.fill.iter().map(|i| i.area / area * 100.0)).collect();
+            islands.sort_by(|a, c| c.total_cmp(a));
+            println!("layer {l}: {} tracks ({total:.1} mm), {} pours (plane {}), islands % of board: {:?}", tracks.len(), pours.len(), pours.iter().filter(|p| p.plane).count(), islands.iter().take(6).map(|v| format!("{v:.1}")).collect::<Vec<_>>());
+        }
+    }
+
     #[test]
     fn inner_layers_are_found_to_be_planes_or_for_signals() {
         let mut b = Board::default();
@@ -981,6 +1013,27 @@ mod tests {
         b.pours.push(Pour::new(3, 3, net, Vec::new(), &b.rules));
         let roles = b.inner_layer_roles();
         assert_eq!(roles, vec![(1, LayerRole::Plane), (2, LayerRole::Signal), (3, LayerRole::Plane), (4, LayerRole::Signal)]);
+        // A plane with a trace across it, and one cut into two pours, are worth a pick of their own.
+        let mut b = b;
+        b.copper = 8;
+        let mut with_trace = Pour::new(5, 5, net, Vec::new(), &b.rules);
+        with_trace.plane = true;
+        b.pours.push(with_trace);
+        b.tracks.push(Track { mid: None, id: 900, a: p(1.0, 1.0), b: p(9.0, 1.0), w: 0.2, layer: 5, net });
+        for (id, outline) in [(6, vec![p(0.0, 0.0), p(20.0, 0.0), p(20.0, 30.0), p(0.0, 30.0)]), (7, vec![p(20.0, 0.0), p(40.0, 0.0), p(40.0, 30.0), p(20.0, 30.0)])] {
+            let mut half = Pour::new(id, 6, net, outline, &b.rules);
+            half.plane = true;
+            b.pours.push(half);
+        }
+        let roles = b.inner_layer_roles();
+        assert_eq!(roles[4], (5, LayerRole::Split), "a trace on a plane");
+        assert_eq!(roles[5], (6, LayerRole::Split), "two plane pours on one layer");
+        assert_eq!(roles[0], (1, LayerRole::Plane), "a whole plane stays a plane");
+        // A couple of stray dots (an import's leftovers) aren't a trace across a plane.
+        b.tracks.push(Track { mid: None, id: 901, a: p(2.0, 2.0), b: p(2.0, 2.0), w: 0.15, layer: 1, net });
+        b.tracks.push(Track { mid: None, id: 902, a: p(3.0, 2.0), b: p(3.1, 2.0), w: 0.15, layer: 1, net });
+        assert_eq!(b.inner_layer_roles()[0], (1, LayerRole::Plane), "dots don't make a split plane");
+        b.copper = 6;
         // A busy layer with a ground pour poured over it is still a signal layer.
         for k in 0..40 {
             b.tracks.push(Track { mid: None, id: 200 + k, a: p(1.0, k as f64 * 0.5), b: p(9.0, k as f64 * 0.5), w: 0.2, layer: 3, net });

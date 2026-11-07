@@ -301,6 +301,8 @@ pub struct App {
     pub active: Option<usize>,
     /// A tab with unsaved changes that has been asked to close once.
     pub pending_close: Option<usize>,
+    /// Silkscreen layers hidden by an inner-layer quick pick, to bring back with the next other pick.
+    pub silk_hid: Vec<Layer>,
     /// What each inner copper layer is for, found out when the board changed last (and which change).
     pub layer_roles: (u64, Vec<(u8, crate::pcb::model::LayerRole)>),
     /// The graphics card's side of the 3D view, and what it said went wrong.
@@ -419,6 +421,7 @@ impl App {
             docs: Vec::new(),
             active: None,
             pending_close: None,
+            silk_hid: Vec::new(),
             layer_roles: (u64::MAX, Vec::new()),
             gpu3d: std::sync::Arc::new(std::sync::Mutex::new(None)),
             gpu3d_error: std::sync::Arc::new(std::sync::Mutex::new(None)),

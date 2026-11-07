@@ -234,6 +234,24 @@ fn preview(ui: &mut Ui, def: &FootprintDef, size: Vec2) {
     }
 }
 
+/// Looking at inner layers only, the silkscreen is in the way: this hides it,
+/// remembering which layers it hid (not those already hidden). With any other
+/// pick it brings back just those.
+fn silk_for_pick(hidden: &mut std::collections::HashSet<Layer>, hid: &mut Vec<Layer>, inner_only: bool) {
+    if inner_only {
+        for side in [Side::Top, Side::Bottom] {
+            let silk = Layer::Silk(side);
+            if hidden.insert(silk) {
+                hid.push(silk);
+            }
+        }
+    } else {
+        for silk in std::mem::take(hid) {
+            hidden.remove(&silk);
+        }
+    }
+}
+
 impl App {
     pub fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
@@ -281,17 +299,27 @@ impl App {
 
     /// The Layers tab: the layers, and what to show on them.
     /// What the quick choices at the top of the layer list show: which of the
-    /// copper layers (the rest are left as they are). The inner layers are sorted
-    /// out by what's on them: planes together, and each signal layer on its own.
-    fn quick_layer_sets(&mut self) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+    /// copper layers (the rest are left as they are). The first row is the outside
+    /// and all; the second has the inner layers worth a pick of their own: those
+    /// that carry signals, and planes that are cut up or have a trace on them (a
+    /// whole plane has nothing to look at).
+    fn quick_layer_sets(&mut self) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>, &'static str)>) {
         use crate::pcb::model::LayerRole;
         if self.layer_roles.0 != self.rev {
             self.layer_roles = (self.rev, self.doc.inner_layer_roles());
         }
-        let planes: Vec<u8> = self.layer_roles.1.iter().filter(|(_, r)| *r == LayerRole::Plane).map(|(l, _)| *l).collect();
-        let first = vec![("All".to_string(), self.doc.copper_layers()), ("Top".to_string(), vec![TOP]), ("Bottom".to_string(), vec![BOTTOM]), ("Planes".to_string(), planes)];
-        let signals = self.layer_roles.1.iter().filter(|(_, r)| *r == LayerRole::Signal).map(|(l, _)| (format!("In {l}"), vec![*l])).collect();
-        (first, signals)
+        let first = vec![("All".to_string(), self.doc.copper_layers()), ("Top".to_string(), vec![TOP]), ("Bottom".to_string(), vec![BOTTOM])];
+        let inner = self
+            .layer_roles
+            .1
+            .iter()
+            .filter_map(|(l, role)| match role {
+                LayerRole::Signal => Some((format!("In {l}"), vec![*l], "Show just this inner signal layer")),
+                LayerRole::Split => Some((format!("In {l}"), vec![*l], "Show just this plane: it's cut into pieces or has a trace on it")),
+                LayerRole::Plane => None,
+            })
+            .collect();
+        (first, inner)
     }
 
     /// Shows only these copper layers, and works on the first if the one being
@@ -309,6 +337,8 @@ impl App {
         {
             self.switch_layer(first);
         }
+        let inner_only = !shown.is_empty() && shown.iter().all(|l| *l != TOP && *l != BOTTOM);
+        silk_for_pick(&mut self.hidden, &mut self.silk_hid, inner_only);
     }
 
     pub fn layers_page(&mut self, ui: &mut Ui) {
@@ -316,20 +346,18 @@ impl App {
         ui.add_space(2.0);
         // Quick choices: all the copper, just the top, just the bottom, the planes; and under
         // them each inner layer that carries signals, on its own.
-        let (first, signals) = self.quick_layer_sets();
+        let (first, inner) = self.quick_layer_sets();
         let showing: Vec<u8> = self.doc.copper_layers().into_iter().filter(|l| !self.hidden.contains(&Layer::Cu(*l))).collect();
         let mut chosen: Option<Vec<u8>> = None;
-        for (row, tip) in [(&first, "Show just these copper layers"), (&signals, "Show just this inner signal layer")] {
+        let rows: [Vec<(String, Vec<u8>, &str)>; 2] = [first.into_iter().map(|(n, s)| (n, s, "Show just these copper layers")).collect(), inner];
+        for row in &rows {
             if row.is_empty() {
                 continue;
             }
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                for (name, set) in row {
-                    let usable = !set.is_empty();
-                    let on = usable && *set == showing;
-                    let hint = if usable { tip } else { "This board has no planes" };
-                    if ui.add_enabled_ui(usable, |ui| chip(ui, name, on)).inner.on_hover_text(hint).clicked() {
+                for (name, set, tip) in row {
+                    if chip(ui, name, *set == showing).on_hover_text(*tip).clicked() {
                         chosen = Some(set.clone());
                     }
                 }
@@ -1036,5 +1064,33 @@ impl App {
             });
             self.new_net.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn an_inner_pick_hides_the_silk_and_the_next_pick_brings_it_back() {
+        let (mut hidden, mut hid): (HashSet<Layer>, Vec<Layer>) = (HashSet::new(), Vec::new());
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert!(hidden.contains(&Layer::Silk(Side::Top)) && hidden.contains(&Layer::Silk(Side::Bottom)));
+        // Picking another inner layer doesn't hide anything twice or forget what was hidden.
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert_eq!(hid.len(), 2);
+        silk_for_pick(&mut hidden, &mut hid, false);
+        assert!(hidden.is_empty() && hid.is_empty());
+    }
+
+    #[test]
+    fn silk_the_user_had_hidden_stays_hidden() {
+        let mut hidden: HashSet<Layer> = [Layer::Silk(Side::Bottom)].into_iter().collect();
+        let mut hid = Vec::new();
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert_eq!(hid, vec![Layer::Silk(Side::Top)], "only the one that was showing is remembered");
+        silk_for_pick(&mut hidden, &mut hid, false);
+        assert!(hidden.contains(&Layer::Silk(Side::Bottom)) && !hidden.contains(&Layer::Silk(Side::Top)));
     }
 }

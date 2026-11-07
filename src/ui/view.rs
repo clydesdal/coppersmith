@@ -35,7 +35,7 @@ pub fn layer_color(layer: Layer) -> Color32 {
         Layer::Cu(BOTTOM) => rgb(0x4f8cff),
         Layer::Cu(n) => INNER[(n as usize + 3) % 4],
         Layer::Silk(Side::Top) => rgb(0xf2d24b),
-        Layer::Silk(Side::Bottom) => rgb(0xd9a24e),
+        Layer::Silk(Side::Bottom) => rgb(0xfdf2d0),
         Layer::Court(_) => rgb(0x8a6fb0),
         Layer::Fab(_) => rgb(0x8d8e8e),
         Layer::Mask(_) | Layer::Paste(_) => rgb(0xa8adb5),
