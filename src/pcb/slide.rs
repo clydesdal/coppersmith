@@ -9,7 +9,9 @@
 
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
-use crate::pcb::copper::{Item, analyse};
+use crate::pcb::copper::{Item, scene_copper};
+#[cfg(test)]
+use crate::pcb::copper::analyse;
 use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, chamfer, legs, shove_from};
 use std::collections::HashSet;
 
@@ -224,7 +226,7 @@ fn push_layers(before: &Board, after: Board, via_push: bool) -> Option<Board> {
         if push.is_empty() {
             continue;
         }
-        let mut scene = Scene::new(&b, &analyse(&b), layer, 0);
+        let mut scene = Scene::new(&b, &scene_copper(&b), layer, 0);
         scene.via_push = via_push;
         scene.lines.retain(|l| !l.ids.iter().any(|i| changed.contains(i)));
         scene.vias.retain(|v| !moved_vias.contains(&v.0));
@@ -603,6 +605,27 @@ mod tests {
     use super::*;
     use crate::pcb::drc;
 
+    #[test]
+    fn a_scene_reads_the_same_from_the_quick_listing_as_from_the_full_analysis() {
+        let mut b = crate::pcb::sample::board();
+        let id = b.new_id();
+        let net = b.pours.first().map(|p| p.net).unwrap_or(0);
+        b.pours.push(Pour::new(id, TOP, net, Vec::new(), &b.rules));
+        b.repour();
+        assert!(b.pours.iter().any(|p| !p.fill.is_empty()), "something poured");
+        let shape = |s: &Scene| {
+            let all: Vec<_> = s.all.iter().map(|o| (o.item, o.net, o.movable, o.blob.core.clone(), o.blob.r)).collect();
+            let lines: Vec<_> = s.lines.iter().map(|l| l.ids.clone()).collect();
+            let others: Vec<_> = s.others.iter().map(|(l, all, runs)| (*l, all.len(), runs.len())).collect();
+            (all, lines, others, s.vias.len())
+        };
+        for layer in b.copper_layers() {
+            let full = Scene::new(&b, &analyse(&b), layer, 0);
+            let quick = Scene::new(&b, &scene_copper(&b), layer, 0);
+            assert_eq!(shape(&full), shape(&quick), "layer {layer}");
+        }
+    }
+
     /// Times the pieces of one drag step on a real board:
     /// COPPERSMITH_BENCH_BOARD=/path/to/board cargo test --release bench_drag -- --ignored --nocapture
     #[test]
@@ -628,6 +651,24 @@ mod tests {
         let mut pushed = None;
         t("push_after_move()", &mut || pushed = push_after_move(&before, moved.clone(), true));
         eprintln!("pushed ok: {}", pushed.is_some());
+        // The same on layer 1 (the second copper layer), which here carries a pour.
+        for (name, layer) in [("layer 1", 1u8), ("layer 0", 0u8)] {
+            let Some(id) = b.tracks.iter().find(|t| t.layer == layer && t.mid.is_none() && t.a.dist(t.b) > 3.0).map(|t| t.id) else { continue };
+            for d in [0.1, 1.0] {
+                let mut moved = b.clone();
+                if !slide(&mut moved, id, p(0.0, d)) {
+                    eprintln!("{name}: slide {d} refused");
+                    continue;
+                }
+                let s0 = std::time::Instant::now();
+                let r = push_after_move(&b, moved.clone(), true);
+                eprintln!("{name}: slide {d} mm, push_after_move {:?} -> {}", s0.elapsed(), if r.is_some() { "ok" } else { "None" });
+            }
+            let cu = analyse(&b);
+            let s0 = std::time::Instant::now();
+            let sc = Scene::new(&b, &cu, layer, 0);
+            eprintln!("{name}: Scene::new {:?} ({} obstacles here, {} other layers)", s0.elapsed(), sc.all.len(), sc.others.len());
+        }
         t("analyse (with pours)", &mut || drop(analyse(&b)));
         let cu = analyse(&b);
         t("drc::check", &mut || drop(drc::check(&b, &cu)));

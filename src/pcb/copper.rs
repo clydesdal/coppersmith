@@ -233,6 +233,16 @@ pub fn analyse(board: &Board) -> Copper {
     analyse_items(collect(board))
 }
 
+/// Just the copper that stays put, listed, without working out what touches
+/// what or what's still to connect: all a router `Scene` reads, and much
+/// quicker than `analyse`, which is the wrong thing to run on every step of
+/// a push. Its `group` and `rats` are empty.
+pub fn scene_copper(board: &Board) -> Copper {
+    let items = collect_fixed(board);
+    let index = items.iter().enumerate().map(|(i, c)| (c.item, i)).collect();
+    Copper { items, group: Vec::new(), rats: Vec::new(), index }
+}
+
 /// The same leaving pours out: for checking a change before the pours are
 /// poured again round it.
 pub fn analyse_fixed(board: &Board) -> Copper {
