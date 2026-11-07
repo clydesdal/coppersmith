@@ -265,6 +265,11 @@ G grid, U units, Ctrl+Z / Ctrl+Shift+Z undo and redo, Ctrl+S save (⌘ on a Mac 
 Ctrl+O open, Ctrl+N new, Ctrl+E write Gerbers. Scroll or pinch to zoom,
 right- or middle-drag to pan.
 
+Zoomed in, each net's name is written along its tracks on the working layer,
+turned to follow them and kept the right way up, on every straight track long
+enough to hold it (the part on the screen, for a long one). View ▸ *Net names on
+tracks* turns it off.
+
 The rule check runs all the time: problems are marked on the board and listed
 on the right; click one to go to it.
 

@@ -275,6 +275,8 @@ pub struct App {
     pub placing: Option<(Footprint, String)>,
     pub grid: f64,
     pub show_grid: bool,
+    /// The net's name written along its tracks, once zoomed in enough to read it.
+    pub show_net_names: bool,
     pub unit: Unit,
     pub width: f64,
     pub highlight: Option<u32>,
@@ -408,6 +410,7 @@ impl App {
             placing: None,
             grid: 0.25,
             show_grid: true,
+            show_net_names: true,
             unit: Unit::Mm,
             highlight: None,
             focus: None,

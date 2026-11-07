@@ -182,6 +182,30 @@ fn stack(mirror: bool, copper: Vec<u8>, working: Option<Side>) -> Vec<Layer> {
     v
 }
 
+/// The part of the line `a`–`b` inside `rect`, if any.
+fn visible_part(a: Pos2, b: Pos2, rect: Rect) -> Option<(Pos2, Pos2)> {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-d.x, a.x - rect.min.x), (d.x, rect.max.x - a.x), (-d.y, a.y - rect.min.y), (d.y, rect.max.y - a.y)] {
+        if p.abs() < 1e-6 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+            if t0 > t1 {
+                return None;
+            }
+        }
+    }
+    Some((a + d * t0, a + d * t1))
+}
+
 fn nice_step(grid: f64, scale: f64) -> f64 {
     let mut step = grid.max(0.01);
     for k in [2.0, 2.5, 2.0, 2.0, 2.5, 2.0, 2.0, 2.5, 2.0] {
@@ -1038,6 +1062,46 @@ impl App {
             self.draw_through(painter, tr, &keep);
         }
         self.draw_pad_names(painter, tr);
+        self.draw_track_names(painter, tr);
+    }
+
+    /// The net's name along each straight track of the working layer that's long enough to
+    /// hold it, turned to follow the track and kept the right way up. Only once zoomed in
+    /// enough for the letters to be readable.
+    fn draw_track_names(&self, painter: &Painter, tr: &Tr) {
+        if !self.show_net_names || self.scale < 12.0 || !self.shows(Layer::Cu(self.layer)) {
+            return;
+        }
+        let doc = self.shown();
+        let view = painter.clip_rect().shrink(6.0);
+        for t in doc.tracks.iter().filter(|t| t.layer == self.layer && t.net != 0 && t.mid.is_none()) {
+            // The part of the track that's on the screen, so a long one is named where it can be read.
+            let Some((a, b)) = visible_part(tr.pt(t.a), tr.pt(t.b), view) else { continue };
+            let (d, len) = (b - a, (b - a).length());
+            // Too short to hold anything.
+            if len < 40.0 {
+                continue;
+            }
+            // The text is as tall as the track is wide, but never too small to read nor so big it crowds.
+            let size = (tr.len(t.w) * 0.85).clamp(9.0, 15.0);
+            let name = doc.net_name(t.net);
+            let galley = painter.layout_no_wrap(name.to_string(), theme::mono(size), Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+            if galley.size().x + 12.0 > len {
+                continue;
+            }
+            let mut angle = d.y.atan2(d.x);
+            // Never upside down.
+            if angle > std::f32::consts::FRAC_PI_2 || angle < -std::f32::consts::FRAC_PI_2 {
+                angle += std::f32::consts::PI;
+            }
+            let rot = egui::emath::Rot2::from_angle(angle);
+            let mid = a.lerp(b, 0.5);
+            let corner = mid - rot * (galley.size() / 2.0);
+            // A dark edge under the letters so they read over any copper.
+            let shadow = egui::epaint::TextShape::new(corner + vec2(1.0, 1.0), galley.clone(), Color32::from_black_alpha(150)).with_angle(angle).with_override_text_color(Color32::from_black_alpha(150));
+            painter.add(shadow);
+            painter.add(egui::epaint::TextShape::new(corner, galley, Color32::WHITE).with_angle(angle));
+        }
     }
 
     fn draw_through(&self, painter: &Painter, tr: &Tr, keep: &dyn Fn(u32) -> f32) {
@@ -1677,6 +1741,22 @@ mod stack_tests {
 
     fn at(v: &[Layer], l: Layer) -> usize {
         v.iter().position(|x| *x == l).unwrap()
+    }
+
+    #[test]
+    fn only_the_part_of_a_track_on_the_screen_is_named() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0));
+        // Wholly inside: all of it.
+        assert_eq!(visible_part(pos2(10.0, 10.0), pos2(90.0, 10.0), rect), Some((pos2(10.0, 10.0), pos2(90.0, 10.0))));
+        // Running off both ends: the part between the edges.
+        let (a, b) = visible_part(pos2(-50.0, 20.0), pos2(250.0, 20.0), rect).unwrap();
+        assert!((a.x - 0.0).abs() < 1e-3 && (b.x - 100.0).abs() < 1e-3);
+        // Off one side only.
+        let (a, b) = visible_part(pos2(40.0, 25.0), pos2(40.0, 500.0), rect).unwrap();
+        assert!((a.y - 25.0).abs() < 1e-3 && (b.y - 50.0).abs() < 1e-3);
+        // Nowhere near, or alongside it.
+        assert_eq!(visible_part(pos2(-10.0, -10.0), pos2(-5.0, 200.0), rect), None);
+        assert_eq!(visible_part(pos2(-10.0, 60.0), pos2(200.0, 60.0), rect), None);
     }
 
     #[test]

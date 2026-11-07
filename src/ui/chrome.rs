@@ -479,6 +479,9 @@ impl App {
         if check(ui, "See it from underneath", "X", self.mirror, true) {
             self.mirror = !self.mirror;
         }
+        if check(ui, "Net names on tracks", "", self.show_net_names, true) {
+            self.show_net_names = !self.show_net_names;
+        }
         ui.separator();
         ui.menu_button("Grid", |ui| {
             for g in GRIDS {
