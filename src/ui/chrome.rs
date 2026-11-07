@@ -4,8 +4,8 @@
 
 use crate::pcb::model::*;
 use crate::pcb::project::FileKind;
-use crate::ui::app::{App, Asked, GRIDS, Mode, Tool, Unit, WIDTHS};
-use crate::ui::dock::{EditorCmd, Filter, LeftTab, Pick, RightTab};
+use crate::ui::app::{App, Asked, Doc, GRIDS, Mode, Tool, Unit, WIDTHS};
+use crate::ui::dock::{EditorCmd, EditorLeft, Filter, LeftTab, Pick, RightTab};
 use crate::ui::icons::Icon;
 use crate::ui::panels::{chip, icon_button, segmented, small_icon, tool_button};
 use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
@@ -387,8 +387,8 @@ impl App {
             self.editor_command(ctx, EditorCmd::Fit);
         }
         ui.separator();
-        if check(ui, "Project files", "", self.show_project, false) {
-            self.show_project = !self.show_project;
+        if check(ui, "Left panel", "Ctrl+[", self.show_left, false) {
+            self.show_left = !self.show_left;
         }
     }
 
@@ -851,6 +851,30 @@ impl App {
         }
     }
 
+    /// The left dock of a schematic or library tab: the project's files, or the
+    /// editor's own list, by the tabs along its bottom.
+    pub fn editor_left_dock(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let items = match self.lib_active() {
+            Some(w) if w.ed.kind == crate::ui::libedit::Kind::Footprints => "Footprints",
+            _ => "Symbols",
+        };
+        egui::Panel::bottom("editor-left-tabs").resizable(false).show_separator_line(false).frame(Frame::new().fill(theme::WELL)).show(ui, |ui| {
+            let tabs: Vec<(EditorLeft, &str, Badge)> = vec![(EditorLeft::Project, "Project", None), (EditorLeft::Items, items, None)];
+            let mut tab = self.editor_tab;
+            tab_strip(ui, &mut tab, &tabs);
+            self.editor_tab = tab;
+        });
+        egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| match self.editor_tab {
+            EditorLeft::Project => self.project_page(ui),
+            EditorLeft::Items => match self.active.and_then(|i| self.docs.get_mut(i)) {
+                Some(Doc::Library(w)) => w.list(ui),
+                Some(Doc::Schematic(w)) => w.symbol_list(ui, &ctx),
+                None => {}
+            },
+        });
+    }
+
     pub fn left_dock(&mut self, ui: &mut Ui) {
         egui::Panel::bottom("left-tabs").resizable(false).show_separator_line(false).frame(Frame::new().fill(theme::WELL)).show(ui, |ui| {
             let tabs: Vec<(LeftTab, &str, Badge)> = LeftTab::ALL
@@ -862,7 +886,13 @@ impl App {
             self.left_tab = tab;
         });
         egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| {
+            // The project page scrolls itself.
+            if self.left_tab == LeftTab::Project {
+                self.project_page(ui);
+                return;
+            }
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.left_tab {
+                LeftTab::Project => {}
                 LeftTab::Layers => self.layers_page(ui),
                 LeftTab::Parts => self.library_list(ui),
                 LeftTab::Select => self.select_page(ui),

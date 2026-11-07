@@ -472,6 +472,43 @@ mod tests {
         assert_eq!(s.junctions, back.junctions);
     }
 
+    /// Shows a sheet's font table and which records use which font:
+    /// COPPERSMITH_SHEET=file cargo test dump_fonts -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_fonts() {
+        let Some(f) = std::env::var_os("COPPERSMITH_SHEET") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let data = stream(&mut file, "/FileHeader").unwrap();
+        let mut r = Reader::new(&data);
+        let mut uses: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let mut first = true;
+        while r.left() >= 4 {
+            let head = r.u32().unwrap();
+            let body = r.bytes((head & 0x00ff_ffff) as usize).unwrap();
+            if first || head >> 24 == 1 {
+                first = false;
+                continue;
+            }
+            let p = params(body);
+            let rec = p.get("RECORD").cloned().unwrap_or_default();
+            if rec == "31" {
+                let mut keys: Vec<_> = p.iter().filter(|(k, _)| k.starts_with("FONT") || k.starts_with("SIZE") || k.starts_with("ROTATION") || k.starts_with("BOLD") || k.starts_with("ITALIC")).collect();
+                keys.sort();
+                for (k, v) in keys {
+                    println!("sheet {k} = {v}");
+                }
+            }
+            if let Some(id) = p.get("FONTID") {
+                *uses.entry((rec, id.clone())).or_default() += 1;
+            }
+        }
+        for ((rec, id), n) in uses {
+            println!("record {rec} uses font {id}: {n}");
+        }
+    }
+
     #[test]
     fn a_turned_and_mirrored_arc_and_ellipse_come_back_the_same() {
         let arc = Drawing::Arc { c: p(1.0, 2.0), r: 2.0, start: 30.0, end: 140.0 };

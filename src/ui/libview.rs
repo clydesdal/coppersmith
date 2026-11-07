@@ -186,8 +186,6 @@ impl LibWindow {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::left("lib_list").resizable(true).default_size(250.0).size_range(200.0..=400.0).frame(side).show(ui, |ui| self.list(ui));
-        let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
         Panel::right("lib_props").resizable(true).default_size(290.0).size_range(240.0..=440.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, elsewhere));
         });
@@ -268,7 +266,7 @@ impl LibWindow {
 
     // -- Left: what's in the library ----------------------------------------------------
 
-    fn list(&mut self, ui: &mut Ui) {
+    pub fn list(&mut self, ui: &mut Ui) {
         let symbols = self.ed.kind == Kind::Symbols;
         ui.horizontal(|ui| {
             ui.label(RichText::new(if symbols { "Symbols" } else { "Footprints" }).size(14.0).color(DIM));

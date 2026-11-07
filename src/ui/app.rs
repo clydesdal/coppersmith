@@ -294,8 +294,8 @@ pub struct App {
     pub pending_close: Option<usize>,
     /// The schematics, boards and libraries that go together.
     pub project: Option<crate::pcb::project::Project>,
-    /// Whether the project's files show beside the editors.
-    pub show_project: bool,
+    /// Which page of an editor tab's left dock is showing.
+    pub editor_tab: crate::ui::dock::EditorLeft,
     /// The file picked (once) in the project panel.
     pub project_sel: Option<PathBuf>,
     pub last_field_edit: f64,
@@ -400,7 +400,7 @@ impl App {
             active: None,
             pending_close: None,
             project: None,
-            show_project: true,
+            editor_tab: crate::ui::dock::EditorLeft::Items,
             project_sel: None,
             last_field_edit: -10.0,
             confirm: None,
@@ -1773,7 +1773,9 @@ impl App {
             Ok(p) => {
                 self.notice = Some(format!("Project {}: {} files", p.name, p.files.len()));
                 self.project = Some(p);
-                self.show_project = true;
+                self.left_tab = LeftTab::Project;
+                self.editor_tab = crate::ui::dock::EditorLeft::Project;
+                self.show_left = true;
             }
             Err(e) => self.notice = Some(e),
         }
@@ -2004,12 +2006,12 @@ impl eframe::App for App {
         Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
         let tab_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 4));
         Panel::top("doc_tabs").resizable(false).frame(tab_frame).show(ui, |ui| self.tab_bar(ui));
-        let project_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
         if self.mode() != Mode::Board {
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
-            if self.show_project && width >= 960.0 {
-                Panel::left("project_files").resizable(true).default_size(230.0).size_range(170.0..=380.0).frame(project_frame).show(ui, |ui| self.project_page(ui));
+            if self.show_left && width >= 600.0 {
+                let frame = egui::Frame::new().fill(theme::PANEL);
+                Panel::left("editor_left").resizable(true).default_size(270.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.editor_left_dock(ui));
             }
             self.show_editor(ui);
             self.shortcuts_window(&ctx);
@@ -2018,9 +2020,6 @@ impl eframe::App for App {
         if self.ribbon {
             let ribbon_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 6));
             Panel::top("ribbon").resizable(false).frame(ribbon_frame).show(ui, |ui| self.ribbon_bar(ui));
-        }
-        if self.show_project && width >= 960.0 {
-            Panel::left("project_files").resizable(true).default_size(210.0).size_range(160.0..=380.0).frame(project_frame).show(ui, |ui| self.project_page(ui));
         }
         // The panels either side, each with its tabs along the bottom.
         if self.show_left && width >= 600.0 {

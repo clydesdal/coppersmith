@@ -441,8 +441,6 @@ impl SchWindow {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::left("sch_symbols").resizable(true).default_size(250.0).size_range(200.0..=400.0).frame(side).show(ui, |ui| self.symbol_list(ui, &ctx));
-        let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
         Panel::right("sch_props").resizable(true).default_size(300.0).size_range(240.0..=460.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, footprints));
         });
@@ -499,7 +497,7 @@ impl SchWindow {
         });
     }
 
-    fn symbol_list(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+    pub fn symbol_list(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Symbols").size(14.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -899,7 +897,7 @@ impl Placed {
 /// with the drawing as the footprints' does; none once it would be too small to read.
 fn sized(tr: &Tr, mm: f64) -> Option<FontId> {
     let px = (mm * tr.s) as f32;
-    (px >= 3.5).then(|| FontId::proportional(px))
+    (px >= 5.5).then(|| FontId::proportional(px))
 }
 
 /// How far a small offset from a text's anchor goes at this zoom (the sheet's

@@ -350,8 +350,10 @@ unsaved); **+** starts a new schematic or library or opens a file. Opening a fil
 that's already open just shows its tab. Double-clicking a part in the Parts list
 opens its library in a tab.
 
-**Projects.** The **Project** panel on the left, in every window (View ▸ Project
-files hides it), lists the schematics, boards and libraries that go together;
+**Projects.** The **Project** tab, first of the tabs along the bottom of the left
+panel in every window (on a schematic or library tab it sits beside that editor's
+own list: Symbols, or Footprints), lists the schematics, boards and libraries that
+go together;
 **double-click** one to open it (a board in the PCB tab, a sheet or a library in a
 tab of its own; files already open say so; right-click for *Show in its folder*).
 **File ▸ Open project…**, **File ▸ Open…** and `coppersmith PROJECT.PrjPcb` read an
@@ -363,7 +365,7 @@ same way: the project file in its folder that lists it, or else the folder's fil
 **Menus follow the tab.** On a schematic or library tab the menus are about what
 it edits: File has New, Open, Save, Save as…, Open project… and Close this tab (no
 Gerbers; *Save to my footprints* only for footprints); Edit has Undo, Redo, Delete,
-Turn and (sheets) Mirror; View has Fit and the Project panel; Place lists the
+Turn and (sheets) Mirror; View has Fit and the left panel; Place lists the
 drawing tools. Route and Tools appear only on the PCB tab. On the board,
 *Add footprints to the Parts list…* is the old "add a library", and *New library*
 and *New schematic* add tabs.
