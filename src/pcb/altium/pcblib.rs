@@ -206,6 +206,8 @@ fn stroke_of(pts: &[P]) -> Option<(P, P, f64)> {
         }
     }
     let (_, u, t0, t1, s0, s1) = best?;
+    // The long side is the line's way, whichever edge the rectangle was found by.
+    let (u, t0, t1, s0, s1) = if t1 - t0 >= s1 - s0 { (u, t0, t1, s0, s1) } else { (p(-u.y, u.x), s0, s1, -t1, -t0) };
     let n = p(-u.y, u.x);
     let (len, width) = (t1 - t0, s1 - s0);
     if width <= 0.0 || len < 3.0 * width {
@@ -354,6 +356,18 @@ mod tests {
     }
 
     #[test]
+    fn a_stroke_with_one_rounded_end_at_the_other_corner_is_a_line_too() {
+        // The vertical bracket arm by pin 322, corners starting at its rounded end.
+        let pts = [(21.945877, -21.499998), (21.961732, -21.538265), (21.999999, -21.554117), (22.038264, -21.538265), (22.054119, -21.499998), (22.054116, -19.035286), (21.945879, -19.035286)].map(|(x, y)| p(x, y)).to_vec();
+        let g = silk_region(pts);
+        let [Graphic::Line { a, b, w, .. }] = g.as_slice() else { panic!("not one line: {g:?}") };
+        let (lo, hi) = if a.y < b.y { (a, b) } else { (b, a) };
+        assert!((w - 0.108).abs() < 0.001, "{w}");
+        assert!((lo.x - 22.0).abs() < 0.001 && (hi.x - 22.0).abs() < 0.001, "{a:?} {b:?}");
+        assert!((lo.y + 21.5).abs() < 0.001 && (hi.y + 19.089).abs() < 0.001, "{a:?} {b:?}");
+    }
+
+    #[test]
     fn a_round_silk_dot_is_still_a_filled_circle() {
         let pts: Vec<P> = (0..16).map(|k| p(5.0 + 0.4 * (k as f64 * std::f64::consts::TAU / 16.0).cos(), 3.0 + 0.4 * (k as f64 * std::f64::consts::TAU / 16.0).sin())).collect();
         let g = silk_region(pts);
@@ -419,13 +433,17 @@ mod dump {
                 if let Graphic::Circle { c, r, w, layer, fill } = g {
                     println!("CIRCLE {layer:?} c=({:.3},{:.3}) r={r:.3} w={w:.3} fill={fill}", c.x, c.y);
                 }
+                if let Graphic::Line { a, b, w, layer } = g {
+                    println!("LINE {layer:?} ({:.3},{:.3})-({:.3},{:.3}) w={w:.3}", a.x, a.y, b.x, b.y);
+                }
             }
         }
         for p in &prims {
             if let Prim::Region { head, pts, kind, .. } = p {
                 let bb = BBox::of(pts);
                 println!("region layer {} kind {kind} {} pts, x {:.2}..{:.2} y {:.2}..{:.2}", head.layer, pts.len(), bb.min.x, bb.max.x, bb.min.y, bb.max.y);
-                println!("   {}", pts.iter().map(|q| format!("({:.3},{:.3})", q.x, q.y)).collect::<Vec<_>>().join(" "));
+                println!("   {}", pts.iter().map(|q| format!("({:.6},{:.6})", q.x, q.y)).collect::<Vec<_>>().join(" "));
+                println!("   stroke: {:?}", stroke_of(pts));
             }
             if let Prim::Track { head, a, b, w } = p {
                 println!("track layer {} ({:.2},{:.2})-({:.2},{:.2}) w={w:.3}", head.layer, a.x, a.y, b.x, b.y);
