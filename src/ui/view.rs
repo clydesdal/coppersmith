@@ -211,6 +211,16 @@ impl App {
     /// the pour (a click does; a drag there draws a box instead).
     pub fn pick_with(&self, q: P, tol: f64, inside_pours: bool) -> Option<Sel> {
         let mut hits: Vec<(u8, f64, Sel)> = Vec::new();
+        // On a silkscreen layer, the names on it come first.
+        if let Some(side) = self.silk
+            && self.shows(Layer::Silk(side))
+        {
+            for f in self.doc.footprints.iter().filter(|f| f.side == side && !f.refdes.is_empty()) {
+                if f.label_bbox(&self.doc.rules).grown(tol).contains(q) {
+                    hits.push((0, f.label_pos().dist(q), Sel::Name(f.id)));
+                }
+            }
+        }
         for fl in &self.doc.fills {
             if !self.shows(Layer::Cu(fl.layer)) {
                 continue;
@@ -315,6 +325,10 @@ impl App {
             Sel::Fill(id) => {
                 let v = self.doc.fill(id)?;
                 Some(format!("Fill {} on {}", net(v.net), Layer::Cu(v.layer).name().to_lowercase()))
+            }
+            Sel::Name(id) => {
+                let f = self.doc.fp(id)?;
+                Some(format!("Name of {} · {} tall · drag to move it", f.refdes, self.unit.len(f.label_height(&self.doc.rules))))
             }
             Sel::Keepout(id) => {
                 let v = self.doc.keepout(id)?;
@@ -615,6 +629,7 @@ impl App {
             Sel::Pour(id) => self.doc.pour(id).and_then(|v| v.outline.first().copied()),
             Sel::Fill(id) => self.doc.fill(id).and_then(|v| v.pts.first().copied()),
             Sel::Keepout(id) => self.doc.keepout(id).and_then(|v| v.pts.first().copied()),
+            Sel::Name(id) => self.doc.fp(id).map(|f| f.label_pos()),
         }
         .unwrap_or(q0);
         self.drag = Some(Drag {
@@ -751,8 +766,11 @@ impl App {
                 return;
             }
             if drag.moved {
-                // Straight runs left in pieces by the move join up again.
-                crate::ui::app::merge_straight(&mut self.doc);
+                // Straight runs left in pieces by the move join up again; a name,
+                // a pour or a keepout moved has left no tracks in pieces.
+                if self.sel.iter().any(|s| matches!(s, Sel::Fp(_) | Sel::Via(_) | Sel::Track(_))) {
+                    crate::ui::app::merge_straight(&mut self.doc);
+                }
                 let doc = &self.doc;
                 self.sel.retain(|s| match *s {
                     Sel::Fp(id) => doc.fp(id).is_some(),
@@ -761,6 +779,7 @@ impl App {
                     Sel::Pour(id) => doc.pour(id).is_some(),
                     Sel::Fill(id) => doc.fill(id).is_some(),
                     Sel::Keepout(id) => doc.keepout(id).is_some(),
+                    Sel::Name(id) => doc.fp(id).is_some(),
                 });
                 self.remember(drag.before);
             } else {
@@ -876,7 +895,7 @@ impl App {
             let strength = match layer {
                 Layer::Cu(_) if layer == active => 1.0,
                 Layer::Cu(_) => 0.42,
-                Layer::Silk(s) if Some(s) == active.side() || active.side().is_none() => 1.0,
+                Layer::Silk(s) if Some(s) == active.side() || active.side().is_none() || self.silk == Some(s) => 1.0,
                 Layer::Silk(_) => 0.5,
                 _ => 0.8,
             };
@@ -1056,6 +1075,12 @@ impl App {
             Sel::Fill(id) => {
                 if let Some(v) = doc.fill(id) {
                     closed_line(painter, tr, &v.pts, stroke, false);
+                }
+            }
+            Sel::Name(id) => {
+                if let Some(f) = doc.fp(id) {
+                    let bb = f.label_bbox(&doc.rules).grown(0.1);
+                    closed_line(painter, tr, &[bb.min, p(bb.max.x, bb.min.y), bb.max, p(bb.min.x, bb.max.y)], stroke, false);
                 }
             }
             Sel::Keepout(id) => {
@@ -1299,7 +1324,7 @@ impl App {
             ui.painter().galley(pos2(rect.left() + 23.0, rect.center().y - galley.size().y / 2.0), galley, FG);
             response
         };
-        let layer = Layer::Cu(self.layer);
+        let layer = self.working();
         if chip(ui, &layer.name(), layer_color(layer), "layer-chip").on_hover_text("Click for the next copper layer (+)").clicked() {
             self.next_layer(1);
         }
@@ -1371,16 +1396,22 @@ impl App {
                         ui.separator();
                         ui.add_space(2.0);
 
-                        let layer = Layer::Cu(self.layer);
-                        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The copper layer you're working on (1–6, +, −)");
+                        let layer = self.working();
+                        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The layer you're working on (copper 1–6, +, −; silkscreen to move names)");
                         egui::Popup::from_toggle_button_response(&pick)
                             .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                             .align(egui::RectAlign::TOP_START)
                             .show(|ui| {
                                 for l in self.doc.copper_layers() {
                                     let name = Layer::Cu(l).name();
-                                    if ui.selectable_label(l == self.layer, name).clicked() {
+                                    if ui.selectable_label(self.silk.is_none() && l == self.layer, name).clicked() {
                                         self.switch_layer(l);
+                                    }
+                                }
+                                ui.separator();
+                                for side in [Side::Top, Side::Bottom] {
+                                    if ui.selectable_label(self.silk == Some(side), Layer::Silk(side).name()).clicked() {
+                                        self.work_on_silk(side);
                                     }
                                 }
                             });

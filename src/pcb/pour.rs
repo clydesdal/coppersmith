@@ -461,6 +461,7 @@ mod tests {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.5, 1.5), rot: 0.0, shape: PadShape::Circle, drill, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });

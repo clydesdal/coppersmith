@@ -51,6 +51,7 @@ impl FootprintDef {
             }).collect(),
             graphics: self.graphics.clone(),
             label_at: self.label_at,
+            label_height: None,
             locked: false,
             keepouts: self.keepouts.clone(),
         }

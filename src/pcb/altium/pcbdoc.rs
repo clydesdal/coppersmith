@@ -297,6 +297,25 @@ fn mil(v: Option<&String>) -> f64 {
     num.trim().parse::<f64>().map(|x| x * scale).unwrap_or(0.0)
 }
 
+/// A part's name as Altium drew it: how tall, and where its middle is (as
+/// Altium has it, not yet moved to the board's origin). It's the text on an
+/// overlay layer that says the part's designator, spelt out or as the special
+/// string `.Designator`; Altium starts it at its lower left, and turns it.
+fn designator(prims: &[Prim], refdes: &str) -> Option<(f64, P)> {
+    prims.iter().find_map(|pr| match pr {
+        Prim::Text { head, at, height, rot, mirror, text }
+            if (head.layer == prims::TOP_OVERLAY || head.layer == prims::BOTTOM_OVERLAY)
+                && *height > 0.0
+                && (text == refdes || text.eq_ignore_ascii_case(".Designator")) =>
+        {
+            let w = crate::pcb::font::width(refdes, *height);
+            let across = if *mirror { -w / 2.0 } else { w / 2.0 };
+            Some((*height, at.add(p(across, height / 2.0).rot(*rot))))
+        }
+        _ => None,
+    })
+}
+
 pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut file = open(bytes)?;
     let storages: Vec<String> = file.read_root_storage().filter(|e| e.is_storage()).map(|e| e.name().to_string()).collect();
@@ -390,7 +409,12 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut free: Vec<Prim> = Vec::new();
     for prim in prims {
         let comp = match &prim {
-            Prim::Pad { head, .. } | Prim::Track { head, .. } | Prim::Arc { head, .. } | Prim::Region { head, .. } | Prim::Fill { head, .. } => head.component,
+            Prim::Pad { head, .. }
+            | Prim::Track { head, .. }
+            | Prim::Arc { head, .. }
+            | Prim::Region { head, .. }
+            | Prim::Fill { head, .. }
+            | Prim::Text { head, .. } => head.component,
             Prim::Via { .. } => NONE,
             Prim::Other { head, .. } => head.map(|h| h.component).unwrap_or(NONE),
         };
@@ -424,6 +448,11 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             pad.net = n;
         }
         let refdes = rec.get("SOURCEDESIGNATOR").cloned().unwrap_or_else(|| format!("U{}", i + 1));
+        // The name as Altium had it: its height and where its middle is.
+        let (label_at, label_height) = match designator(&mine, &refdes) {
+            Some((height, middle)) => (local(middle).rounded(), Some(nm(height))),
+            None => (label_spot(&pads), None),
+        };
         b.footprints.push(Footprint {
             id,
             def: rec.get("PATTERN").cloned().unwrap_or_default(),
@@ -432,7 +461,8 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             at: pos,
             rot: nm(rot),
             side: if bottom { Side::Bottom } else { Side::Top },
-            label_at: label_spot(&pads),
+            label_at,
+            label_height,
             pads,
             graphics,
             locked: rec.get("LOCKED").is_some_and(|v| v == "TRUE"),
@@ -440,6 +470,23 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
         });
     }
     skipped.note(&mut notes, "Parts");
+    // Most names are one height: that's the board's, and only the odd ones
+    // (a bigger name on a big part) keep a height of their own.
+    let micron = |h: f64| (h * 1000.0).round() as i64;
+    let mut heights: HashMap<i64, usize> = HashMap::new();
+    for f in &b.footprints {
+        if let Some(h) = f.label_height {
+            *heights.entry(micron(h)).or_default() += 1;
+        }
+    }
+    if let Some((&common, _)) = heights.iter().max_by_key(|(k, n)| (**n, std::cmp::Reverse(**k))) {
+        b.rules.text_height = common as f64 / 1000.0;
+        for f in &mut b.footprints {
+            if f.label_height.is_some_and(|h| micron(h) == common) {
+                f.label_height = None;
+            }
+        }
+    }
 
     // Free copper: tracks, arcs and vias. Pour fill (tracks and regions
     // belonging to polygons) is left out with the pours.
@@ -635,6 +682,43 @@ fn dedup_ring(mut ring: Vec<P>) -> Vec<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(layer: u8, at: P, height: f64, rot: f64, mirror: bool, s: &str) -> Prim {
+        Prim::Text { head: prims::Head { layer, flags: 0x000c, net: NONE, polygon: NONE, component: 0 }, at, height, rot, mirror, text: s.into() }
+    }
+
+    #[test]
+    fn a_designator_comes_with_its_height_and_its_middle() {
+        let w = crate::pcb::font::width("R25", 0.635);
+        // Altium starts the text at its lower left: its middle is half its width along, half its height up.
+        let (h, mid) = designator(&[text(prims::TOP_OVERLAY, p(10.0, 20.0), 0.635, 0.0, false, "R25")], "R25").unwrap();
+        assert_eq!(h, 0.635);
+        assert!(mid.dist(p(10.0 + w / 2.0, 20.0 + 0.635 / 2.0)) < 1e-9, "{mid:?}");
+        // Turned a quarter, along and up swap: the middle is up the page and to the left.
+        let (_, mid) = designator(&[text(prims::TOP_OVERLAY, p(10.0, 20.0), 0.635, 90.0, false, "R25")], "R25").unwrap();
+        assert!(mid.dist(p(10.0 - 0.635 / 2.0, 20.0 + w / 2.0)) < 1e-9, "{mid:?}");
+        // Mirrored, as text underneath is, the other way along.
+        let (_, mid) = designator(&[text(prims::BOTTOM_OVERLAY, p(10.0, 20.0), 0.635, 0.0, true, "R25")], "R25").unwrap();
+        assert!(mid.dist(p(10.0 - w / 2.0, 20.0 + 0.635 / 2.0)) < 1e-9, "{mid:?}");
+    }
+
+    #[test]
+    fn only_the_designator_on_an_overlay_counts() {
+        let others = [
+            // The part's comment, taller, on the same layer.
+            text(prims::TOP_OVERLAY, p(0.0, 0.0), 1.524, 0.0, false, "RC0402FR-071KL"),
+            // The special string on an assembly layer.
+            text(61, p(0.0, 0.0), 1.0, 0.0, false, ".Designator"),
+            // Text of no height.
+            text(prims::TOP_OVERLAY, p(0.0, 0.0), 0.0, 0.0, false, "R25"),
+        ];
+        assert!(designator(&others, "R25").is_none());
+        // The name spelt out, or as Altium's special string, either way; the first wins.
+        let mut both = others.to_vec();
+        both.push(text(prims::TOP_OVERLAY, p(1.0, 1.0), 0.889, 0.0, false, ".Designator"));
+        both.push(text(prims::TOP_OVERLAY, p(2.0, 2.0), 0.5, 0.0, false, "R25"));
+        assert_eq!(designator(&both, "R25").unwrap().0, 0.889);
+    }
 
     #[test]
     fn a_circuit_studio_board_reads() {

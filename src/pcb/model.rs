@@ -164,6 +164,10 @@ pub struct Footprint {
     /// Where the name sits, in the footprint's own coordinates.
     #[serde(default)]
     pub label_at: P,
+    /// How tall the name is drawn; none for the board's name height. A board
+    /// from Altium keeps each name the height it had there.
+    #[serde(default)]
+    pub label_height: Option<f64>,
     #[serde(default)]
     pub locked: bool,
     /// Areas kept free of copper, in the footprint's own coordinates: they
@@ -242,6 +246,44 @@ impl Footprint {
             b = BBox::of(&[self.at]).grown(0.5);
         }
         b
+    }
+
+    /// How tall its name is drawn.
+    pub fn label_height(&self, rules: &Rules) -> f64 {
+        self.label_height.unwrap_or(rules.text_height)
+    }
+
+    /// The box round its name as drawn on the board, for picking and showing it.
+    pub fn label_bbox(&self, rules: &Rules) -> BBox {
+        let mirror = self.side == Side::Bottom;
+        let strokes = crate::pcb::font::strokes(&self.refdes, self.label_pos(), self.label_height(rules), self.label_rot(), mirror);
+        let mut b = BBox::default();
+        for s in &strokes {
+            for q in s {
+                b.add(*q);
+            }
+        }
+        if b.is_empty() {
+            return BBox::of(&[self.label_pos()]).grown(rules.text_height / 2.0);
+        }
+        b.grown(rules.silk_width / 2.0)
+    }
+
+    /// Where its name goes unless it's put elsewhere: above the pads.
+    pub fn usual_label_spot(&self) -> P {
+        let mut bb = BBox::default();
+        for i in 0..self.pads.len() {
+            bb.union(&self.pads[i].blob_local(0.0).bbox());
+        }
+        if bb.is_empty() { p(0.0, 1.5) } else { p(bb.center().x, bb.max.y + 1.0).rounded() }
+    }
+
+    /// Moves its name by `d` on the board: in the part's own terms that's
+    /// turned back and, for a part underneath, mirrored.
+    pub fn move_label(&mut self, d: P) {
+        let l = d.rot(-self.rot);
+        let l = if self.side == Side::Bottom { p(-l.x, l.y) } else { l };
+        self.label_at = self.label_at.add(l).rounded();
     }
 
     pub fn label_pos(&self) -> P {
@@ -847,6 +889,7 @@ mod tests {
             }],
             graphics: vec![],
             label_at: p(0.0, 2.0),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         };
@@ -878,6 +921,7 @@ mod tests {
             pads: vec![],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             // Right of the part's centre, 4 wide and 2 tall, on its top side.
             keepouts: vec![Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(1.0, -1.0), p(5.0, 1.0)), restrict: Restrict::default() }],
@@ -960,6 +1004,53 @@ mod tests {
     }
 
     #[test]
+    fn a_name_moves_by_the_step_whatever_the_part_does() {
+        for side in [Side::Top, Side::Bottom] {
+            for rot in [0.0, 90.0, 180.0, 270.0, 45.0] {
+                let mut f = part_with_a_keepout(side);
+                f.rot = rot;
+                f.label_at = p(0.5, 1.5);
+                let was = f.label_pos();
+                f.move_label(p(2.0, -1.0));
+                let now = f.label_pos();
+                assert!(now.dist(was.add(p(2.0, -1.0))) < 1e-3, "{side:?} turned {rot}: {was:?} -> {now:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_is_drawn_the_height_it_has_or_the_boards() {
+        let rules = Rules { text_height: 1.0, ..Rules::default() };
+        let mut f = part_with_a_keepout(Side::Top);
+        f.refdes = "R1".into();
+        let tall = |f: &Footprint| {
+            let ink = f.art(Layer::Silk(Side::Top), &rules);
+            let ys: Vec<f64> = ink.iter().filter_map(|i| if let Ink::Line(a, b, _) = i { Some([a.y, b.y]) } else { None }).flatten().collect();
+            ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        assert!((tall(&f) - 1.0).abs() < 1e-6, "the board's height: {}", tall(&f));
+        f.label_height = Some(0.5);
+        assert!((tall(&f) - 0.5).abs() < 1e-6, "its own: {}", tall(&f));
+        assert_eq!(f.label_height(&rules), 0.5);
+        f.label_height = None;
+        assert_eq!(f.label_height(&rules), 1.0);
+    }
+
+    #[test]
+    fn a_names_box_holds_its_strokes_and_follows_the_part() {
+        let rules = Rules::default();
+        let mut f = part_with_a_keepout(Side::Top);
+        f.refdes = "R123".into();
+        let b = f.label_bbox(&rules);
+        assert!(b.contains(f.label_pos()) && b.w() > b.h(), "{b:?}");
+        f.rot = 90.0;
+        let t = f.label_bbox(&rules);
+        assert!(t.h() > t.w() - 1e-9, "turned, it's taller than wide: {t:?}");
+        f.label_height = Some(2.0);
+        assert!(f.label_bbox(&rules).h() > t.h(), "a taller name has a taller box");
+    }
+
+    #[test]
     fn restrictions_read_from_altium_bits() {
         assert_eq!(Restrict::from_altium(31), Restrict::default());
         let r = Restrict::from_altium(1 | 4);
@@ -1014,7 +1105,7 @@ impl Footprint {
         }
         let label_layer = Layer::Silk(self.side);
         if layer == label_layer && !self.refdes.is_empty() {
-            let h = rules.text_height;
+            let h = self.label_height(rules);
             let strokes = crate::pcb::font::strokes(&self.refdes, self.label_pos(), h, self.label_rot(), mirror);
             for s in strokes {
                 if s.len() == 1 || (s.len() == 2 && s[0].same(s[1])) {

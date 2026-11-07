@@ -51,7 +51,10 @@ pub enum Prim {
     /// `cutout` marks a hole in the board.
     Region { head: Head, pts: Vec<P>, kind: u8, cutout: bool, restrict: u32 },
     Fill { head: Head, a: P, b: P, rot: f64 },
-    /// Text, 3D bodies and the like: counted, not drawn.
+    /// A piece of text: where it starts, how tall it is, turned how far, and
+    /// what it says (a part's name is the special string `.Designator`).
+    Text { head: Head, at: P, height: f64, rot: f64, mirror: bool, text: String },
+    /// 3D bodies and the like: counted, not drawn.
     Other { kind: u8, head: Option<Head> },
 }
 
@@ -159,8 +162,8 @@ pub fn parse(data: &[u8]) -> Result<Vec<Prim>, String> {
             4 => track(r.block()?)?,
             5 => {
                 let b = r.block()?;
-                r.block()?;
-                Prim::Other { kind, head: head(&mut Reader::new(b)).ok() }
+                let body = r.block()?;
+                text(b, body).unwrap_or(Prim::Other { kind, head: head(&mut Reader::new(b)).ok() })
             }
             6 => fill(r.block()?)?,
             11 => region(r.block()?)?,
@@ -173,6 +176,20 @@ pub fn parse(data: &[u8]) -> Result<Vec<Prim>, String> {
         out.push(prim);
     }
     Ok(out)
+}
+
+/// A text record: the common head, where it starts, its height, its stroke
+/// font, how far it's turned and whether it's mirrored; then the text itself.
+fn text(b: &[u8], body: &[u8]) -> Result<Prim, String> {
+    let mut r = Reader::new(b);
+    let head = head(&mut r)?;
+    let at = pt(&mut r)?;
+    let height = r.mm()?;
+    r.skip(2)?; // the stroke font
+    let rot = r.f64()?;
+    let mirror = r.u8()? != 0;
+    let text = Reader::new(body).pascal()?;
+    Ok(Prim::Text { head, at, height, rot, mirror, text })
 }
 
 fn track(b: &[u8]) -> Result<Prim, String> {

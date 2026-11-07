@@ -23,6 +23,21 @@ to it.
 | Keepout | K | Click an area's corners on the layer in use; click the first corner (or Enter) to close. Pours keep out of it. See below. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
 
+### Names on the silkscreen
+
+Click **Top silkscreen** or **Bottom silkscreen** in the layer list (or step to
+them with `+` and `−`, which cycle through the copper layers and then the two
+silkscreens) to work on that layer: it gets the *working* tag, and a part's name
+(its designator, such as R25) can be picked and dragged. Drag one and only it
+moves; its card on the right sets the name, its height and puts it back in the
+usual place above the part. A name follows its part when the part is moved, turned
+or flipped to the other side.
+
+Names are all the board's *Name height* (in the rules) unless one was given a
+height of its own, which a board from Altium has where a name wasn't the usual
+size; *Make the odd-sized names this tall* on the right gives them all the
+board's.
+
 ### Copper pours and planes
 
 A pour fills its outline with copper on one layer, keeping its clearance from
@@ -282,8 +297,9 @@ layers become plane pours: one per split plane, or the whole board for a
 plane layer with a net and no splits, with the plane clearance and
 plane-connect rules and the layer's pullback from the edge. Hatched pours
 are poured solid; pour cutouts, shelved pours and free pads are left out.
-The status bar says what was left out. Part names sit at Coppersmith's
-usual spot, not where Altium had them.
+The status bar says what was left out. Part names come in where Altium had
+them and as tall as it drew them: the usual height becomes the board's name
+height, and a name of any other height keeps its own.
 
     coppersmith --read-altium BOARD.CSPcbDoc
     coppersmith --read-altium SHEET.SchDoc

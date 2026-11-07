@@ -324,6 +324,7 @@ impl App {
                         Tool::Select if !self.sel.is_empty() => {
                             "Drag to move, pushing what's in the way (Ctrl: don't push) · R turn · L other side · Delete removes · Ctrl+D copies"
                         }
+                        Tool::Select if self.silk.is_some() => "Drag a part's name to move it · Pick a copper layer (or + −) to work on copper again",
                         Tool::Select => "Click to pick · Drag to move or box · Right-drag to pan · Scroll to zoom",
                         Tool::Route if self.route.is_some() => {
                             "Click places all but the hollow segment · Space flips · Shift+Space corners · Shift+R walk/stop/ignore · V via · Ctrl+click finishes · Esc ends"
@@ -391,7 +392,7 @@ impl App {
 
     fn layer_row(&mut self, ui: &mut Ui, layer: Layer, copper: bool) {
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-        let active = copper && layer == Layer::Cu(self.layer);
+        let active = if copper { self.silk.is_none() && layer == Layer::Cu(self.layer) } else { matches!(layer, Layer::Silk(s) if self.silk == Some(s)) };
         let fill = if active {
             ACCENT_SOFT
         } else if response.hovered() {
@@ -425,6 +426,8 @@ impl App {
         } else if response.clicked() {
             if copper && let Layer::Cu(l) = layer {
                 self.switch_layer(l);
+            } else if let Layer::Silk(side) = layer {
+                self.work_on_silk(side);
             } else if shown {
                 self.hidden.insert(layer);
             } else {
@@ -530,6 +533,7 @@ impl App {
                 [Sel::Pour(id)] => self.pour_card(ui, *id),
                 [Sel::Fill(id)] => self.fill_card(ui, *id),
                 [Sel::Keepout(id)] => self.keepout_card(ui, *id),
+                [Sel::Name(id)] => self.name_card(ui, *id),
                 many => self.many_card(ui, many.len()),
             }
             self.checks_card(ui);
@@ -596,6 +600,9 @@ impl App {
                 }
             });
         });
+        // Names that were given their own height, as Altium boards have them.
+        let odd = self.doc.footprints.iter().filter(|f| f.label_height.is_some_and(|h| (h - self.doc.rules.text_height).abs() > 1e-6)).count();
+        let mut same_size = false;
         card(ui, |ui| {
             heading(ui, "Rules");
             let r = &mut self.doc.rules;
@@ -609,10 +616,23 @@ impl App {
             field(ui, "From the edge", |ui| length(ui, u, &mut r.edge_clearance));
             field(ui, "Mask margin", |ui| length(ui, u, &mut r.mask_margin));
             field(ui, "Name height", |ui| length(ui, u, &mut r.text_height));
+            if odd > 0
+                && ui
+                    .button(format!("Make the {odd} odd-sized {} {} tall", if odd == 1 { "name" } else { "names" }, u.len(r.text_height)))
+                    .on_hover_text("Parts imported from Altium keep a name's own height where it wasn't the usual; this gives them the board's")
+                    .clicked()
+            {
+                same_size = true;
+            }
             // Where a 45° track turns, the 45° step is never shorter than this,
             // so corners never close up into right angles.
             field(ui, "Shortest 45°", |ui| length(ui, u, &mut r.min_diag));
         });
+        if same_size {
+            for f in &mut self.doc.footprints {
+                f.label_height = None;
+            }
+        }
     }
 
     fn footprint_card(&mut self, ui: &mut Ui, id: u32) {
@@ -801,6 +821,37 @@ impl App {
         });
         if remove {
             self.delete_selection();
+        }
+    }
+
+    fn name_card(&mut self, ui: &mut Ui, id: u32) {
+        let u = self.unit;
+        let board_height = self.doc.rules.text_height;
+        let Some(f) = self.doc.fp_mut(id) else { return };
+        let mut usual = false;
+        card(ui, |ui| {
+            heading(ui, &format!("Name of {}", f.refdes));
+            field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut f.refdes).desired_width(140.0)));
+            field(ui, "Height", |ui| {
+                let mut h = f.label_height.unwrap_or(board_height);
+                if length(ui, u, &mut h) {
+                    f.label_height = Some(h.max(0.1));
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                if f.label_height.is_some() && ui.button("Board's height").on_hover_text("Draw it the height the rules give names").clicked() {
+                    f.label_height = None;
+                }
+                if ui.button("Usual place").on_hover_text("Above the part, where a new part's name goes").clicked() {
+                    usual = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("Drag it on the silkscreen layer to move it").size(11.5).color(FAINT));
+        });
+        if usual {
+            f.label_at = f.usual_label_spot();
         }
     }
 

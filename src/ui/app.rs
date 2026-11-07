@@ -34,6 +34,8 @@ pub enum Sel {
     Pour(u32),
     Fill(u32),
     Keepout(u32),
+    /// The name of a part, drawn on the silkscreen.
+    Name(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -173,6 +175,9 @@ pub struct App {
 
     pub tool: Tool,
     pub layer: u8,
+    /// A silkscreen layer being worked on, where names can be picked and moved;
+    /// none when it's the copper layer above.
+    pub silk: Option<Side>,
     pub hidden: HashSet<Layer>,
     pub show_rats: bool,
     pub show_problems: bool,
@@ -262,6 +267,7 @@ impl App {
             canvas_rect: Rect::NOTHING,
             tool: Tool::Select,
             layer: TOP,
+            silk: None,
             hidden,
             show_rats: true,
             show_problems: true,
@@ -436,6 +442,7 @@ impl App {
             Sel::Pour(id) => doc.pour(id).is_some(),
             Sel::Fill(id) => doc.fill(id).is_some(),
             Sel::Keepout(id) => doc.keepout(id).is_some(),
+            Sel::Name(id) => doc.fp(id).is_some(),
         });
     }
 
@@ -531,6 +538,10 @@ impl App {
         }
         for v in board.keepouts.iter_mut().filter(|v| picked.contains(&Sel::Keepout(v.id))) {
             v.pts = v.pts.iter().map(shift).collect();
+        }
+        // A name moves by itself, unless its part moves too (then it goes with it).
+        for f in board.footprints.iter_mut().filter(|f| picked.contains(&Sel::Name(f.id)) && !picked.contains(&Sel::Fp(f.id))) {
+            f.move_label(d);
         }
         for t in board.tracks.iter_mut().filter(|t| picked.contains(&Sel::Track(t.id))) {
             anchors.push(t.a);
@@ -715,6 +726,8 @@ impl App {
                         made.push(Sel::Fill(v.id));
                         b.fills.push(v);
                     }
+                    // A name is its part's: there's one of each.
+                    Sel::Name(_) => {}
                     Sel::Keepout(id) => {
                         let Some(mut v) = b.keepout(id).cloned() else { continue };
                         v.id = b.new_id();
@@ -867,11 +880,15 @@ impl App {
     }
 
     pub fn next_layer(&mut self, step: i32) {
-        let layers = self.doc.copper_layers();
-        let i = layers.iter().position(|l| *l == self.layer).unwrap_or(0) as i32;
-        let n = layers.len() as i32;
-        let next = layers[(i + step).rem_euclid(n) as usize];
-        self.switch_layer(next);
+        // The copper layers, then the two silkscreens, round and round.
+        let mut all: Vec<Layer> = self.doc.copper_layers().into_iter().map(Layer::Cu).collect();
+        all.extend([Layer::Silk(Side::Top), Layer::Silk(Side::Bottom)]);
+        let i = all.iter().position(|l| *l == self.working()).unwrap_or(0) as i32;
+        match all[(i + step).rem_euclid(all.len() as i32) as usize] {
+            Layer::Cu(l) => self.switch_layer(l),
+            Layer::Silk(side) => self.work_on_silk(side),
+            _ => {}
+        }
     }
 
     pub fn switch_layer(&mut self, layer: u8) {
@@ -880,7 +897,25 @@ impl App {
             self.route_via(Some(layer));
         }
         self.layer = layer;
+        self.silk = None;
         self.hidden.remove(&Layer::Cu(layer));
+    }
+
+    /// Works on a silkscreen layer: its names can be picked and dragged.
+    pub fn work_on_silk(&mut self, side: Side) {
+        if self.route.is_some() {
+            self.finish_route();
+        }
+        self.silk = Some(side);
+        self.hidden.remove(&Layer::Silk(side));
+    }
+
+    /// The layer being worked on.
+    pub fn working(&self) -> Layer {
+        match self.silk {
+            Some(side) => Layer::Silk(side),
+            None => Layer::Cu(self.layer),
+        }
     }
 
     // -- Files ---------------------------------------------------------------
@@ -1393,7 +1428,7 @@ impl App {
             Sel::Via(id) => net(Item::Via(id)),
             Sel::Pour(id) => self.doc.pour(id).map(|p| p.net),
             Sel::Fill(id) => self.doc.fill(id).map(|p| p.net),
-            Sel::Keepout(_) => None,
+            Sel::Keepout(_) | Sel::Name(_) => None,
             Sel::Fp(id) => {
                 let q = self.hover_q?;
                 let f = self.doc.fp(id)?;
@@ -1440,6 +1475,69 @@ pub fn note_slow(what: &str, started: std::time::Instant) {
 /// Joins a track to the next when they carry straight on, so a route laid in
 /// clicks doesn't leave a string of short pieces.
 pub(crate) fn merge_straight(b: &mut Board) {
+    use std::collections::HashMap;
+    // Points are the same within 0.0001, so cells of 0.001 and a look at the
+    // nine round a point find everything that's there.
+    let cell = |q: P| ((q.x * 1000.0).floor() as i64, (q.y * 1000.0).floor() as i64);
+    let round = |q: P| {
+        let (cx, cy) = cell(q);
+        [(-1, -1), (0, -1), (1, -1), (-1, 0), (0, 0), (1, 0), (-1, 1), (0, 1), (1, 1)].map(|(dx, dy)| (cx + dx, cy + dy))
+    };
+    // The tracks with an end in each cell, and the vias in each.
+    let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, t) in b.tracks.iter().enumerate() {
+        let (ca, cb) = (cell(t.a), cell(t.b));
+        ends.entry(ca).or_default().push(i);
+        if cb != ca {
+            ends.entry(cb).or_default().push(i);
+        }
+    }
+    let mut vias: HashMap<(i64, i64), Vec<P>> = HashMap::new();
+    for v in &b.vias {
+        vias.entry(cell(v.at)).or_default().push(v.at);
+    }
+    let mut alive = vec![true; b.tracks.len()];
+    for i in 0..b.tracks.len() {
+        // Joins on whatever carries straight on from its end, again and again.
+        while alive[i] && b.tracks[i].mid.is_none() {
+            let mid = b.tracks[i].b;
+            // What's joined here: tracks with an end here, and vias.
+            let mut at: Vec<usize> = Vec::new();
+            for c in round(mid) {
+                for &k in ends.get(&c).into_iter().flatten() {
+                    if alive[k] && (b.tracks[k].a.same(mid) || b.tracks[k].b.same(mid)) && !at.contains(&k) {
+                        at.push(k);
+                    }
+                }
+            }
+            let via_count = round(mid).iter().filter_map(|c| vias.get(c)).flatten().filter(|v| v.same(mid)).count();
+            // Something else joining in the middle keeps the corner.
+            if at.len() + via_count != 2 {
+                break;
+            }
+            let Some(&j) = at.iter().find(|&&k| k != i) else { break };
+            let (t, u) = (&b.tracks[i], &b.tracks[j]);
+            if u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+                break;
+            }
+            let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
+            if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
+                break;
+            }
+            let end = u.b;
+            b.tracks[i].b = end;
+            alive[j] = false;
+            ends.entry(cell(end)).or_default().push(i);
+        }
+    }
+    let mut keep = alive.into_iter();
+    b.tracks.retain(|_| keep.next().unwrap_or(true));
+}
+
+/// What `merge_straight` was before it used an index: the same joins, found by
+/// comparing every pair of tracks. Kept to check the quick one against.
+#[cfg(test)]
+pub(crate) fn merge_straight_slow(b: &mut Board) {
     loop {
         let mut joined = false;
         'outer: for i in 0..b.tracks.len() {
@@ -1538,6 +1636,142 @@ mod tests {
         assert_eq!(led.len(), 1);
         let ends = [led[0].a, led[0].b];
         assert!(ends.iter().any(|q| q.same(p(16.9125, 27.0))) && ends.iter().any(|q| q.same(p(16.9125, 21.0))), "{led:?}");
+    }
+
+    /// A board with a straight run left in pieces, and with dots of copper
+    /// (tracks of no length, as an Altium board has) that a clumsy tidy would wipe.
+    fn board_with_a_run_in_pieces() -> Board {
+        let mut b = crate::pcb::sample::board();
+        let n = b.net("SPLIT");
+        for (a, e) in [((5.0, 5.0), (8.0, 5.0)), ((8.0, 5.0), (11.0, 5.0)), ((11.0, 5.0), (14.0, 5.0)), ((20.0, 8.0), (20.0, 8.0)), ((22.0, 8.0), (22.0, 8.0))] {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: p(a.0, a.1), b: p(e.0, e.1), w: 0.4, layer: TOP, net: n });
+        }
+        b
+    }
+
+    #[test]
+    fn moving_a_name_leaves_every_track_as_it_was() {
+        let mut b = board_with_a_run_in_pieces();
+        let r3 = b.footprints.iter().find(|f| f.refdes == "R3").unwrap().id;
+        let (tracks, part, label) = (b.tracks.clone(), b.fp(r3).unwrap().at, b.fp(r3).unwrap().label_pos());
+        App::move_selection(&mut b, &[Sel::Name(r3)], p(1.5, -0.5));
+        assert_eq!(b.tracks, tracks, "no track was touched, or joined to another");
+        assert_eq!(b.fp(r3).unwrap().at, part, "the part stays");
+        assert!(b.fp(r3).unwrap().label_pos().dist(label.add(p(1.5, -0.5))) < 1e-3, "the name moves");
+    }
+
+    #[test]
+    fn moving_a_keepout_or_a_pour_leaves_every_track_as_it_was_too() {
+        let mut b = board_with_a_run_in_pieces();
+        let k = b.new_id();
+        b.keepouts.push(Keepout { id: k, layer: Some(TOP), pts: rect_outline(p(30.0, 30.0), p(34.0, 34.0)), restrict: Restrict::pours_only() });
+        let f = b.new_id();
+        b.fills.push(Fill { id: f, layer: TOP, net: 0, pts: rect_outline(p(20.0, 30.0), p(24.0, 34.0)) });
+        let tracks = b.tracks.clone();
+        App::move_selection(&mut b, &[Sel::Keepout(k), Sel::Fill(f)], p(1.0, 1.0));
+        assert_eq!(b.tracks, tracks);
+        assert!(b.keepout(k).unwrap().pts[0].same(p(31.0, 31.0)) && b.fill(f).unwrap().pts[0].same(p(21.0, 31.0)));
+    }
+
+
+    /// A board's tracks in a form that doesn't depend on their numbering or order.
+    fn shape(b: &Board) -> Vec<(u8, u32, i64, [i64; 4])> {
+        let k = |v: f64| (v * 10_000.0).round() as i64;
+        let mut out: Vec<_> = b.tracks.iter().map(|t| (t.layer, t.net, k(t.w), [k(t.a.x), k(t.a.y), k(t.b.x), k(t.b.y)])).collect();
+        out.sort();
+        out
+    }
+
+    /// Boards of straight runs in pieces, shuffled: with vias and branches at
+    /// some joints, other widths and nets, pieces laid the other way, arcs.
+    fn random_runs(seed: u64) -> Board {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut rnd = move |n: u64| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let mut b = Board::default();
+        let nets = [b.net("A"), b.net("B")];
+        let dirs = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 0.0), (-1.0, 1.0)];
+        let mut pieces: Vec<Track> = Vec::new();
+        for run in 0..(3 + rnd(6)) {
+            let (dx, dy) = dirs[rnd(dirs.len() as u64) as usize];
+            let mut at = p(2.0 + rnd(40) as f64, 2.0 + rnd(30) as f64);
+            let (layer, net, w) = (if rnd(4) == 0 { BOTTOM } else { TOP }, nets[rnd(2) as usize], [0.2, 0.25][rnd(2) as usize]);
+            for k in 0..(1 + rnd(5)) {
+                let len = 0.5 + rnd(6) as f64 * 0.5;
+                let to = at.add(p(dx * len, dy * len));
+                let mut next = to;
+                let mut t = Track { mid: None, id: 0, a: at, b: to, w, layer, net };
+                match rnd(14) {
+                    // A different width or net: the run stops being one.
+                    0 => t.w = 0.3,
+                    1 => t.net = nets[1 - (net == nets[1]) as usize],
+                    // Laid the other way round: it doesn't carry on.
+                    2 => std::mem::swap(&mut t.a, &mut t.b),
+                    // Something joined in the middle.
+                    3 => {
+                        let id = b.new_id();
+                        b.vias.push(Via { id, at: to, dia: 0.6, drill: 0.3, net });
+                    }
+                    4 => pieces.push(Track { mid: None, id: 0, a: to, b: to.add(p(0.0, 1.0)), w, layer, net }),
+                    // An arc, which is never joined.
+                    5 if k > 0 => t.mid = Some(at.lerp(to, 0.5).add(p(0.1, 0.1))),
+                    // Not quite where the last ended, but within the tolerance.
+                    6 => t.a = t.a.add(p(5e-5, 0.0)),
+                    // On the other layer from here on, with no via: it doesn't carry on.
+                    7 | 9 => t.layer = if layer == TOP { BOTTOM } else { TOP },
+                    // Doubling back on itself.
+                    8 | 10 => {
+                        t.b = at.sub(p(dx * len, dy * len));
+                        next = t.b;
+                    }
+                    _ => {}
+                }
+                pieces.push(t);
+                at = next;
+            }
+            let _ = run;
+        }
+        // Shuffled, then numbered.
+        for i in (1..pieces.len()).rev() {
+            pieces.swap(i, rnd(i as u64 + 1) as usize);
+        }
+        for mut t in pieces {
+            t.id = b.new_id();
+            b.tracks.push(t);
+        }
+        b
+    }
+
+    #[test]
+    fn the_quick_join_makes_the_joins_the_slow_one_did() {
+        let mut joined_somewhere = 0;
+        for seed in 0..300 {
+            let b = random_runs(seed);
+            let (mut quick, mut slow) = (b.clone(), b.clone());
+            merge_straight(&mut quick);
+            merge_straight_slow(&mut slow);
+            assert_eq!(shape(&quick), shape(&slow), "seed {seed}");
+            if quick.tracks.len() < b.tracks.len() {
+                joined_somewhere += 1;
+            }
+        }
+        assert!(joined_somewhere > 100, "{joined_somewhere} of 300 boards had something to join");
+    }
+
+    #[test]
+    fn joining_leaves_dots_and_other_tracks_alone() {
+        let mut b = board_with_a_run_in_pieces();
+        let before = b.tracks.len();
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), before - 2, "the three pieces become one");
+        let split = b.net_by_name("SPLIT").unwrap();
+        let run: Vec<&Track> = b.tracks.iter().filter(|t| t.net == split && !t.a.same(t.b)).collect();
+        assert_eq!(run.len(), 1);
+        assert!(run[0].a.same(p(5.0, 5.0)) && run[0].b.same(p(14.0, 5.0)));
+        assert_eq!(b.tracks.iter().filter(|t| t.a.same(t.b)).count(), 2, "the dots stand");
     }
 
     #[test]

@@ -248,7 +248,7 @@ pub fn footprint(
                     skipped.fills += 1;
                 }
             }
-            Prim::Via { .. } | Prim::Other { .. } => {}
+            Prim::Via { .. } | Prim::Text { .. } | Prim::Other { .. } => {}
         }
     }
     (pads, graphics, keepouts)

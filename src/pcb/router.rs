@@ -1922,6 +1922,7 @@ mod pushing {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -2109,6 +2110,7 @@ mod via_pushing {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.8, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -2197,6 +2199,7 @@ fn pushing_board() -> (Board, u32, u32) {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -2408,6 +2411,7 @@ mod pushing_arcs {
                 pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
                 graphics: vec![],
                 label_at: P::default(),
+                label_height: None,
                 locked: false,
                 keepouts: vec![],
             });
@@ -2572,6 +2576,7 @@ mod keepout_walls {
             pads: vec![],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-2.0, -3.0), p(2.0, 3.0)), restrict: Restrict::default() }],
         });

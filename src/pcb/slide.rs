@@ -65,9 +65,17 @@ fn add_track(board: &mut Board, like: &Track, a: P, b: P) {
     board.tracks.push(Track { mid: None, id, a, b, w: like.w, layer: like.layer, net: like.net });
 }
 
-/// Takes out tracks with no length left.
-pub fn tidy(board: &mut Board) {
-    board.tracks.retain(|t| !t.a.same(t.b));
+/// The tracks that have no length: round dots of copper, which a board from
+/// Altium has plenty of.
+pub fn dots(board: &Board) -> HashSet<u32> {
+    board.tracks.iter().filter(|t| t.a.same(t.b)).map(|t| t.id).collect()
+}
+
+/// Takes out tracks that have no length left after a move. A track that had
+/// none to begin with (`dots`, taken before the move) is a dot of copper, not
+/// something left over, and stays.
+pub fn tidy(board: &mut Board, dots: &HashSet<u32>) {
+    board.tracks.retain(|t| !t.a.same(t.b) || dots.contains(&t.id));
 }
 
 /// Slides a straight track sideways by `delta` (only the part square to it
@@ -145,7 +153,7 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
         s.a = ends[0];
         s.b = ends[1];
     }
-    tidy(&mut work);
+    tidy(&mut work, &dots(board));
     *board = work;
     true
 }
@@ -500,6 +508,11 @@ fn relay_keeping(board: &mut Board, i: usize, from: P, to: P, last: bool) {
 /// point that moved), brings the ends of the other tracks along without
 /// bending 45° work out of shape. `skip` are tracks that moved bodily.
 pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
+    // Nothing moved that tracks are joined to (a name, a keepout…): nothing to do.
+    if moves.is_empty() {
+        return;
+    }
+    let was_dots = dots(board);
     // Points that have moved, and whether a track arriving there has to stay
     // tangent to an arc that moved with them.
     let mut moves: Vec<(P, P, bool)> = moves.iter().map(|m| (m.0, m.1, false)).collect();
@@ -590,12 +603,13 @@ pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
         // meets it keeps the old direction.
         relay_keeping(board, i, other, new, tangent);
     }
-    tidy(board);
+    tidy(board, &was_dots);
 }
 
 /// Drags the point where tracks meet from `from` to `to`, keeping 45° work
 /// at 45°: each track there is re-laid from its far end.
 pub fn drag_joint(board: &mut Board, from: P, to: P) {
+    let was_dots = dots(board);
     let at: Vec<u32> = board.tracks.iter().filter(|t| t.a.same(from) || t.b.same(from)).map(|t| t.id).collect();
     for id in at {
         let Some(i) = board.tracks.iter().position(|t| t.id == id) else { continue };
@@ -612,7 +626,7 @@ pub fn drag_joint(board: &mut Board, from: P, to: P) {
             v.at = to;
         }
     }
-    tidy(board);
+    tidy(board, &was_dots);
 }
 
 #[cfg(test)]
@@ -663,6 +677,7 @@ mod tests {
                 pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill, net }],
                 graphics: vec![],
                 label_at: P::default(),
+                label_height: None,
                 locked: false,
                 keepouts: vec![],
             });
@@ -699,6 +714,62 @@ mod tests {
             pad(&mut b, p(x, y), nets[i % 3], if i % 2 == 0 { 0.0 } else { 0.5 });
         }
         b
+    }
+
+    /// The crowded board with dots of copper (tracks of no length) scattered
+    /// about it, as an Altium board has.
+    fn crowded_with_dots() -> (Board, Vec<u32>) {
+        let mut b = crowded();
+        let n = b.net("A");
+        let mut ids = Vec::new();
+        for (x, y) in [(2.0, 2.0), (44.0, 3.0), (30.0, 36.0)] {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: p(x, y), b: p(x, y), w: 0.5, layer: TOP, net: n });
+            ids.push(id);
+        }
+        (b, ids)
+    }
+
+    #[test]
+    fn following_nothing_changes_nothing() {
+        let (mut b, _) = crowded_with_dots();
+        let was = b.clone();
+        follow_moves(&mut b, &[], &HashSet::new());
+        assert_eq!(b, was);
+    }
+
+    #[test]
+    fn dots_of_copper_survive_moves_that_have_nothing_to_do_with_them() {
+        let (b, dots_were) = crowded_with_dots();
+        let kept = |b: &Board| dots_were.iter().all(|id| b.track(*id).is_some_and(|t| t.a.same(t.b)));
+        // A real move: a track's end, with its neighbours following.
+        let mut moved = b.clone();
+        follow_moves(&mut moved, &[(p(5.0, 8.0), p(5.0, 8.5))], &HashSet::new());
+        assert!(moved != b, "something followed");
+        assert!(kept(&moved), "the dots stand");
+        // Sliding a track.
+        let id = b.tracks.iter().find(|t| t.mid.is_none() && t.a.dist(t.b) > 10.0).unwrap().id;
+        let mut slid = b.clone();
+        assert!(slide(&mut slid, id, p(0.0, 0.2)));
+        assert!(kept(&slid));
+        // Dragging a corner.
+        let mut joint = b.clone();
+        drag_joint(&mut joint, p(5.0, 9.6), p(5.0, 9.9));
+        assert!(kept(&joint));
+    }
+
+    #[test]
+    fn a_track_a_move_leaves_with_no_length_still_goes() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let (dot, track) = (b.new_id(), b.new_id());
+        b.tracks.push(Track { mid: None, id: dot, a: p(30.0, 30.0), b: p(30.0, 30.0), w: 0.4, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: track, a: p(10.0, 10.0), b: p(13.0, 10.0), w: 0.25, layer: TOP, net: n });
+        // One end moves on to the other: nothing's left of it.
+        follow_moves(&mut b, &[(p(10.0, 10.0), p(13.0, 10.0))], &HashSet::new());
+        assert!(b.track(track).is_none_or(|t| !t.a.same(t.b)), "no track of no length was left by the move");
+        assert!(b.tracks.iter().all(|t| t.id == dot || !t.a.same(t.b)));
+        assert!(b.track(dot).is_some(), "the dot that was always there stays");
     }
 
     /// The push scene must push exactly as the full one did.
@@ -918,6 +989,29 @@ mod tests {
             let ps = push_scene(&b, layer);
             eprintln!("{name}: push scene (copper + for_push) {:?} ({} obstacles here)", s0.elapsed(), ps.all.len());
         }
+        // What running the straight-run join over the whole board costs, as at the end of a drag.
+        {
+            let (mut c, mut slow) = (b.clone(), b.clone());
+            let s0 = std::time::Instant::now();
+            crate::ui::app::merge_straight(&mut c);
+            let quick_took = s0.elapsed();
+            let s0 = std::time::Instant::now();
+            crate::ui::app::merge_straight_slow(&mut slow);
+            let k = |v: f64| (v * 10_000.0).round() as i64;
+            let shape = |b: &Board| {
+                let mut v: Vec<_> = b.tracks.iter().map(|t| (t.layer, t.net, k(t.w), [k(t.a.x), k(t.a.y), k(t.b.x), k(t.b.y)], t.mid.is_some())).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(shape(&c), shape(&slow), "the quick join differs from the slow one on the real board");
+            eprintln!(
+                "merge_straight on the whole board: quick {:?}, was {:?}; same {} tracks left ({} joined)",
+                quick_took,
+                s0.elapsed(),
+                c.tracks.len(),
+                b.tracks.len() - c.tracks.len()
+            );
+        }
         // The push scene against the full one, on real copper, in all places.
         {
             let legacy = |b: &Board, layer: u8| Scene::new(b, &scene_copper(b), layer, 0);
@@ -1078,6 +1172,7 @@ mod pushing_while_sliding {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -1172,6 +1267,7 @@ mod pushing_while_moving {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -1463,6 +1559,7 @@ mod vias_push_on_other_layers {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.5, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
             keepouts: vec![],
         });
@@ -1540,6 +1637,7 @@ mod timing {
                     pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(0.6, 0.6), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
                     graphics: vec![],
                     label_at: P::default(),
+                    label_height: None,
                     locked: false,
                     keepouts: vec![],
                 });
