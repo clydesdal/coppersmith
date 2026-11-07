@@ -1,12 +1,37 @@
 name: Build
 
+# Builds are for what's going to be merged, not for every push:
+# - pushes to master (what was merged),
+# - pull requests that are ready for review (drafts are skipped; marking one
+#   ready builds it), each new push cancelling the build it makes obsolete,
+# - by hand, from the Actions tab.
+# Pushing to a branch with no pull request, or to a draft, costs nothing.
+# Changes to docs alone don't build.
 on:
   push:
+    branches: [master]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   workflow_dispatch:
+
+# One build per branch or pull request at a time: a newer push cancels the older.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    # Not for draft pull requests.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -21,10 +46,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Keeps the compiled dependencies between builds.
+      - uses: Swatinem/rust-cache@v2
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
-      - run: cargo test
+      # The tests in the release profile, so the build after them reuses what they compiled.
+      - run: cargo test --release
       - run: cargo build --release
       - name: Mac app
         if: runner.os == 'macOS'
