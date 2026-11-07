@@ -397,11 +397,20 @@ fn yes() -> bool {
 /// One piece of poured copper: its outline and holes (outline
 /// counter-clockwise, holes clockwise) and the same cut into small
 /// triangles for drawing and for checking.
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Island {
     pub rings: Vec<Vec<P>>,
     pub tris: Vec<[P; 3]>,
     pub area: f64,
+    /// The triangles as pieces of copper, ready for checking, worked out once
+    /// when poured. Follows from `tris`, so not part of what's compared.
+    pub parts: Parts,
+}
+
+impl PartialEq for Island {
+    fn eq(&self, o: &Island) -> bool {
+        self.rings == o.rings && self.tris == o.tris && self.area == o.area
+    }
 }
 
 impl Pour {

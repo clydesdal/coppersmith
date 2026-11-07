@@ -51,11 +51,11 @@ pub struct Cu {
     /// The main piece: the whole thing, or for an arc its chord.
     pub blob: Blob,
     /// All of it, as pieces: just `blob`, or the many pieces of an arc.
-    pub parts: Vec<Blob>,
+    pub parts: std::sync::Arc<Vec<Blob>>,
     /// Each part's box.
-    pub boxes: Vec<BBox>,
+    pub boxes: std::sync::Arc<Vec<BBox>>,
     /// Finds the parts near a place, for copper made of many (a pour).
-    pub grid: Option<BoxGrid>,
+    pub grid: Option<std::sync::Arc<BoxGrid>>,
     pub bbox: BBox,
     pub on: On,
     pub net: u32,
@@ -68,13 +68,12 @@ pub struct Cu {
 
 impl Cu {
     fn new(item: Item, blob: Blob, parts: Vec<Blob>, on: On, net: u32, anchors: Vec<P>) -> Cu {
-        let boxes: Vec<BBox> = parts.iter().map(|b| b.bbox()).collect();
-        let mut bbox = BBox::default();
-        for b in &boxes {
-            bbox.union(b);
-        }
-        let grid = (boxes.len() > 12).then(|| BoxGrid::new(&boxes));
-        Cu { item, blob, parts, boxes, grid, bbox, on, net, anchors, keeps: None }
+        Cu::shared(item, blob, Parts::new(parts), on, net, anchors)
+    }
+
+    /// As `new`, from pieces already worked out.
+    fn shared(item: Item, blob: Blob, parts: Parts, on: On, net: u32, anchors: Vec<P>) -> Cu {
+        Cu { item, blob, parts: parts.blobs, boxes: parts.boxes, grid: parts.grid, bbox: parts.bbox, on, net, anchors, keeps: None }
     }
 
     /// The gap to another piece of copper and the nearest points, worked
@@ -84,7 +83,7 @@ impl Cu {
         let mut best = (f64::MAX, P::default(), P::default());
         let (small, big) = if self.parts.len() <= o.parts.len() { (self, o) } else { (o, self) };
         let mut near: Vec<u32> = Vec::new();
-        for (a, ab) in small.parts.iter().zip(&small.boxes) {
+        for (a, ab) in small.parts.iter().zip(small.boxes.iter()) {
             if box_gap(ab, &big.bbox) >= best.0.min(limit) {
                 continue;
             }
@@ -153,15 +152,17 @@ pub fn collect(board: &Board) -> Vec<Cu> {
     let mut items = collect_fixed(board);
     for pour in &board.pours {
         for (k, island) in pour.fill.iter().enumerate() {
-            let parts: Vec<Blob> = island.tris.iter().map(|t| Blob { core: t.to_vec(), r: 0.0 }).collect();
-            if parts.is_empty() {
+            // Its pieces were worked out when it was poured.
+            let parts = island.parts.clone();
+            if parts.blobs.is_empty() {
                 continue;
             }
             // Where a "still to connect" line may end: corners round it.
             let ring = &island.rings[0];
             let step = (ring.len() / 24).max(1);
             let anchors: Vec<P> = ring.iter().step_by(step).copied().collect();
-            let mut cu = Cu::new(Item::Pour(pour.id, k as u16), parts[0].clone(), parts, On::One(pour.layer), pour.net, anchors);
+            let first = parts.blobs[0].clone();
+            let mut cu = Cu::shared(Item::Pour(pour.id, k as u16), first, parts, On::One(pour.layer), pour.net, anchors);
             let near = if pour.plane { board.rules.clearance } else { pour.clearance };
             cu.keeps = Some((near, pour.edge));
             items.push(cu);

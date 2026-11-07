@@ -484,6 +484,31 @@ impl BoxGrid {
     }
 }
 
+/// The pieces a lump of copper is made of, with their boxes and, where there
+/// are many, a grid to find the near ones. Shared, never changed once made, so
+/// a pour's pieces are worked out once when it's poured and then only handed
+/// round.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub blobs: std::sync::Arc<Vec<Blob>>,
+    pub boxes: std::sync::Arc<Vec<BBox>>,
+    pub grid: Option<std::sync::Arc<BoxGrid>>,
+    /// The box round them all.
+    pub bbox: BBox,
+}
+
+impl Parts {
+    pub fn new(blobs: Vec<Blob>) -> Parts {
+        let boxes: Vec<BBox> = blobs.iter().map(|b| b.bbox()).collect();
+        let mut bbox = BBox::default();
+        for b in &boxes {
+            bbox.union(b);
+        }
+        let grid = (boxes.len() > 12).then(|| std::sync::Arc::new(BoxGrid::new(&boxes)));
+        Parts { blobs: std::sync::Arc::new(blobs), boxes: std::sync::Arc::new(boxes), grid, bbox }
+    }
+}
+
 /// The gap between two boxes, 0 where they overlap.
 pub fn box_gap(a: &BBox, b: &BBox) -> f64 {
     let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);

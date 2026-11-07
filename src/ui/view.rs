@@ -1170,7 +1170,7 @@ impl App {
             }
             for item in &c.plan.hits {
                 if let Some(&k) = self.copper.index.get(item) {
-                    for part in &self.copper.items[k].parts {
+                    for part in self.copper.items[k].parts.iter() {
                         stroke_blob(painter, tr, part, Stroke::new(2.0, theme::RED));
                     }
                 }

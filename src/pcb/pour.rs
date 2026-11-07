@@ -156,7 +156,7 @@ fn signature(board: &Board, pour: &Pour, env: &Around, before: u64) -> u64 {
         pts(&mut h, &cu.anchors);
         pts(&mut h, &cu.blob.core);
         f(&mut h, cu.blob.r);
-        for part in &cu.parts {
+        for part in cu.parts.iter() {
             pts(&mut h, &part.core);
             f(&mut h, part.r);
         }
@@ -248,7 +248,7 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
         }
         let ours = pour.net != 0 && cu.net == pour.net;
         if !ours {
-            for part in &cu.parts {
+            for part in cu.parts.iter() {
                 away.push(cut(part, near));
             }
             if pour.plane && *drill > 0.0 {
@@ -328,7 +328,8 @@ fn finish(board: &Board, pour: &Pour, env: &Around, shapes: &[Shape]) -> Vec<Isl
             continue;
         }
         let tris = triangles(s);
-        out.push(Island { rings, tris, area });
+        let parts = Parts::new(tris.iter().map(|t| Blob { core: t.to_vec(), r: 0.0 }).collect());
+        out.push(Island { rings, tris, area, parts });
     }
     out
 }
