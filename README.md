@@ -402,6 +402,25 @@ sheet entries and hierarchy, a sheet border and title block, text notes,
 multi-select and copy/paste, moving the designator and value text, and
 putting a schematic's changes onto the board (Update PCB).
 
+### The 3D view
+
+**View ▸ 3D view** (or **+ ▸ 3D view of the board**, or `coppersmith BOARD --3d`)
+opens the board as a solid in a **3D** tab: green solder mask over the copper,
+bare gold on the pads, white silkscreen, drilled and plated holes, the board's
+own outline. Drag to turn it, right-drag or middle-drag to move, scroll or pinch
+to zoom. The bar along the bottom has *Top*, *Bottom* and *Angle* views, *Fit*, a
+switch for each of copper, mask and silk, six mask colours (green is the first)
+and the board's thickness (1.6 mm to start). The picture is made from the board
+as it is now, the way the Gerbers are (pads, tracks, vias, pours and fills for
+copper; openings over the pads for the mask; the drawing and names for the
+silkscreen), and is made again when the board changes while the tab is on show.
+It is Copperview's 3D view (the same lighting and way of putting the layers on a
+mesh of the board), taking its layers from Coppersmith's board instead of from
+Gerber files.
+
+Not yet: part bodies (the 3D view shows the board, not the components on it),
+inner copper layers, and saving the picture.
+
 ### Altium and Circuit Studio boards and schematics
 
 **Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in

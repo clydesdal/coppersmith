@@ -236,14 +236,18 @@ impl App {
             let mode = self.mode();
             ui.menu_button("File", |ui| match mode {
                 Mode::Board => self.file_menu(ui, &ctx),
+                Mode::View3d => self.view3d_file_menu(ui, &ctx),
                 _ => self.editor_file_menu(ui, &ctx),
             });
-            ui.menu_button("Edit", |ui| match mode {
-                Mode::Board => self.edit_menu(ui),
-                _ => self.editor_edit_menu(ui, &ctx),
-            });
+            if mode != Mode::View3d {
+                ui.menu_button("Edit", |ui| match mode {
+                    Mode::Board => self.edit_menu(ui),
+                    _ => self.editor_edit_menu(ui, &ctx),
+                });
+            }
             ui.menu_button("View", |ui| match mode {
                 Mode::Board => self.view_menu(ui),
+                Mode::View3d => self.view3d_view_menu(ui, &ctx),
                 _ => self.editor_view_menu(ui, &ctx),
             });
             match mode {
@@ -252,6 +256,7 @@ impl App {
                     ui.menu_button("Route", |ui| self.route_menu(ui));
                     ui.menu_button("Tools", |ui| self.tools_menu(ui));
                 }
+                Mode::View3d => {}
                 _ => {
                     ui.menu_button("Place", |ui| self.editor_place_menu(ui, &ctx));
                 }
@@ -317,6 +322,33 @@ impl App {
         ui.separator();
         if item(ui, "Quit", "", true) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn view3d_file_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        if item(ui, "Open project…", "", true) {
+            self.ask_open_project(ctx);
+        }
+        if item(ui, "Close this tab", "Ctrl+W", true) {
+            if let Some(i) = self.active {
+                self.close_doc(i);
+            }
+        }
+        ui.separator();
+        if item(ui, "Quit", "", true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn view3d_view_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        for (text, cmd) in [("Top", EditorCmd::Tool(0)), ("Bottom", EditorCmd::Tool(1)), ("Angle", EditorCmd::Tool(2)), ("Fit to the window", EditorCmd::Fit)] {
+            if item(ui, text, "", true) {
+                self.editor_command(ctx, cmd);
+            }
+        }
+        ui.separator();
+        if check(ui, "Left panel", "Ctrl+[", self.show_left, false) {
+            self.show_left = !self.show_left;
         }
     }
 
@@ -436,6 +468,10 @@ impl App {
     }
 
     fn view_menu(&mut self, ui: &mut Ui) {
+        if item(ui, "3D view", "", true) {
+            self.open_3d();
+        }
+        ui.separator();
         if item(ui, "Fit the board to the window", "F", true) {
             self.fit_pending = true;
         }
@@ -708,6 +744,7 @@ impl App {
                         Mode::Board => ("PCB", ACCENT),
                         Mode::Schematic => ("SCH", theme::GREEN),
                         Mode::Library => ("LIB", theme::YELLOW),
+                        Mode::View3d => ("3D", theme::rgb(0xc7_8b_ff)),
                     };
                     let closable = tab.is_some();
                     let kind_galley = ui.painter().layout_no_wrap(kind.to_string(), FontId::proportional(10.5), color);
@@ -752,6 +789,9 @@ impl App {
                     }
                     if item(ui, "New library", "", true) {
                         self.open_library_editor(None);
+                    }
+                    if item(ui, "3D view of the board", "", true) {
+                        self.open_3d();
                     }
                     ui.separator();
                     if item(ui, "Open…", "Ctrl+O", true) {
@@ -855,6 +895,11 @@ impl App {
     /// editor's own list, by the tabs along its bottom.
     pub fn editor_left_dock(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // The 3D view has no list of its own: the project is all there is.
+        if self.mode() == Mode::View3d {
+            egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| self.project_page(ui));
+            return;
+        }
         let items = match self.lib_active() {
             Some(w) if w.ed.kind == crate::ui::libedit::Kind::Footprints => "Footprints",
             _ => "Symbols",
@@ -870,7 +915,7 @@ impl App {
             EditorLeft::Items => match self.active.and_then(|i| self.docs.get_mut(i)) {
                 Some(Doc::Library(w)) => w.list(ui),
                 Some(Doc::Schematic(w)) => w.symbol_list(ui, &ctx),
-                None => {}
+                Some(Doc::View3d(_)) | None => {}
             },
         });
     }

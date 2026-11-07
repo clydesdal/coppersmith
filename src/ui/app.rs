@@ -124,6 +124,8 @@ pub struct Launch {
     pub library: Option<PathBuf>,
     /// A schematic to open in the schematic editor, for `--schematic`.
     pub schematic: Option<PathBuf>,
+    /// Open the 3D view, for `--3d`.
+    pub view3d: bool,
 }
 
 /// Which tab is on show once tab `closed` is gone: the same one (its place
@@ -141,6 +143,8 @@ pub fn active_after_close(active: Option<usize>, closed: usize) -> Option<usize>
 pub enum Doc {
     Library(Box<crate::ui::libview::LibWindow>),
     Schematic(Box<crate::ui::schview::SchWindow>),
+    /// The board as a solid, to turn round.
+    View3d(Box<crate::ui::view3d::View3d>),
 }
 
 impl Doc {
@@ -153,6 +157,7 @@ impl Doc {
         match self {
             Doc::Library(w) => Self::file_name(w.ed.path().or(w.ed.fp_path.as_deref()).or(w.ed.sym_path.as_deref())).unwrap_or_else(|| w.ed.name.clone()),
             Doc::Schematic(w) => Self::file_name(w.path.as_deref()).unwrap_or_else(|| w.sch.name.clone()),
+            Doc::View3d(_) => "3D view".to_string(),
         }
     }
 
@@ -160,6 +165,7 @@ impl Doc {
         match self {
             Doc::Library(w) => w.ed.dirty,
             Doc::Schematic(w) => w.dirty,
+            Doc::View3d(_) => false,
         }
     }
 
@@ -167,6 +173,7 @@ impl Doc {
         match self {
             Doc::Library(w) => w.ed.fp_path.iter().chain(w.ed.sym_path.iter()).cloned().collect(),
             Doc::Schematic(w) => w.path.iter().cloned().collect(),
+            Doc::View3d(_) => Vec::new(),
         }
     }
 
@@ -174,6 +181,7 @@ impl Doc {
         match self {
             Doc::Library(_) => Mode::Library,
             Doc::Schematic(_) => Mode::Schematic,
+            Doc::View3d(_) => Mode::View3d,
         }
     }
 }
@@ -184,6 +192,7 @@ pub enum Mode {
     Board,
     Library,
     Schematic,
+    View3d,
 }
 
 pub enum Asked {
@@ -292,6 +301,11 @@ pub struct App {
     pub active: Option<usize>,
     /// A tab with unsaved changes that has been asked to close once.
     pub pending_close: Option<usize>,
+    /// The graphics card's side of the 3D view, and what it said went wrong.
+    pub gpu3d: crate::ui::gpu3d::Shared,
+    pub gpu3d_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// The 3D tab has closed: let go of what was drawn for it.
+    gpu3d_release: bool,
     /// The schematics, boards and libraries that go together.
     pub project: Option<crate::pcb::project::Project>,
     /// Which page of an editor tab's left dock is showing.
@@ -399,6 +413,9 @@ impl App {
             docs: Vec::new(),
             active: None,
             pending_close: None,
+            gpu3d: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu3d_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu3d_release: false,
             project: None,
             editor_tab: crate::ui::dock::EditorLeft::Items,
             project_sel: None,
@@ -1638,6 +1655,9 @@ impl App {
             self.pending_close = Some(i);
             return;
         }
+        if matches!(self.docs[i], Doc::View3d(_)) {
+            self.gpu3d_release = true;
+        }
         self.docs.remove(i);
         self.pending_close = None;
         self.activate(active_after_close(self.active, i));
@@ -1749,6 +1769,16 @@ impl App {
                 w.command(cmd, ctx, &mut out);
                 notice = out.notice;
             }
+            Some(Doc::View3d(v)) => {
+                use crate::ui::dock::EditorCmd;
+                match cmd {
+                    EditorCmd::Fit => v.refit(),
+                    EditorCmd::Tool(0) => v.top(),
+                    EditorCmd::Tool(1) => v.bottom(),
+                    EditorCmd::Tool(2) => v.angle(),
+                    _ => {}
+                }
+            }
             None => {}
         }
         if notice.is_some() {
@@ -1756,6 +1786,35 @@ impl App {
         }
         if reload {
             self.lib = Library::load();
+        }
+    }
+
+    /// Shows the board in 3D, in a tab of its own (the one already open if there is one).
+    pub fn open_3d(&mut self) {
+        let i = match self.docs.iter().position(|d| matches!(d, Doc::View3d(_))) {
+            Some(i) => i,
+            None => {
+                self.docs.push(Doc::View3d(Box::new(crate::ui::view3d::View3d::new(None))));
+                self.docs.len() - 1
+            }
+        };
+        self.activate(Some(i));
+    }
+
+    /// Makes the solid again when the board has changed since (and its pours have caught up).
+    fn refresh_3d(&mut self) {
+        let current = !self.flood || self.poured_rev == self.rev;
+        let rev = self.rev;
+        let active = self.active;
+        let doc = &self.doc;
+        let Some(Doc::View3d(v)) = active.and_then(|i| self.docs.get_mut(i)) else { return };
+        if current && v.solid.as_ref().is_none_or(|s| s.rev != rev) {
+            let solid = crate::pcb::solid::build(doc, rev);
+            let plain = solid.as_ref().is_some_and(|s| !s.outlined);
+            v.set_solid(solid);
+            if plain {
+                self.notice = Some("The board has no outline, so the 3D view uses a plain slab round its parts".into());
+            }
         }
     }
 
@@ -1794,7 +1853,9 @@ impl App {
 
     /// The editor in the tab on show.
     fn show_editor(&mut self, ui: &mut Ui) {
+        self.refresh_3d();
         let Some(i) = self.active else { return };
+        let (gpu, report) = (self.gpu3d.clone(), self.gpu3d_error.clone());
         let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
         let (mut notice, mut reload) = (None, false);
         match self.docs.get_mut(i) {
@@ -1803,7 +1864,13 @@ impl App {
                 (notice, reload) = (out.notice, out.reload_parts);
             }
             Some(Doc::Schematic(w)) => notice = w.show(ui, &known).notice,
+            Some(Doc::View3d(v)) => v.show(ui, &gpu, &report),
             None => {}
+        }
+        if let Ok(mut said) = report.lock()
+            && let Some(e) = said.take()
+        {
+            notice = Some(format!("The 3D view couldn't be drawn: {e}"));
         }
         if notice.is_some() {
             self.notice = notice;
@@ -1825,7 +1892,9 @@ impl App {
                     ui.add(egui::Label::new(egui::RichText::new(n).size(12.5).color(theme::YELLOW)).truncate());
                 }
                 None => {
-                    let what = if self.mode() == Mode::Schematic { "Schematic editor · symbols from Altium libraries; saves as SchDoc or Coppersmith's .cssch" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
+                    let what = if self.mode() == Mode::View3d {
+                        "3D view · drag to turn, right-drag to move, scroll to zoom · the board's copper, mask and silk as they would be made"
+                    } else if self.mode() == Mode::Schematic { "Schematic editor · symbols from Altium libraries; saves as SchDoc or Coppersmith's .cssch" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
                     ui.label(egui::RichText::new(what).size(12.0).color(theme::FAINT));
                 }
             }
@@ -1835,6 +1904,9 @@ impl App {
     fn apply_launch(&mut self) {
         if !self.applied_launch && self.frames >= 8 && let Some(path) = self.launch.library.take() {
             self.open_library_editor(Some(&path));
+        }
+        if !self.applied_launch && self.frames >= 8 && std::mem::take(&mut self.launch.view3d) {
+            self.open_3d();
         }
         if !self.applied_launch && self.frames >= 8 && self.launch.schematic.is_some() {
             let path = self.launch.schematic.take();
@@ -2006,6 +2078,13 @@ impl eframe::App for App {
         Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
         let tab_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 4));
         Panel::top("doc_tabs").resizable(false).frame(tab_frame).show(ui, |ui| self.tab_bar(ui));
+        // A closed 3D tab lets go of its pictures, from inside a draw so the card's context is current.
+        if self.gpu3d_release && self.mode() != Mode::View3d {
+            let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0));
+            ui.painter().add(crate::ui::gpu3d::release(rect, self.gpu3d.clone()));
+            self.gpu3d_release = false;
+            ctx.request_repaint();
+        }
         if self.mode() != Mode::Board {
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));

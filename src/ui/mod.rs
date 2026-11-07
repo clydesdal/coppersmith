@@ -5,6 +5,7 @@
 pub mod app;
 pub mod chrome;
 pub mod dock;
+pub mod gpu3d;
 pub mod icons;
 pub mod libedit;
 pub mod libview;
@@ -14,3 +15,4 @@ pub mod play;
 pub mod routing;
 pub mod theme;
 pub mod view;
+pub mod view3d;

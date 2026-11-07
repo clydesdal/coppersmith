@@ -17,3 +17,4 @@ pub mod router;
 pub mod schematic;
 pub mod sample;
 pub mod slide;
+pub mod solid;

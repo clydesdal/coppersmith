@@ -123,7 +123,7 @@ poured again after every change, checked, drawn, written to Gerbers.
 
 ## 7. 3D
 
-- Reuse Copperview's 3D board view; part bodies; STEP out.
+- Started: a 3D tab of the bare board (green mask, gold pads, white silk, drilled holes), after Copperview's. Next: part bodies, STEP out, saving the picture.
 
 ## Under the hood, as boards grow
 
