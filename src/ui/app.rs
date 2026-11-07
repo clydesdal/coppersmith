@@ -126,7 +126,59 @@ pub struct Launch {
     pub schematic: Option<PathBuf>,
 }
 
-/// Which window is on show: the board, or one of the editors that replace it.
+/// Which tab is on show once tab `closed` is gone: the same one (its place
+/// may have moved up), or, if it was the one closed, the tab before it (the
+/// board when it was the first).
+pub fn active_after_close(active: Option<usize>, closed: usize) -> Option<usize> {
+    match active {
+        Some(a) if a == closed => closed.checked_sub(1),
+        Some(a) if a > closed => Some(a - 1),
+        other => other,
+    }
+}
+
+/// A document open in a tab beside the board.
+pub enum Doc {
+    Library(Box<crate::ui::libview::LibWindow>),
+    Schematic(Box<crate::ui::schview::SchWindow>),
+}
+
+impl Doc {
+    fn file_name(p: Option<&std::path::Path>) -> Option<String> {
+        p.and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string())
+    }
+
+    /// What the tab says: the file's name, or the document's own.
+    pub fn title(&self) -> String {
+        match self {
+            Doc::Library(w) => Self::file_name(w.ed.path().or(w.ed.fp_path.as_deref()).or(w.ed.sym_path.as_deref())).unwrap_or_else(|| w.ed.name.clone()),
+            Doc::Schematic(w) => Self::file_name(w.path.as_deref()).unwrap_or_else(|| w.sch.name.clone()),
+        }
+    }
+
+    pub fn dirty(&self) -> bool {
+        match self {
+            Doc::Library(w) => w.ed.dirty,
+            Doc::Schematic(w) => w.dirty,
+        }
+    }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        match self {
+            Doc::Library(w) => w.ed.fp_path.iter().chain(w.ed.sym_path.iter()).cloned().collect(),
+            Doc::Schematic(w) => w.path.iter().cloned().collect(),
+        }
+    }
+
+    pub fn mode(&self) -> Mode {
+        match self {
+            Doc::Library(_) => Mode::Library,
+            Doc::Schematic(_) => Mode::Schematic,
+        }
+    }
+}
+
+/// Which window is on show: the board, or one of the editors in a tab.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Board,
@@ -234,10 +286,12 @@ pub struct App {
     prefs_saved: Option<Prefs>,
     /// The keyboard shortcuts window.
     pub show_keys: bool,
-    /// The library editor, while it's open in place of the board.
-    pub libwin: Option<crate::ui::libview::LibWindow>,
-    /// The schematic editor, likewise.
-    pub schwin: Option<crate::ui::schview::SchWindow>,
+    /// The schematics and libraries open in tabs beside the board.
+    pub docs: Vec<Doc>,
+    /// Which tab is on show: one of `docs`, or the board (None).
+    pub active: Option<usize>,
+    /// A tab with unsaved changes that has been asked to close once.
+    pub pending_close: Option<usize>,
     /// The schematics, boards and libraries that go together.
     pub project: Option<crate::pcb::project::Project>,
     /// Whether the project's files show beside the editors.
@@ -342,8 +396,9 @@ impl App {
             filter: prefs.filter,
             prefs_saved: None,
             show_keys: false,
-            libwin: None,
-            schwin: None,
+            docs: Vec::new(),
+            active: None,
+            pending_close: None,
             project: None,
             show_project: true,
             project_sel: None,
@@ -995,13 +1050,13 @@ impl App {
 
     // -- Files ---------------------------------------------------------------
 
-    /// The file the window on show has open, if it has one.
-    pub fn open_file_path(&self) -> Option<PathBuf> {
-        match self.mode() {
-            Mode::Board => self.path.clone(),
-            Mode::Library => self.libwin.as_ref().and_then(|w| w.ed.path().map(|p| p.to_path_buf())),
-            Mode::Schematic => self.schwin.as_ref().and_then(|w| w.path.clone()),
+    /// Every file open in a tab, with whether it's the one on show.
+    pub fn open_paths(&self) -> Vec<(PathBuf, bool)> {
+        let mut out: Vec<(PathBuf, bool)> = self.path.iter().map(|p| (p.clone(), self.active.is_none())).collect();
+        for (i, d) in self.docs.iter().enumerate() {
+            out.extend(d.paths().into_iter().map(|p| (p, self.active == Some(i))));
         }
+        out
     }
 
     pub fn title(&self) -> String {
@@ -1033,9 +1088,8 @@ impl App {
             self.open_project(&path);
             return;
         }
-        // Opening a board is going back to the board.
-        self.libwin = None;
-        self.schwin = None;
+        // Opening a board shows the board.
+        self.activate(None);
         self.note_file(&path);
         // An Altium or Circuit Studio board opens as a new, unsaved board.
         if crate::pcb::altium::is_board(&path) {
@@ -1552,38 +1606,88 @@ impl App {
         .filter(|n| *n != 0)
     }
 
-    /// Opens the library editor, on a library file if given.
+    /// The tab with this file open, if there is one.
+    fn find_doc(&self, path: &std::path::Path) -> Option<usize> {
+        self.docs.iter().position(|d| d.paths().iter().any(|p| crate::pcb::project::same_file(p, path)))
+    }
+
+    /// The symbols of the libraries open in tabs, for sheets to place.
+    fn doc_symbols(&self) -> Vec<crate::pcb::altium::schlib::Symbol> {
+        self.docs.iter().filter_map(|d| if let Doc::Library(w) = d { Some(w.ed.symbols.clone()) } else { None }).flatten().collect()
+    }
+
+    /// Shows a tab, or the board (None).
+    pub fn activate(&mut self, tab: Option<usize>) {
+        self.active = tab.filter(|i| *i < self.docs.len());
+        self.pending_close = None;
+        if let Some(i) = self.active
+            && matches!(self.docs[i], Doc::Schematic(_))
+        {
+            let symbols = self.doc_symbols();
+            if let Doc::Schematic(w) = &mut self.docs[i] {
+                w.add_symbols(&symbols);
+            }
+        }
+    }
+
+    /// Closes a tab. One with unsaved changes asks to be closed twice.
+    pub fn close_doc(&mut self, i: usize) {
+        let Some(d) = self.docs.get(i) else { return };
+        if d.dirty() && self.pending_close != Some(i) {
+            self.notice = Some(format!("{} has unsaved changes: save it (Ctrl+S), or close it again to leave them", d.title()));
+            self.pending_close = Some(i);
+            return;
+        }
+        self.docs.remove(i);
+        self.pending_close = None;
+        self.activate(active_after_close(self.active, i));
+    }
+
+    /// Opens a library in a tab, on a file if given (or on the tab that has it).
     pub fn open_library_editor(&mut self, path: Option<&std::path::Path>) {
+        if let Some(path) = path {
+            if let Some(i) = self.find_doc(path) {
+                self.activate(Some(i));
+                return;
+            }
+            self.note_file(path);
+        }
         let kind = match path.and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()) {
             Some(e) if e == "schlib" => crate::ui::libedit::Kind::Symbols,
             _ => crate::ui::libedit::Kind::Footprints,
         };
-        // A file opened over unsaved work would lose it: ask for that to be saved first.
-        if let (Some(path), Some(w)) = (path, &self.libwin)
-            && w.ed.dirty
-            && !w.ed.path().is_some_and(|p| crate::pcb::project::same_file(p, path))
-        {
-            self.notice = Some("The library has unsaved changes: save it (Ctrl+S), then open the next".into());
-            return;
-        }
-        self.schwin = None;
-        if let Some(path) = path {
-            self.note_file(path);
-        }
-        let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(kind));
+        let mut win = crate::ui::libview::LibWindow::new(kind);
         if let Some(path) = path {
             self.notice = win.open_file(path);
         }
+        self.docs.push(Doc::Library(Box::new(win)));
+        self.activate(Some(self.docs.len() - 1));
     }
 
-    /// Opens the library a footprint is in, in the library editor, on that
-    /// footprint. Saving goes back to the library's own file if it has one
-    /// in the footprint folder.
+    /// Opens the library a footprint is in, in a tab, on that footprint. Saving
+    /// goes back to the library's own file if it has one in the footprint folder.
     pub fn edit_footprint(&mut self, def: &FootprintDef) {
-        let defs: Vec<FootprintDef> = self.lib.defs.iter().filter(|d| d.category == def.category).cloned().collect();
-        let file = crate::pcb::library::user_folder().map(|d| d.join(format!("{}.PcbLib", def.category))).filter(|p| p.exists());
-        let win = self.libwin.get_or_insert_with(|| crate::ui::libview::LibWindow::new(crate::ui::libedit::Kind::Footprints));
-        win.load_footprints(&def.category, defs, &def.name, file);
+        let existing = self.docs.iter().position(|d| matches!(d, Doc::Library(w) if w.ed.name == def.category));
+        let i = match existing {
+            Some(i) => i,
+            None => {
+                let defs: Vec<FootprintDef> = self.lib.defs.iter().filter(|d| d.category == def.category).cloned().collect();
+                let file = crate::pcb::library::user_folder().map(|d| d.join(format!("{}.PcbLib", def.category))).filter(|p| p.exists());
+                let mut win = crate::ui::libview::LibWindow::new(crate::ui::libedit::Kind::Footprints);
+                win.load_footprints(&def.category, defs, &def.name, file);
+                self.docs.push(Doc::Library(Box::new(win)));
+                self.docs.len() - 1
+            }
+        };
+        if existing.is_some()
+            && let Doc::Library(w) = &mut self.docs[i]
+        {
+            w.ed.set_kind(crate::ui::libedit::Kind::Footprints);
+            if let Some(k) = w.ed.footprints.iter().position(|f| f.name == def.name) {
+                w.ed.choose(k);
+            }
+        }
+        self.activate(Some(i));
         self.notice = Some(if def.source.starts_with("Built in") {
             "Built-in footprints: Save as… to keep your changes in a PcbLib of your own".into()
         } else {
@@ -1591,63 +1695,67 @@ impl App {
         });
     }
 
-    /// Opens the schematic editor, on a file if given. The footprint and
-    /// symbol libraries the library editor holds come along.
+    /// Opens a schematic in a tab, on a file if given (or on the tab that has it).
     pub fn open_schematic_editor(&mut self, path: Option<&std::path::Path>) {
-        if let (Some(path), Some(w)) = (path, &self.schwin)
-            && w.dirty
-            && !w.path.as_deref().is_some_and(|p| crate::pcb::project::same_file(p, path))
-        {
-            self.notice = Some("The sheet has unsaved changes: save it (Ctrl+S), then open the next".into());
-            return;
-        }
         if let Some(path) = path {
+            if let Some(i) = self.find_doc(path) {
+                self.activate(Some(i));
+                return;
+            }
             self.note_file(path);
         }
-        let win = self.schwin.get_or_insert_with(crate::ui::schview::SchWindow::new);
-        if let Some(lib) = &self.libwin {
-            win.add_symbols(&lib.ed.symbols);
-        }
+        let mut win = crate::ui::schview::SchWindow::new();
+        win.add_symbols(&self.doc_symbols());
         if let Some(path) = path {
             self.notice = Some(win.open_file(path));
         }
-        self.libwin = None;
+        self.docs.push(Doc::Schematic(Box::new(win)));
+        self.activate(Some(self.docs.len() - 1));
     }
 
     /// Which window is on show.
     pub fn mode(&self) -> Mode {
-        if self.schwin.is_some() {
-            Mode::Schematic
-        } else if self.libwin.is_some() {
-            Mode::Library
-        } else {
-            Mode::Board
+        self.active.and_then(|i| self.docs.get(i)).map(|d| d.mode()).unwrap_or(Mode::Board)
+    }
+
+    /// The library editor on show, if it is the one.
+    pub fn lib_active(&self) -> Option<&crate::ui::libview::LibWindow> {
+        match self.active.and_then(|i| self.docs.get(i)) {
+            Some(Doc::Library(w)) => Some(w),
+            _ => None,
         }
     }
 
-    /// Runs a menu command on the editor that's open, and takes in what it says.
+    /// The schematic editor on show, if it is the one.
+    pub fn sch_active(&self) -> Option<&crate::ui::schview::SchWindow> {
+        match self.active.and_then(|i| self.docs.get(i)) {
+            Some(Doc::Schematic(w)) => Some(w),
+            _ => None,
+        }
+    }
+
+    /// Runs a menu command on the editor on show, and takes in what it says.
     pub fn editor_command(&mut self, ctx: &egui::Context, cmd: crate::ui::dock::EditorCmd) {
-        if let Some(mut w) = self.libwin.take() {
-            let mut out = crate::ui::libview::Outcome::default();
-            w.command(cmd, ctx, &mut out);
-            if out.notice.is_some() {
-                self.notice = out.notice;
+        let Some(i) = self.active else { return };
+        let (mut notice, mut reload) = (None, false);
+        match self.docs.get_mut(i) {
+            Some(Doc::Library(w)) => {
+                let mut out = crate::ui::libview::Outcome::default();
+                w.command(cmd, ctx, &mut out);
+                (notice, reload) = (out.notice, out.reload_parts);
             }
-            if out.reload_parts {
-                self.lib = Library::load();
+            Some(Doc::Schematic(w)) => {
+                let mut out = crate::ui::schview::Outcome::default();
+                w.command(cmd, ctx, &mut out);
+                notice = out.notice;
             }
-            if !out.close {
-                self.libwin = Some(w);
-            }
-        } else if let Some(mut w) = self.schwin.take() {
-            let mut out = crate::ui::schview::Outcome::default();
-            w.command(cmd, ctx, &mut out);
-            if out.notice.is_some() {
-                self.notice = out.notice;
-            }
-            if !out.close {
-                self.schwin = Some(w);
-            }
+            None => {}
+        }
+        if notice.is_some() {
+            self.notice = notice;
+        }
+        if reload {
+            self.lib = Library::load();
         }
     }
 
@@ -1665,8 +1773,6 @@ impl App {
             Ok(p) => {
                 self.notice = Some(format!("Project {}: {} files", p.name, p.files.len()));
                 self.project = Some(p);
-                self.left_tab = LeftTab::Project;
-                self.show_left = true;
                 self.show_project = true;
             }
             Err(e) => self.notice = Some(e),
@@ -1684,34 +1790,28 @@ impl App {
         });
     }
 
-    fn show_schematic_editor(&mut self, ui: &mut Ui) {
-        let Some(mut win) = self.schwin.take() else { return };
+    /// The editor in the tab on show.
+    fn show_editor(&mut self, ui: &mut Ui) {
+        let Some(i) = self.active else { return };
         let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
-        let out = win.show(ui, &known);
-        if out.notice.is_some() {
-            self.notice = out.notice;
+        let (mut notice, mut reload) = (None, false);
+        match self.docs.get_mut(i) {
+            Some(Doc::Library(w)) => {
+                let out = w.show(ui, &known);
+                (notice, reload) = (out.notice, out.reload_parts);
+            }
+            Some(Doc::Schematic(w)) => notice = w.show(ui, &known).notice,
+            None => {}
         }
-        if !out.close {
-            self.schwin = Some(win);
+        if notice.is_some() {
+            self.notice = notice;
         }
-    }
-
-    fn show_library_editor(&mut self, ui: &mut Ui) {
-        let Some(mut win) = self.libwin.take() else { return };
-        let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
-        let out = win.show(ui, &known);
-        if out.notice.is_some() {
-            self.notice = out.notice;
-        }
-        if out.reload_parts {
+        if reload {
             self.lib = Library::load();
         }
-        if !out.close {
-            self.libwin = Some(win);
-        }
     }
 
-    /// The bar under the library editor: just what was last said.
+    /// The bar under an editor: just what was last said.
     fn library_status(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.set_height(18.0);
@@ -1723,7 +1823,7 @@ impl App {
                     ui.add(egui::Label::new(egui::RichText::new(n).size(12.5).color(theme::YELLOW)).truncate());
                 }
                 None => {
-                    let what = if self.schwin.is_some() { "Schematic editor · symbols from Altium libraries, saved as a Coppersmith schematic" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
+                    let what = if self.mode() == Mode::Schematic { "Schematic editor · symbols from Altium libraries; saves as SchDoc or Coppersmith's .cssch" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
                     ui.label(egui::RichText::new(what).size(12.0).color(theme::FAINT));
                 }
             }
@@ -1885,37 +1985,42 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll();
         self.save_changes_dialog(&ctx);
-        if self.confirm.is_none() && self.libwin.is_none() && self.schwin.is_none() {
+        if self.confirm.is_none() && self.mode() == Mode::Board {
             self.keys(&ctx);
+        }
+        // Ctrl+W closes the tab on show (the board stays).
+        if self.confirm.is_none()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W))
+            && let Some(i) = self.active
+        {
+            self.close_doc(i);
         }
         self.refresh();
         self.drive_screenshot(&ctx);
         self.apply_launch();
         let width = ctx.content_rect().width();
-        // The library editor takes the window below the menus.
-        if self.libwin.is_some() || self.schwin.is_some() {
-            let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
-            Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
+        // The menus, then the tabs of what's open; under them, on the board, the ribbon if it's switched on.
+        let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
+        Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
+        let tab_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 4));
+        Panel::top("doc_tabs").resizable(false).frame(tab_frame).show(ui, |ui| self.tab_bar(ui));
+        let project_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
+        if self.mode() != Mode::Board {
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
-            if self.show_project && width >= 900.0 {
-                let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-                Panel::left("project_files").resizable(true).default_size(230.0).size_range(170.0..=380.0).frame(frame).show(ui, |ui| self.project_page(ui));
+            if self.show_project && width >= 960.0 {
+                Panel::left("project_files").resizable(true).default_size(230.0).size_range(170.0..=380.0).frame(project_frame).show(ui, |ui| self.project_page(ui));
             }
-            if self.schwin.is_some() {
-                self.show_schematic_editor(ui);
-            } else {
-                self.show_library_editor(ui);
-            }
+            self.show_editor(ui);
             self.shortcuts_window(&ctx);
             return;
         }
-        // The menus; under them, if it's switched on, the ribbon of controls.
-        let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
-        Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
         if self.ribbon {
             let ribbon_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 6));
             Panel::top("ribbon").resizable(false).frame(ribbon_frame).show(ui, |ui| self.ribbon_bar(ui));
+        }
+        if self.show_project && width >= 960.0 {
+            Panel::left("project_files").resizable(true).default_size(210.0).size_range(160.0..=380.0).frame(project_frame).show(ui, |ui| self.project_page(ui));
         }
         // The panels either side, each with its tabs along the bottom.
         if self.show_left && width >= 600.0 {
@@ -1941,6 +2046,16 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_a_tab_keeps_the_right_one_on_show() {
+        // Tabs: the board (None), then docs 0, 1, 2.
+        assert_eq!(active_after_close(Some(1), 1), Some(0), "closing the one on show shows the one before");
+        assert_eq!(active_after_close(Some(0), 0), None, "the first doc's neighbour is the board");
+        assert_eq!(active_after_close(Some(2), 0), Some(1), "one further along moves up");
+        assert_eq!(active_after_close(Some(0), 2), Some(0), "one before it is unmoved");
+        assert_eq!(active_after_close(None, 1), None, "the board stays on show");
+    }
 
     #[test]
     fn legs_are_straight_then_diagonal() {

@@ -314,8 +314,9 @@ and what was left out. Symbols are kept for the schematic editor still to come.
 
 ### The library editor
 
-**File ▸ Library editor…** (or `coppersmith --library FILE.PcbLib`) replaces
-the board with an editor for Altium libraries, and reads and writes the same
+A **LIB** tab (**+ ▸ New library**, a library from the Project panel or File ▸
+Open…, or `coppersmith --library FILE.PcbLib`) is an editor for Altium
+libraries, and reads and writes the same
 files: footprints as a `.PcbLib`, symbols as a `.SchLib`. Open an `.IntLib` and
 both come in; save writes each kind to its own file.
 
@@ -338,30 +339,38 @@ as well as made-up ones; **it hasn't been opened in Altium Designer or Circuit
 Studio**, which fill in the bookkeeping they keep (unique ids, embedded models)
 when they next save.
 
-### Projects and the menus
+### Tabs, projects and the menus
 
-**Projects.** The **Project** tab (first on the left, and a panel beside the
-library and schematic editors) lists the schematics, boards and libraries that
-go together; **double-click** one to open it (a board in the board view, a sheet
-in the schematic editor, a library in the library editor; right-click for
-*Show in its folder*). **File ▸ Open project…**, **File ▸ Open…** and
-`coppersmith PROJECT.PrjPcb` read an Altium or Circuit Studio project file
-(`.PrjPcb`, `.CSPrjPcb`) and list the documents it names (outputs and reports are
-left out; a missing file is shown as such). Open any board, sheet or library and
-the project it belongs to is found the same way: the project file in its folder
-that lists it, or else the folder's files.
+**Tabs.** Everything that's open has a tab along the top: the board (**PCB**,
+always first) and each schematic (**SCH**) and library (**LIB**) you open, as many
+as you like. Click a tab to show it (each keeps its place and its undo); the **×**
+on a tab, middle-click or Ctrl+W closes it (one with unsaved changes asks to be
+closed a second time, so nothing goes by accident; a dot after the name means
+unsaved); **+** starts a new schematic or library or opens a file. Opening a file
+that's already open just shows its tab. Double-clicking a part in the Parts list
+opens its library in a tab.
 
-**Menus follow the window.** In the library and schematic editors the menus are
-about what they edit: File has New, Open, Save, Save as…, Open project… and
-Back to the board (no Gerbers; *Save to my footprints* only for footprints); Edit
-has Undo, Redo, Delete, Turn and (sheets) Mirror; View has Fit and the Project
-panel; Place lists the drawing tools. Route and Tools appear only on the board.
-On the board, *Add footprints to the Parts list…* is the old "add a library", and
-*Library editor* and *Schematic editor* open the editors.
+**Projects.** The **Project** panel on the left, in every window (View ▸ Project
+files hides it), lists the schematics, boards and libraries that go together;
+**double-click** one to open it (a board in the PCB tab, a sheet or a library in a
+tab of its own; files already open say so; right-click for *Show in its folder*).
+**File ▸ Open project…**, **File ▸ Open…** and `coppersmith PROJECT.PrjPcb` read an
+Altium or Circuit Studio project file (`.PrjPcb`, `.CSPrjPcb`) and list the
+documents it names (outputs and reports are left out; a missing file is shown as
+such). Open any board, sheet or library and the project it belongs to is found the
+same way: the project file in its folder that lists it, or else the folder's files.
+
+**Menus follow the tab.** On a schematic or library tab the menus are about what
+it edits: File has New, Open, Save, Save as…, Open project… and Close this tab (no
+Gerbers; *Save to my footprints* only for footprints); Edit has Undo, Redo, Delete,
+Turn and (sheets) Mirror; View has Fit and the Project panel; Place lists the
+drawing tools. Route and Tools appear only on the PCB tab. On the board,
+*Add footprints to the Parts list…* is the old "add a library", and *New library*
+and *New schematic* add tabs.
 
 ### The schematic editor
 
-**File ▸ Schematic editor…** (or `coppersmith --schematic FILE`) opens a sheet to
+**+ ▸ New schematic** (or `coppersmith --schematic FILE`) opens a sheet to
 draw on. Symbols come from the list on the left: a few built in (resistor,
 capacitor, inductor, diode, an 8-pin chip), and any Altium `.SchLib`/`.IntLib`
 you add with **+** (copied into the data folder's `symbols` folder so they stay),

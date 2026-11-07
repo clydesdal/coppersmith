@@ -24,7 +24,6 @@ enum Dialog {
 /// What the window asks of the app around it.
 #[derive(Default)]
 pub struct Outcome {
-    pub close: bool,
     /// Footprints were saved where the board's library reads them from.
     pub reload_parts: bool,
     pub notice: Option<String>,
@@ -260,9 +259,6 @@ impl LibWindow {
                 self.ask_save_as(ctx);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if chip(ui, "Back to the board", false).clicked() {
-                    out.close = true;
-                }
                 if self.ed.dirty {
                     ui.label(RichText::new("unsaved").size(12.0).color(YELLOW));
                 }

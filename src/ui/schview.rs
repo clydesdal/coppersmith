@@ -37,7 +37,6 @@ enum Dialog {
 
 #[derive(Default)]
 pub struct Outcome {
-    pub close: bool,
     pub notice: Option<String>,
 }
 
@@ -493,9 +492,6 @@ impl SchWindow {
                 self.ask_save_as(ctx);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if chip(ui, "Back to the board", false).clicked() {
-                    out.close = true;
-                }
                 if self.dirty {
                     ui.label(RichText::new("unsaved").size(12.0).color(YELLOW));
                 }

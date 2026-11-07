@@ -9,19 +9,16 @@ use std::path::PathBuf;
 /// The pages of the left panel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LeftTab {
-    /// The project's schematics, boards and libraries.
-    Project,
     Layers,
     Parts,
     Select,
 }
 
 impl LeftTab {
-    pub const ALL: [LeftTab; 4] = [LeftTab::Project, LeftTab::Layers, LeftTab::Parts, LeftTab::Select];
+    pub const ALL: [LeftTab; 3] = [LeftTab::Layers, LeftTab::Parts, LeftTab::Select];
 
     pub fn name(self) -> &'static str {
         match self {
-            LeftTab::Project => "Project",
             LeftTab::Layers => "Layers",
             LeftTab::Parts => "Parts",
             LeftTab::Select => "Select",
