@@ -1,6 +1,7 @@
 //! The bars and side panels round the board.
 
 use crate::ui::app::{App, Sel, Tool, Unit};
+use crate::ui::dock::RightTab;
 use crate::pcb::drc::Severity;
 use crate::pcb::geom::*;
 use crate::ui::icons::{self, Icon};
@@ -30,7 +31,7 @@ pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     inner
 }
 
-fn heading(ui: &mut Ui, text: &str) {
+pub(crate) fn heading(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(semibold(15.0)));
     ui.add_space(2.0);
 }
@@ -137,7 +138,7 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, on: bool) -> Response {
     response
 }
 
-fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool) -> Response {
+pub(crate) fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool) -> Response {
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), sense);
     if enabled && response.hovered() {
@@ -154,7 +155,7 @@ fn small_icon(ui: &mut Ui, icon: Icon, tip: &str, enabled: bool) -> Response {
     response.on_hover_text(tip)
 }
 
-fn chip(ui: &mut Ui, text: &str, on: bool) -> Response {
+pub(crate) fn chip(ui: &mut Ui, text: &str, on: bool) -> Response {
     let font = FontId::proportional(12.5);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, FG);
     let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(14.0, 8.0), Sense::click());
@@ -234,74 +235,6 @@ fn preview(ui: &mut Ui, def: &FootprintDef, size: Vec2) {
 }
 
 impl App {
-    pub fn top_bar(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
-            ui.set_height(30.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add_space(2.0);
-                let icon = if self.show_right { Icon::Right } else { Icon::Left };
-                if small_icon(ui, icon, "Show or hide the details", true).clicked() {
-                    self.show_right = !self.show_right;
-                }
-                let mut unit = self.unit;
-                if segmented(ui, &mut unit, &[(Unit::Inch, "in"), (Unit::Mil, "mil"), (Unit::Mm, "mm")]) {
-                    self.unit = unit;
-                }
-                ui.add_space(8.0);
-                if let Some(_dir) = &self.exported
-                    && App::copperview().is_some()
-                    && tool_button(ui, Icon::Picture, "View in Copperview", true)
-                        .on_hover_text("Open the Gerbers you just wrote in Copperview")
-                        .clicked()
-                {
-                    self.view_in_copperview();
-                }
-                if tool_button(ui, Icon::Export, "Gerbers", true)
-                    .on_hover_text("Write Gerber and drill files for the board maker (Ctrl+E)")
-                    .clicked()
-                {
-                    self.ask_export(&ctx);
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let icon = if self.show_left { Icon::Left } else { Icon::Right };
-                    if small_icon(ui, icon, "Show or hide the layers and library", true).clicked() {
-                        self.show_left = !self.show_left;
-                    }
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
-                    if let Some(logo) = &self.logo {
-                        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                        ui.painter().image(logo.id(), rect, whole, Color32::WHITE);
-                    }
-                    ui.label(RichText::new("Coppersmith").font(semibold(15.0)));
-                    ui.add_space(8.0);
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    if small_icon(ui, Icon::New, "New board (Ctrl+N)", true).clicked() {
-                        self.new_board();
-                    }
-                    if small_icon(ui, Icon::Folder, "Open a board (Ctrl+O)", true).clicked() {
-                        self.ask_open(&ctx);
-                    }
-                    if small_icon(ui, Icon::Save, "Save (Ctrl+S)", true).clicked() {
-                        self.save(&ctx);
-                    }
-                    ui.add_space(6.0);
-                    let (u, r) = (self.can_undo(), self.can_redo());
-                    if small_icon(ui, Icon::Undo, "Undo (Ctrl+Z)", u).clicked() {
-                        self.undo();
-                    }
-                    if small_icon(ui, Icon::Redo, "Redo (Ctrl+Shift+Z)", r).clicked() {
-                        self.redo();
-                    }
-                    ui.add_space(10.0);
-                    if ui.available_width() > 60.0 {
-                        ui.add(egui::Label::new(RichText::new(self.title()).color(DIM)).truncate());
-                    }
-                });
-            });
-        });
-    }
-
     pub fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.set_height(18.0);
@@ -314,6 +247,8 @@ impl App {
                 ui.label(RichText::new(text).font(theme::mono(12.0)).color(FAINT));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.filter_chip(ui, false);
+                ui.add_space(8.0);
                 if let Some(notice) = self.notice.clone() {
                     if small_icon(ui, Icon::Close, "Dismiss", true).clicked() {
                         self.notice = None;
@@ -344,50 +279,43 @@ impl App {
 
     // -- Left: layers and library ----------------------------------------------
 
-    pub fn left_panel(&mut self, ui: &mut Ui) {
-        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(RichText::new("Layers").size(14.0).color(DIM));
-            ui.add_space(2.0);
-            for l in self.doc.copper_layers() {
-                self.layer_row(ui, Layer::Cu(l), true);
+    /// The Layers tab: the layers, and what to show on them.
+    pub fn layers_page(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Layers").size(14.0).color(DIM));
+        ui.add_space(2.0);
+        for l in self.doc.copper_layers() {
+            self.layer_row(ui, Layer::Cu(l), true);
+        }
+        ui.add_space(4.0);
+        for layer in [
+            Layer::Silk(Side::Top),
+            Layer::Silk(Side::Bottom),
+            Layer::Court(Side::Top),
+            Layer::Court(Side::Bottom),
+            Layer::Fab(Side::Top),
+            Layer::Fab(Side::Bottom),
+            Layer::Edge,
+        ] {
+            self.layer_row(ui, layer, false);
+        }
+        ui.horizontal(|ui| {
+            if chip(ui, "Still to connect", self.show_rats).clicked() {
+                self.show_rats = !self.show_rats;
             }
-            ui.add_space(4.0);
-            for layer in [
-                Layer::Silk(Side::Top),
-                Layer::Silk(Side::Bottom),
-                Layer::Court(Side::Top),
-                Layer::Court(Side::Bottom),
-                Layer::Fab(Side::Top),
-                Layer::Fab(Side::Bottom),
-                Layer::Edge,
-            ] {
-                self.layer_row(ui, layer, false);
+            if chip(ui, "Problems", self.show_problems).clicked() {
+                self.show_problems = !self.show_problems;
             }
+        });
+        if !self.doc.pours.is_empty() {
             ui.horizontal(|ui| {
-                if chip(ui, "Still to connect", self.show_rats).clicked() {
-                    self.show_rats = !self.show_rats;
-                }
-                if chip(ui, "Problems", self.show_problems).clicked() {
-                    self.show_problems = !self.show_problems;
+                if chip(ui, "Pour fills", self.flood)
+                    .on_hover_text("Off: pours keep their areas and settings but lose their copper, so routing and moving run freely and fast. On: they pour again.")
+                    .clicked()
+                {
+                    self.set_flood(!self.flood);
                 }
             });
-            if !self.doc.pours.is_empty() {
-                ui.horizontal(|ui| {
-                    if chip(ui, "Pour fills", self.flood)
-                        .on_hover_text(
-                            "Off: pours keep their areas and settings but lose their copper, so routing and moving run freely and fast. On: they pour again.",
-                        )
-                        .clicked()
-                    {
-                        self.set_flood(!self.flood);
-                    }
-                });
-            }
-            ui.add_space(14.0);
-            ui.separator();
-            ui.add_space(6.0);
-            self.library_list(ui);
-        });
+        }
     }
 
     fn layer_row(&mut self, ui: &mut Ui, layer: Layer, copper: bool) {
@@ -436,7 +364,7 @@ impl App {
         }
     }
 
-    fn library_list(&mut self, ui: &mut Ui) {
+    pub(crate) fn library_list(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Footprints").size(14.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -522,22 +450,26 @@ impl App {
 
     // -- Right: what's selected, the board, the checks, the nets --------------
 
-    pub fn right_panel(&mut self, ui: &mut Ui) {
+    /// The right panel's page: the details of what's picked or the board's,
+    /// the checks, or the nets, as its tab says.
+    pub fn right_page(&mut self, ui: &mut Ui) {
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let before = self.doc.clone();
-            match self.sel.as_slice() {
-                [] => self.board_card(ui),
-                [Sel::Fp(id)] => self.footprint_card(ui, *id),
-                [Sel::Track(id)] => self.track_card(ui, *id),
-                [Sel::Via(id)] => self.via_card(ui, *id),
-                [Sel::Pour(id)] => self.pour_card(ui, *id),
-                [Sel::Fill(id)] => self.fill_card(ui, *id),
-                [Sel::Keepout(id)] => self.keepout_card(ui, *id),
-                [Sel::Name(id)] => self.name_card(ui, *id),
-                many => self.many_card(ui, many.len()),
+            match self.right_tab {
+                RightTab::Properties => match self.sel.as_slice() {
+                    [] => self.board_card(ui),
+                    [Sel::Fp(id)] => self.footprint_card(ui, *id),
+                    [Sel::Track(id)] => self.track_card(ui, *id),
+                    [Sel::Via(id)] => self.via_card(ui, *id),
+                    [Sel::Pour(id)] => self.pour_card(ui, *id),
+                    [Sel::Fill(id)] => self.fill_card(ui, *id),
+                    [Sel::Keepout(id)] => self.keepout_card(ui, *id),
+                    [Sel::Name(id)] => self.name_card(ui, *id),
+                    many => self.many_card(ui, many.len()),
+                },
+                RightTab::Checks => self.checks_card(ui),
+                RightTab::Nets => self.nets_card(ui),
             }
-            self.checks_card(ui);
-            self.nets_card(ui);
             // Typing a number makes one undo step, not one per key.
             if self.doc != before {
                 let now = ui.input(|i| i.time);

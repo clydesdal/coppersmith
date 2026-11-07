@@ -36,6 +36,8 @@ Options:
                                 is checked against its board
   --zoom X,Y,WIDTH              start looking at this spot, WIDTH mm across
   --select REFDES               start with this part selected
+  --layout WORDS                open with this layout, such as 'ribbon, no-left,
+                                right:checks, filter:tracks+vias'
   --screenshot FILE.png         draw a few frames, save the picture, and exit
   --play STEPS                  with --screenshot: act out mouse and key steps,
                                 such as 'click 600 400; key w; key ctrl+z'
@@ -210,6 +212,7 @@ fn run() -> Result<(), String> {
             "--screenshot" => launch.screenshot = Some(PathBuf::from(value("--screenshot")?)),
             "--play" => launch.play = Some(value("--play")?),
             "--select" => launch.select = Some(value("--select")?),
+            "--layout" => launch.layout = Some(value("--layout")?),
             "--zoom" => {
                 let v = numbers(&value("--zoom")?, 3, "--zoom")?;
                 launch.zoom = Some((p(v[0], v[1]), v[2]));

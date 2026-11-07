@@ -8,6 +8,7 @@ use crate::pcb::geom::*;
 use crate::pcb::library::{FootprintDef, Library};
 use crate::pcb::model::*;
 use crate::platform::{self, Pinch};
+use crate::ui::dock::{Filter, LeftTab, Prefs, RightTab};
 use crate::ui::theme;
 use eframe::egui::{self, ColorImage, Key, Panel, Rect, Ui, vec2};
 use std::collections::HashSet;
@@ -117,6 +118,8 @@ pub struct Launch {
     pub play: Option<String>,
     pub zoom: Option<(P, f64)>,
     pub select: Option<String>,
+    /// The window's layout in words, for `--layout`.
+    pub layout: Option<String>,
 }
 
 pub enum Asked {
@@ -207,6 +210,17 @@ pub struct App {
     pub new_net: String,
     pub show_left: bool,
     pub show_right: bool,
+    /// The pages of the two panels, each chosen from tabs along its bottom.
+    pub left_tab: LeftTab,
+    pub right_tab: RightTab,
+    /// The strip of controls under the menus.
+    pub ribbon: bool,
+    /// What can be picked.
+    pub filter: Filter,
+    /// The layout as last written down, so it's written again only when it changes.
+    prefs_saved: Option<Prefs>,
+    /// The keyboard shortcuts window.
+    pub show_keys: bool,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
     after_save: Option<Then>,
@@ -236,6 +250,10 @@ impl App {
             s.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
             s.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
         });
+        // The window as it was left; a scripted run starts from the usual layout so its
+        // pictures don't depend on whoever ran it, and never writes one down.
+        let mut prefs = if launch.screenshot.is_some() { Prefs::default() } else { Prefs::load() };
+        let layout_problem = launch.layout.as_deref().and_then(|spec| prefs.apply_spec(spec).err());
         let (asked_tx, asked_rx) = mpsc::channel();
         let doc = crate::pcb::sample::board();
         let mut hidden = HashSet::new();
@@ -293,8 +311,14 @@ impl App {
             notice: None,
             exported: None,
             new_net: String::new(),
-            show_left: true,
-            show_right: true,
+            show_left: prefs.show_left,
+            show_right: prefs.show_right,
+            left_tab: prefs.left_tab,
+            right_tab: prefs.right_tab,
+            ribbon: prefs.ribbon,
+            filter: prefs.filter,
+            prefs_saved: None,
+            show_keys: false,
             last_field_edit: -10.0,
             confirm: None,
             after_save: None,
@@ -320,7 +344,28 @@ impl App {
         if let Some(problem) = app.lib.problems.first() {
             app.notice = Some(format!("A footprint file couldn't be read: {problem}"));
         }
+        if let Some(problem) = layout_problem {
+            app.notice = Some(problem);
+        }
         app
+    }
+
+    /// The layout as it is, to be kept.
+    pub fn prefs(&self) -> Prefs {
+        Prefs { show_left: self.show_left, show_right: self.show_right, left_tab: self.left_tab, right_tab: self.right_tab, ribbon: self.ribbon, filter: self.filter }
+    }
+
+    /// Writes the layout down if it has changed since it last was. Not in a
+    /// scripted run, which would write over what the person set.
+    pub fn keep_layout(&mut self) {
+        if self.launch.screenshot.is_some() {
+            return;
+        }
+        let now = self.prefs();
+        if self.prefs_saved.as_ref() != Some(&now) {
+            now.save();
+            self.prefs_saved = Some(now);
+        }
     }
 
     // -- What's worked out from the board ------------------------------------
@@ -744,6 +789,7 @@ impl App {
     }
 
     pub fn select_all(&mut self) {
+        let filter = self.filter;
         self.sel = self
             .doc
             .footprints
@@ -751,6 +797,7 @@ impl App {
             .map(|f| Sel::Fp(f.id))
             .chain(self.doc.tracks.iter().map(|t| Sel::Track(t.id)))
             .chain(self.doc.vias.iter().map(|v| Sel::Via(v.id)))
+            .filter(|s| filter.allows(*s))
             .collect();
     }
 
@@ -1286,7 +1333,20 @@ impl App {
         if self.tool == Tool::Route && self.routing_keys(ctx, &presses) {
             return;
         }
+        if pressed(Key::F1) {
+            self.show_keys = !self.show_keys;
+        }
         if m.command {
+            // The panels and the ribbon.
+            if pressed(Key::OpenBracket) {
+                self.show_left = !self.show_left;
+            }
+            if pressed(Key::CloseBracket) {
+                self.show_right = !self.show_right;
+            }
+            if m.shift && pressed(Key::R) {
+                self.ribbon = !self.ribbon;
+            }
             if pressed(Key::Z) {
                 if m.shift { self.redo() } else { self.undo() }
             }
@@ -1593,19 +1653,27 @@ impl eframe::App for App {
         self.drive_screenshot(&ctx);
         self.apply_launch();
         let width = ctx.content_rect().width();
-        let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 7));
-        Panel::top("top").resizable(false).frame(top_frame).show(ui, |ui| self.top_bar(ui));
+        // The menus; under them, if it's switched on, the ribbon of controls.
+        let top_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 4));
+        Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
+        if self.ribbon {
+            let ribbon_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 6));
+            Panel::top("ribbon").resizable(false).frame(ribbon_frame).show(ui, |ui| self.ribbon_bar(ui));
+        }
+        // The panels either side, each with its tabs along the bottom.
         if self.show_left && width >= 600.0 {
-            let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 10));
-            Panel::left("left").resizable(false).exact_size(272.0).frame(frame).show(ui, |ui| self.left_panel(ui));
+            let frame = egui::Frame::new().fill(theme::PANEL);
+            Panel::left("left").resizable(true).default_size(280.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.left_dock(ui));
         }
         if self.show_right && width >= 900.0 {
-            let frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 12));
-            Panel::right("right").resizable(false).exact_size(300.0).frame(frame).show(ui, |ui| self.right_panel(ui));
+            let frame = egui::Frame::new().fill(theme::PANEL);
+            Panel::right("right").resizable(true).default_size(310.0).size_range(250.0..=480.0).frame(frame).show(ui, |ui| self.right_dock(ui));
         }
         let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
         Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui));
+        self.shortcuts_window(&ctx);
+        self.keep_layout();
         // A change made this frame shows its effect straight away.
         if self.copper_rev != self.rev || self.checked_rev != self.rev {
             ctx.request_repaint();
