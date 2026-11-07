@@ -13,5 +13,6 @@ pub mod library;
 pub mod model;
 pub mod pour;
 pub mod router;
+pub mod schematic;
 pub mod sample;
 pub mod slide;

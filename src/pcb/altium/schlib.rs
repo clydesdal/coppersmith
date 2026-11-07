@@ -19,7 +19,7 @@ use std::collections::HashMap;
 /// One schematic unit, 10 mil, in millimetres.
 const SCH: f64 = 0.254;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PinKind {
     Input,
     InOut,
@@ -31,7 +31,7 @@ pub enum PinKind {
     Power,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     /// Which part of a many-part symbol it belongs to (from 1).
     pub part: u32,
@@ -55,7 +55,7 @@ impl Pin {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Drawing {
     Line(P, P),
     Rect(P, P),
@@ -66,7 +66,7 @@ pub enum Drawing {
     Text { at: P, text: String },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub description: String,
