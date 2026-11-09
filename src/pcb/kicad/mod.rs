@@ -8,6 +8,7 @@
 pub mod pcb;
 pub mod sch;
 pub mod sexpr;
+pub mod write;
 
 use crate::pcb::altium::Imported;
 use crate::pcb::altium::pcbdoc::ImportedBoard;

@@ -203,6 +203,47 @@ pub enum Asked {
     Export(PathBuf),
 }
 
+/// The files a board can be saved as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoardFormat {
+    /// Coppersmith's own: everything is kept.
+    Coppersmith,
+    /// A KiCad board and project: a copy, with some things lost.
+    Kicad,
+}
+
+impl BoardFormat {
+    pub const ALL: [BoardFormat; 2] = [BoardFormat::Coppersmith, BoardFormat::Kicad];
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "cspcb",
+            BoardFormat::Kicad => "kicad_pcb",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "Coppersmith board (.cspcb)",
+            BoardFormat::Kicad => "KiCad board (.kicad_pcb)",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "Everything is kept. Opens here.",
+            BoardFormat::Kicad => "For KiCad 8, 9 and 10, with the rules in a .kicad_pro beside it. A copy: this board stays as it is.",
+        }
+    }
+}
+
+/// The Save as window: which format, and what it would lose.
+pub struct SaveAs {
+    pub format: BoardFormat,
+    /// What saving as KiCad would lose, worked out when first asked.
+    pub kicad_notes: Option<Vec<String>>,
+}
+
 /// What waits on the "save changes?" question.
 #[derive(Clone, Debug)]
 pub enum Then {
@@ -301,6 +342,9 @@ pub struct App {
     pub show_classes: bool,
     /// The design rules window, and the rule it should open on.
     pub show_rules: bool,
+    /// The Save as window, when it's open, and the format last chosen.
+    pub save_as: Option<SaveAs>,
+    pub last_format: BoardFormat,
     pub rules_focus: Option<crate::pcb::rulebook::RuleId>,
     /// The symbols read from the project's library files, so they're read once.
     pub symbol_cache: std::collections::HashMap<PathBuf, Vec<crate::pcb::altium::schlib::Symbol>>,
@@ -327,7 +371,7 @@ pub struct App {
     pub project_sel: Option<PathBuf>,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
-    after_save: Option<Then>,
+    pub(crate) after_save: Option<Then>,
     may_close: bool,
 
     pub pinch: Pinch,
@@ -430,6 +474,8 @@ impl App {
             show_keys: false,
             show_classes: false,
             show_rules: false,
+            save_as: None,
+            last_format: BoardFormat::Coppersmith,
             rules_focus: None,
             symbol_cache: std::collections::HashMap::new(),
             docs: Vec::new(),
@@ -1171,6 +1217,11 @@ impl App {
     }
 
     pub fn save_to(&mut self, path: PathBuf) {
+        // A KiCad board is written as a copy: this board's own file and its unsaved state stay as they are.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("kicad_pcb")) {
+            self.export_kicad(path);
+            return;
+        }
         let path = if path.extension().is_none() { path.with_extension("cspcb") } else { path };
         match std::fs::write(&path, self.doc.save()) {
             Ok(()) => {
@@ -1182,6 +1233,26 @@ impl App {
         }
     }
 
+    /// Writes the board as a KiCad board, and its rules as a KiCad project beside it (unless there already is one).
+    fn export_kicad(&mut self, path: PathBuf) {
+        let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let w = crate::pcb::kicad::write::board(&self.doc, &name);
+        if let Err(e) = std::fs::write(&path, &w.pcb) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let project = path.with_extension("kicad_pro");
+        let project_note = if project.exists() {
+            "; the .kicad_pro already there is left as it is, so its rules weren't written"
+        } else if std::fs::write(&project, &w.project).is_ok() {
+            ", with its rules in a .kicad_pro"
+        } else {
+            "; the .kicad_pro couldn't be written"
+        };
+        let lost = if w.notes.is_empty() { String::new() } else { format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" }) };
+        self.notice = Some(format!("Exported {} for KiCad{project_note}{lost}", path.display()));
+    }
+
     pub fn save(&mut self, ctx: &egui::Context) {
         match self.path.clone() {
             Some(path) => self.save_to(path),
@@ -1189,15 +1260,21 @@ impl App {
         }
     }
 
-    pub fn ask_save_as(&self, ctx: &egui::Context) {
+    /// Opens the Save as window, where the format is chosen (and what it loses is shown) before a place is.
+    pub fn ask_save_as(&mut self, _ctx: &egui::Context) {
+        self.save_as = Some(SaveAs { format: self.last_format, kicad_notes: None });
+    }
+
+    /// The place to save to, asked of the system's dialog, for the format chosen.
+    pub fn ask_save_place(&mut self, ctx: &egui::Context, format: BoardFormat) {
+        self.last_format = format;
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
-        let name = format!("{}.cspcb", self.doc.name);
+        let name = format!("{}.{}", self.doc.name, format.ext());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new()
-                .set_title("Save the board")
-                .set_file_name(&name)
-                .add_filter("Coppersmith board", &["cspcb"]);
+            let dialog = rfd::FileDialog::new().set_title("Save the board").set_file_name(&name).add_filter(format.name(), &[format.ext()]);
             if let Some(path) = dialog.save_file() {
+                // A name typed without its ending gets the format's.
+                let path = if path.extension().is_none() { path.with_extension(format.ext()) } else { path };
                 let _ = tx.send(Asked::SaveAs(path));
                 ctx.request_repaint();
             }
@@ -2307,6 +2384,7 @@ impl eframe::App for App {
         self.shortcuts_window(&ctx);
         self.classes_window(&ctx);
         self.rules_window(&ctx);
+        self.save_as_window(&ctx);
         self.keep_layout();
         // A change made this frame shows its effect straight away.
         if self.copper_rev != self.rev || self.checked_rev != self.rev {

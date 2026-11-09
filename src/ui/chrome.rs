@@ -785,6 +785,68 @@ impl App {
         }
     }
 
+    /// The Save as window: the format to save in, what that would lose, then where.
+    pub fn save_as_window(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.save_as.take() else { return };
+        // A save that something waits on (closing, opening another) is to Coppersmith's own file.
+        let waiting = self.after_save.is_some();
+        if waiting {
+            st.format = crate::ui::app::BoardFormat::Coppersmith;
+        }
+        if st.format == crate::ui::app::BoardFormat::Kicad && st.kicad_notes.is_none() {
+            st.kicad_notes = Some(crate::pcb::kicad::write::board(&self.doc, &self.doc.name).notes);
+        }
+        let (mut keep, mut place, mut cancel) = (true, None, false);
+        egui::Window::new("Save the board as").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).default_width(520.0).open(&mut keep).show(ctx, |ui| {
+            for f in crate::ui::app::BoardFormat::ALL.into_iter().filter(|f| !waiting || *f == crate::ui::app::BoardFormat::Coppersmith) {
+                ui.radio_value(&mut st.format, f, RichText::new(f.name()).font(semibold(14.0)));
+                ui.label(RichText::new(f.about()).size(12.0).color(FAINT));
+                ui.add_space(4.0);
+            }
+            ui.separator();
+            ui.add_space(4.0);
+            match (st.format, &st.kicad_notes) {
+                (crate::ui::app::BoardFormat::Kicad, Some(notes)) => {
+                    if notes.is_empty() {
+                        ui.label(RichText::new("Nothing in this board is lost.").color(theme::GREEN));
+                    } else {
+                        ui.label(RichText::new(format!("What may be lost or changed ({})", notes.len())).font(semibold(13.0)).color(theme::YELLOW));
+                        ui.add_space(2.0);
+                        ScrollArea::vertical().max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
+                            for n in notes {
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new("•").color(theme::YELLOW));
+                                    ui.add(egui::Label::new(RichText::new(n).size(12.5).color(DIM)).wrap());
+                                });
+                                ui.add_space(3.0);
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("The file was written to open in KiCad, but it has not been opened in KiCad itself.").size(11.5).color(FAINT));
+                }
+                _ => {
+                    ui.label(RichText::new("Nothing is lost: this is Coppersmith's own format.").color(theme::GREEN));
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Choose where…").clicked() {
+                    place = Some(st.format);
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        keep &= !cancel;
+        if let Some(f) = place {
+            self.ask_save_place(ctx, f);
+        } else if keep {
+            self.save_as = Some(st);
+        }
+    }
+
     /// The window of keyboard shortcuts.
     pub fn shortcuts_window(&mut self, ctx: &egui::Context) {
         let mut open = self.show_keys;

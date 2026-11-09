@@ -562,6 +562,20 @@ has no PcbDoc writer; the Gerbers and drill files it writes, which Altium reads,
 are the way out for a board). Each of these is read back by Coppersmith's own
 Altium reader and compared, but **none has been opened in Altium itself**.
 
+**Save as a KiCad board.** **File ▸ Save as…** asks for the format first:
+Coppersmith's own `.cspcb` (everything kept) or a KiCad 8-style `.kicad_pcb`
+with the rules and net classes in a `.kicad_pro` beside it (an existing one is
+left alone). The window lists what the chosen format would lose or change
+before you pick a place. Exporting is a copy: the open board keeps its own
+file and unsaved state. What is listed: pours come unfilled (press B in
+KiCad), special clearances between kinds of copper, per-layer widths, matched
+lengths, differential pairs and the other Altium rule kinds aren't carried,
+rule on/off isn't, tracks on layers the board lacks, stack-up and outline.
+Tracks, vias and pads translate exactly (checked on an Altium board: the same
+connections are open before and after), and KiCad's demo boards survive the
+trip. **The written file has been read back by Coppersmith, not opened in
+KiCad itself.**
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,

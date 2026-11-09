@@ -654,14 +654,21 @@ fn zones(root: &Sx, b: &mut Board, nets: &mut Nets, left: &mut Left) {
                     if let Some(w) = f.child_num("thermal_bridge_width") {
                         pour.spoke = w;
                     }
-                    pour.remove_islands = f.child_num("island_removal_mode") != Some(1.0);
-                    if let Some(a) = f.child_num("island_area_min") {
-                        pour.min_area = a;
+                    // Mode 0 removes every island; 1 keeps them all; 2 removes those below an area.
+                    match f.child_num("island_removal_mode") {
+                        Some(1.0) => pour.remove_islands = false,
+                        Some(2.0) => {
+                            pour.remove_islands = false;
+                            pour.min_area = f.child_num("island_area_min").unwrap_or(0.0);
+                        }
+                        _ => {}
                     }
                 }
                 if connect.and_then(|c| c.str_arg(0)) == Some("yes") {
                     pour.connect = Connect::Direct;
                 }
+                // Coppersmith marks a power plane by naming its zone so; KiCad has no such thing.
+                pour.plane = z.child_str("name") == Some("Power plane");
                 // KiCad fills the higher priority first; here the lower order does.
                 let priority = z.child_num("priority").unwrap_or(0.0).clamp(0.0, 999.0) as u32;
                 pour.order = (1000 - priority) * 1000 + id;
@@ -790,7 +797,7 @@ fn apply_project(b: &mut Board, json: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -820,7 +827,7 @@ mod tests {
 
     /// A small board in the older style (numbered nets), with a part turned on top, one underneath,
     /// an arc track, a via, an edge drawn in four lines, and a zone.
-    const SMALL: &str = r#"(kicad_pcb (version 20221018) (generator "pcbnew")
+    pub(crate) const SMALL: &str = r#"(kicad_pcb (version 20221018) (generator "pcbnew")
  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user) (37 "F.SilkS" user))
  (net 0 "") (net 1 "A") (net 2 "GND")
  (footprint "Lib:R" (layer "F.Cu") (at 10 20 90)
