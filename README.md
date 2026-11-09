@@ -557,15 +557,16 @@ hierarchical sheets on a sheet (a sub-sheet's own file opens by itself), and
 alternate (De Morgan) symbol bodies. Older KiCad 5 files are only partly read.
 
 **Out to Altium.** Footprints write as a `.PcbLib`, symbols as a `.SchLib` and
-sheets as a `.SchDoc` (a KiCad board can't be saved as a `.PcbDoc`: Coppersmith
-has no PcbDoc writer; the Gerbers and drill files it writes, which Altium reads,
-are the way out for a board). Each of these is read back by Coppersmith's own
-Altium reader and compared, but **none has been opened in Altium itself**.
+sheets as a `.SchDoc`; a board saves as a `.PcbDoc` (see Save as below, and
+the Gerbers and drill files are still there too). Each of these is read back by
+Coppersmith's own Altium reader and compared, but **none has been opened in
+Altium itself**.
 
-**Save as a KiCad board.** **File ▸ Save as…** asks for the format first:
-Coppersmith's own `.cspcb` (everything kept) or a KiCad 8-style `.kicad_pcb`
-with the rules and net classes in a `.kicad_pro` beside it (an existing one is
-left alone). The window lists what the chosen format would lose or change
+**Save as another format.** **File ▸ Save as…** asks for the format first:
+Coppersmith's own `.cspcb` (everything kept), a KiCad 8-style `.kicad_pcb` with
+the rules and net classes in a `.kicad_pro` beside it (an existing one is left
+alone), or an Altium `.PcbDoc`. The name offered ends in `_CSMITH`, so saving a
+board that came from another tool doesn't write over the original. The window lists what the chosen format would lose or change
 before you pick a place. Exporting is a copy: the open board keeps its own
 file and unsaved state. What is listed: pours come unfilled (press B in
 KiCad), special clearances between kinds of copper, per-layer widths, matched
@@ -575,6 +576,16 @@ Tracks, vias and pads translate exactly (checked on an Altium board: the same
 connections are open before and after), and KiCad's demo boards survive the
 trip. **The written file has been read back by Coppersmith, not opened in
 KiCad itself.**
+
+For an Altium `.PcbDoc` the same applies: the window lists the losses (pours
+come as outlines to repour in Altium, power planes become ordinary pours, only
+the general design rules and the class rules are written, parts carry no link to
+a schematic or library, only designators are written as text, the layer stack
+has default materials). Pads, tracks, arcs, vias, regions, keepouts, nets,
+classes and pairs are written, and an Altium board's copper reads back exactly.
+Its pad, via and text records start from records copied out of a real board.
+**It has been read back by Coppersmith, and its record sizes match a real
+board's, but it has not been opened in Altium, which may refuse or repair it.**
 
 ## Building
 

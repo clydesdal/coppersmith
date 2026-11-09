@@ -14,11 +14,13 @@
 //! follows it, checked against real Circuit Studio files in testdata/altium.
 
 pub mod pcbdoc;
+pub mod pcbdoc_write;
 pub mod pcblib;
 pub mod prims;
 pub mod schdoc;
 pub mod schlib;
 pub mod schsheet;
+pub mod templates;
 pub mod write;
 
 use std::collections::HashMap;

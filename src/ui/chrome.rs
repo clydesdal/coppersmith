@@ -793,8 +793,13 @@ impl App {
         if waiting {
             st.format = crate::ui::app::BoardFormat::Coppersmith;
         }
-        if st.format == crate::ui::app::BoardFormat::Kicad && st.kicad_notes.is_none() {
-            st.kicad_notes = Some(crate::pcb::kicad::write::board(&self.doc, &self.doc.name).notes);
+        use crate::ui::app::BoardFormat as Fmt;
+        if st.format != Fmt::Coppersmith && !st.notes.iter().any(|(f, _)| *f == st.format) {
+            let notes = match st.format {
+                Fmt::Kicad => crate::pcb::kicad::write::board(&self.doc, &self.doc.name).notes,
+                _ => crate::pcb::altium::pcbdoc_write::board(&self.doc).map(|w| w.notes).unwrap_or_else(|e| vec![e]),
+            };
+            st.notes.push((st.format, notes));
         }
         let (mut keep, mut place, mut cancel) = (true, None, false);
         egui::Window::new("Save the board as").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).default_width(520.0).open(&mut keep).show(ctx, |ui| {
@@ -805,8 +810,9 @@ impl App {
             }
             ui.separator();
             ui.add_space(4.0);
-            match (st.format, &st.kicad_notes) {
-                (crate::ui::app::BoardFormat::Kicad, Some(notes)) => {
+            let shown = st.notes.iter().find(|(f, _)| *f == st.format).map(|(_, n)| n.clone());
+            match (st.format, &shown) {
+                (Fmt::Kicad | Fmt::Altium, Some(notes)) => {
                     if notes.is_empty() {
                         ui.label(RichText::new("Nothing in this board is lost.").color(theme::GREEN));
                     } else {
@@ -823,7 +829,8 @@ impl App {
                         });
                     }
                     ui.add_space(4.0);
-                    ui.label(RichText::new("The file was written to open in KiCad, but it has not been opened in KiCad itself.").size(11.5).color(FAINT));
+                    let tool = if st.format == Fmt::Altium { "Altium" } else { "KiCad" };
+                    ui.label(RichText::new(format!("The file was written to open in {tool}, but it has not been opened in {tool} itself.")).size(11.5).color(FAINT));
                 }
                 _ => {
                     ui.label(RichText::new("Nothing is lost: this is Coppersmith's own format.").color(theme::GREEN));

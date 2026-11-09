@@ -85,7 +85,7 @@ a schematic editor.
 - Libraries as files you can keep in git; search across them; usage report ("which boards use this").
 - Import KiCad `.kicad_mod`, `.kicad_sym`, boards and sheets: done (see the README). Next: KiCad 5's older file format, per-pad layers (so a pad on the far side needn't be a second part), blind and buried vias, and following a sheet's sub-sheets.
 - Save as KiCad `.kicad_pcb`: done (the Save as window lists what is lost). Next: check it in real KiCad.
-- Write a `.PcbDoc`, so a board from KiCad (or Coppersmith) can go to Altium as a board, not only as Gerbers.
+- Write a `.PcbDoc`: done (File ▸ Save as…). Next: open one in Altium and fix whatever it complains of; write pours filled, the stack-up, and the rest of the rules.
 
 ## 3. Schematic capture
 

@@ -1198,6 +1198,151 @@ mod tests {
         }
     }
 
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_layout -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_layout() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let root: Vec<(String, bool)> = file.read_root_storage().map(|e| (e.name().to_string(), e.is_storage())).collect();
+        println!("root: {root:?}");
+        for (s, is_dir) in &root {
+            if !is_dir {
+                if let Ok(d) = stream(&mut file, &format!("/{s}")) {
+                    println!("FILE {s}: {} bytes: {:02x?}", d.len(), &d[..d.len().min(80)]);
+                }
+                continue;
+            }
+            let kids: Vec<String> = file.read_storage(format!("/{s}")).map(|it| it.map(|e| e.name().to_string()).collect()).unwrap_or_default();
+            println!("STORAGE {s}: {kids:?}");
+            for k in &kids {
+                if k == "Data" || k == "Header" {
+                    if let Ok(d) = stream(&mut file, &format!("/{s}/{k}")) {
+                        if k == "Header" {
+                            println!("  {s}/Header {:02x?}", d);
+                        } else {
+                            println!("  {s}/Data {} bytes", d.len());
+                        }
+                    }
+                }
+            }
+            if matches!(s.as_str(), "Vias6" | "Tracks6" | "Arcs6" | "Texts6" | "Regions6" | "Pads6" | "Fills6") {
+                let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+                let mut r = Reader::new(&d);
+                let mut shown = 0;
+                while !r.done() && shown < 2 {
+                    let kind = r.u8().unwrap();
+                    let nblocks = if kind == 2 { 6 } else if kind == 5 { 2 } else { 1 };
+                    print!("  {s} kind {kind}:");
+                    for _ in 0..nblocks {
+                        let b = r.block().unwrap();
+                        print!(" [{} bytes: {:02x?}]", b.len(), &b[..b.len().min(160)]);
+                    }
+                    println!();
+                    shown += 1;
+                }
+            }
+            if matches!(s.as_str(), "Board6" | "Nets6" | "Components6" | "Polygons6" | "Classes6" | "DifferentialPairs6") {
+                let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+                let recs = text_records(&d);
+                for r in recs.iter().take(if s == "Board6" { 1 } else { 2 }) {
+                    let mut kv: Vec<String> = r.iter().map(|(k, v)| format!("{k}={}", v.chars().take(40).collect::<String>())).collect();
+                    kv.sort();
+                    println!("  {s} rec: {}", kv.join("|"));
+                }
+            }
+        }
+        if let Ok(d) = stream(&mut file, "/Rules6/Data") {
+            let mut r = Reader::new(&d);
+            let mut n = 0;
+            while r.left() >= 6 && n < 2 {
+                let k = r.i16().unwrap();
+                let b = r.block().unwrap();
+                println!("  Rules6 kind {k}: {}", String::from_utf8_lossy(&b[..b.len().min(500)]));
+                n += 1;
+            }
+        }
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_full -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_full() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        for (s, kind, nblocks, pick) in [("Vias6", 3, 1, 0usize), ("Pads6", 2, 6, 0), ("Pads6", 2, 6, 1), ("Texts6", 5, 2, 0), ("Regions6", 11, 1, 0)] {
+            let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+            let mut r = Reader::new(&d);
+            let mut i = 0;
+            while !r.done() {
+                let k = r.u8().unwrap();
+                assert_eq!(k, kind);
+                let bl: Vec<&[u8]> = (0..nblocks).map(|_| r.block().unwrap()).collect();
+                if i == pick {
+                    for (j, b) in bl.iter().enumerate() {
+                        println!("FULL {s}[{pick}] block {j} ({} bytes): {}", b.len(), hex(b));
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        }
+        let d = stream(&mut file, "/Board6/Data").unwrap();
+        let rec = text_records(&d).into_iter().next().unwrap();
+        let mut keys: Vec<&String> = rec.keys().collect();
+        keys.sort();
+        let series = ["CX", "CY", "EA", "SA", "KIND", "VX", "VY", "R"];
+        for k in keys {
+            let digits_start = k.find(|c: char| c.is_ascii_digit());
+            let stem = digits_start.map(|i| &k[..i]).unwrap_or(k);
+            if digits_start.is_some() && series.contains(&stem) {
+                continue;
+            }
+            if k.starts_with("LAYER") && k.len() > 5 {
+                let n: String = k[5..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !["1", "2", "3", "32", "39", "57"].contains(&n.as_str()) {
+                    continue;
+                }
+            }
+            if k.starts_with("PLANE") || k.starts_with("MIDLAYER") || k.starts_with("MECHANICAL") || k.starts_with("V9") {
+                let n: String = k.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+                if !["1", "2"].contains(&n.as_str()) {
+                    continue;
+                }
+            }
+            println!("BOARD {k}={}", rec[k].chars().take(70).collect::<String>());
+        }
+        println!("BOARD vertex count: {}", rec.keys().filter(|k| k.starts_with("VX")).count());
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_rules -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_rules() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let d = stream(&mut file, "/Rules6/Data").unwrap();
+        println!("RULES first bytes {:02x?}", &d[..16]);
+        let mut r = Reader::new(&d);
+        let mut seen = std::collections::HashSet::new();
+        let mut n = 0;
+        while r.left() >= 6 {
+            let k = r.i16().unwrap();
+            let b = r.block().unwrap();
+            let text = String::from_utf8_lossy(b).to_string();
+            let kind = text.split("RULEKIND=").nth(1).and_then(|t| t.split('|').next()).unwrap_or("").to_string();
+            println!("RULES #{n} i16={k} len={} kind={kind}", b.len());
+            if ["Clearance", "Width", "PolygonConnect", "RoutingVias", "HoleSize", "ShortCircuit"].contains(&kind.as_str()) && seen.insert(kind.clone()) {
+                println!("RULETEXT {kind}: {}", text.chars().take(1800).collect::<String>());
+            }
+            n += 1;
+        }
+    }
+
     #[test]
     #[ignore]
     fn list_fills() {

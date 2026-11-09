@@ -210,15 +210,18 @@ pub enum BoardFormat {
     Coppersmith,
     /// A KiCad board and project: a copy, with some things lost.
     Kicad,
+    /// An Altium board: a copy, with some things lost.
+    Altium,
 }
 
 impl BoardFormat {
-    pub const ALL: [BoardFormat; 2] = [BoardFormat::Coppersmith, BoardFormat::Kicad];
+    pub const ALL: [BoardFormat; 3] = [BoardFormat::Coppersmith, BoardFormat::Kicad, BoardFormat::Altium];
 
     pub fn ext(self) -> &'static str {
         match self {
             BoardFormat::Coppersmith => "cspcb",
             BoardFormat::Kicad => "kicad_pcb",
+            BoardFormat::Altium => "PcbDoc",
         }
     }
 
@@ -226,13 +229,22 @@ impl BoardFormat {
         match self {
             BoardFormat::Coppersmith => "Coppersmith board (.cspcb)",
             BoardFormat::Kicad => "KiCad board (.kicad_pcb)",
+            BoardFormat::Altium => "Altium board (.PcbDoc)",
         }
+    }
+
+    /// The name a board is offered under: with `_CSMITH` on it, so saving
+    /// a board that came from another tool doesn't write over the original.
+    pub fn file_name(self, board: &str) -> String {
+        let stem = if board.to_ascii_uppercase().ends_with("_CSMITH") { board.to_string() } else { format!("{board}_CSMITH") };
+        format!("{stem}.{}", self.ext())
     }
 
     pub fn about(self) -> &'static str {
         match self {
             BoardFormat::Coppersmith => "Everything is kept. Opens here.",
             BoardFormat::Kicad => "For KiCad 8, 9 and 10, with the rules in a .kicad_pro beside it. A copy: this board stays as it is.",
+            BoardFormat::Altium => "For Altium Designer. A copy: this board stays as it is.",
         }
     }
 }
@@ -240,8 +252,8 @@ impl BoardFormat {
 /// The Save as window: which format, and what it would lose.
 pub struct SaveAs {
     pub format: BoardFormat,
-    /// What saving as KiCad would lose, worked out when first asked.
-    pub kicad_notes: Option<Vec<String>>,
+    /// What saving in each of the other formats would lose, worked out when first asked.
+    pub notes: Vec<(BoardFormat, Vec<String>)>,
 }
 
 /// What waits on the "save changes?" question.
@@ -1222,6 +1234,10 @@ impl App {
             self.export_kicad(path);
             return;
         }
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc")) {
+            self.export_altium(path);
+            return;
+        }
         let path = if path.extension().is_none() { path.with_extension("cspcb") } else { path };
         match std::fs::write(&path, self.doc.save()) {
             Ok(()) => {
@@ -1231,6 +1247,23 @@ impl App {
             }
             Err(e) => self.notice = Some(format!("{} couldn't be saved: {e}", path.display())),
         }
+    }
+
+    /// Writes the board as an Altium `.PcbDoc`.
+    fn export_altium(&mut self, path: PathBuf) {
+        let w = match crate::pcb::altium::pcbdoc_write::board(&self.doc) {
+            Ok(w) => w,
+            Err(e) => {
+                self.notice = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&path, &w.bytes) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let lost = format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" });
+        self.notice = Some(format!("Exported {} for Altium{lost}", path.display()));
     }
 
     /// Writes the board as a KiCad board, and its rules as a KiCad project beside it (unless there already is one).
@@ -1262,14 +1295,14 @@ impl App {
 
     /// Opens the Save as window, where the format is chosen (and what it loses is shown) before a place is.
     pub fn ask_save_as(&mut self, _ctx: &egui::Context) {
-        self.save_as = Some(SaveAs { format: self.last_format, kicad_notes: None });
+        self.save_as = Some(SaveAs { format: self.last_format, notes: Vec::new() });
     }
 
     /// The place to save to, asked of the system's dialog, for the format chosen.
     pub fn ask_save_place(&mut self, ctx: &egui::Context, format: BoardFormat) {
         self.last_format = format;
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
-        let name = format!("{}.{}", self.doc.name, format.ext());
+        let name = format.file_name(&self.doc.name);
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new().set_title("Save the board").set_file_name(&name).add_filter(format.name(), &[format.ext()]);
             if let Some(path) = dialog.save_file() {
@@ -2396,6 +2429,16 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_copy_is_named_so_it_cant_stomp_the_original() {
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay"), "EZDisplay_CSMITH.PcbDoc");
+        assert_eq!(BoardFormat::Kicad.file_name("pic_programmer"), "pic_programmer_CSMITH.kicad_pcb");
+        assert_eq!(BoardFormat::Coppersmith.file_name("board"), "board_CSMITH.cspcb");
+        // Not twice.
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay_CSMITH"), "EZDisplay_CSMITH.PcbDoc");
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay_csmith"), "EZDisplay_csmith.PcbDoc");
+    }
 
     #[test]
     fn closing_a_tab_keeps_the_right_one_on_show() {
