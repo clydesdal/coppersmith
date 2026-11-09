@@ -1211,11 +1211,11 @@ impl App {
             // Boards first; projects, schematics and libraries open in their own places.
             let dialog = rfd::FileDialog::new()
                 .set_title("Open")
-                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb"]))
-                .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb"]))
-                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc"]))
-                .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch"]))
-                .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib"]));
+                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb", "kicad_pcb", "kicad_sch", "kicad_mod", "kicad_sym", "kicad_pro"]))
+                .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb", "kicad_pro"]))
+                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "kicad_pcb"]))
+                .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch", "kicad_sch"]))
+                .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib", "kicad_mod", "kicad_sym"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Open(path));
                 ctx.request_repaint();
@@ -1228,7 +1228,7 @@ impl App {
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new()
                 .set_title("Add an Altium library")
-                .add_filter("Altium footprint library", &crate::pcb::altium::with_cases(&["PcbLib", "IntLib"]));
+                .add_filter("Footprint library", &crate::pcb::altium::with_cases(&["PcbLib", "IntLib", "kicad_mod"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::AddLibrary(path));
                 ctx.request_repaint();
@@ -1902,7 +1902,7 @@ impl App {
     pub fn ask_open_project(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open a project").add_filter("Altium or Circuit Studio project", &crate::pcb::altium::with_cases(&["PrjPcb", "CSPrjPcb"]));
+            let dialog = rfd::FileDialog::new().set_title("Open a project").add_filter("Altium, Circuit Studio or KiCad project", &crate::pcb::altium::with_cases(&["PrjPcb", "CSPrjPcb", "kicad_pro"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Project(path));
                 ctx.request_repaint();

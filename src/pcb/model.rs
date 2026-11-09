@@ -784,6 +784,16 @@ pub struct Rules {
     /// What a file said of its rules, kept so it can be shown whole.
     #[serde(default)]
     pub seen: Vec<SeenRule>,
+    /// How much short of its gap copper may be before it's too close. Altium's
+    /// coordinates are 2.5 nm apart and each rounds when it comes in, so a gap
+    /// that is exactly the rule's there can come out a few nanometres short here.
+    /// A board from KiCad, whose own checker is looser, has a micron.
+    #[serde(default = "default_tolerance")]
+    pub tolerance: f64,
+}
+
+fn default_tolerance() -> f64 {
+    1e-5
 }
 
 /// Rules a new board starts with off: the ones that need a decision about the board's own
@@ -904,6 +914,7 @@ impl Default for Rules {
             min_net_length: 0.0,
             max_net_length: 0.0,
             seen: Vec::new(),
+            tolerance: default_tolerance(),
         }
     }
 }

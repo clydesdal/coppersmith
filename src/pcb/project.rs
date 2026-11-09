@@ -18,9 +18,9 @@ impl FileKind {
     pub fn of(path: &Path) -> Option<FileKind> {
         let ext = path.extension()?.to_string_lossy().to_lowercase();
         match ext.as_str() {
-            "schdoc" | "csschdoc" | "cssch" => Some(FileKind::Schematic),
-            "pcbdoc" | "cspcbdoc" | "cspcb" => Some(FileKind::Board),
-            "pcblib" | "schlib" | "intlib" => Some(FileKind::Library),
+            "schdoc" | "csschdoc" | "cssch" | "kicad_sch" => Some(FileKind::Schematic),
+            "pcbdoc" | "cspcbdoc" | "cspcb" | "kicad_pcb" => Some(FileKind::Board),
+            "pcblib" | "schlib" | "intlib" | "kicad_mod" | "kicad_sym" => Some(FileKind::Library),
             _ => None,
         }
     }
@@ -36,7 +36,7 @@ impl FileKind {
 
 /// A project file (`.PrjPcb`, `.CSPrjPcb`).
 pub fn is_project_file(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("prjpcb") || e.eq_ignore_ascii_case("csprjpcb"))
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("prjpcb") || e.eq_ignore_ascii_case("csprjpcb") || e.eq_ignore_ascii_case("kicad_pro"))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +66,14 @@ impl Project {
     /// A project from its file: the documents it lists, paths Windows-style
     /// and relative to the file.
     pub fn from_file(path: &Path) -> Result<Project, String> {
+        // A KiCad project lists nothing: it's the files beside it.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("kicad_pro")) {
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+            let mut project = Project::from_folder(&dir);
+            project.name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            project.file = Some(path.to_path_buf());
+            return Ok(project);
+        }
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let text = String::from_utf8_lossy(&bytes);
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();

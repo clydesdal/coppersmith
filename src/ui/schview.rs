@@ -225,6 +225,24 @@ impl SchWindow {
     }
 
     pub fn open_file(&mut self, path: &Path) -> String {
+        // A KiCad sheet is read in and kept as a new sheet: Save asks where, so the KiCad file is never written over.
+        if crate::pcb::kicad::is_sheet(path) {
+            let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            return match std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display())).and_then(|t| crate::pcb::kicad::sch::read_sheet(&t, &name).map_err(|e| format!("{}: {e}", path.display()))) {
+                Ok((s, notes)) => {
+                    self.notes = notes;
+                    self.sch = s;
+                    self.path = None;
+                    self.undo.clear();
+                    self.redo.clear();
+                    self.dirty = true;
+                    self.sel = None;
+                    self.fit = true;
+                    format!("Read {}; save it as a SchDoc or a Coppersmith sheet to keep it", path.display())
+                }
+                Err(e) => e,
+            };
+        }
         // Anything that isn't Coppersmith's own is read as an Altium sheet, so a renamed one still opens.
         let ours = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("cssch") || e.eq_ignore_ascii_case("json"));
         let read = if Self::is_altium(path) || !ours {
@@ -416,7 +434,7 @@ impl SchWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            if let Some(path) = rfd::FileDialog::new().set_title("Open a schematic").add_filter("Schematics", &crate::pcb::altium::with_cases(&["cssch", "json", "SchDoc", "CSSchDoc"])).add_filter("Altium or Circuit Studio sheet", &crate::pcb::altium::with_cases(&["SchDoc", "CSSchDoc"])).add_filter("Coppersmith schematic", &["cssch", "json"]).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().set_title("Open a schematic").add_filter("Schematics", &crate::pcb::altium::with_cases(&["cssch", "json", "SchDoc", "CSSchDoc", "kicad_sch"])).add_filter("KiCad sheet", &crate::pcb::altium::with_cases(&["kicad_sch"])).add_filter("Altium or Circuit Studio sheet", &crate::pcb::altium::with_cases(&["SchDoc", "CSSchDoc"])).add_filter("Coppersmith schematic", &["cssch", "json"]).pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();
             }
@@ -436,7 +454,7 @@ impl SchWindow {
     fn ask_add_symbols(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            if let Some(path) = rfd::FileDialog::new().set_title("Open a symbol library").add_filter("Altium symbol library", &crate::pcb::altium::with_cases(&["SchLib", "IntLib"])).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().set_title("Open a symbol library").add_filter("Symbol library", &crate::pcb::altium::with_cases(&["SchLib", "IntLib", "kicad_sym"])).pick_file() {
                 let _ = tx.send(Dialog::AddSymbols(path));
                 ctx.request_repaint();
             }

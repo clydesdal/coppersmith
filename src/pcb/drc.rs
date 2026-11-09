@@ -32,10 +32,6 @@ impl Problem {
     }
 }
 
-/// How much short of its gap copper may be before it's too close. Altium's
-/// coordinates are 2.5 nm apart and each rounds when it comes in, so a gap
-/// that is exactly the rule's there can come out a few nanometres short here.
-const TOLERANCE: f64 = 1e-5;
 
 pub fn describe(board: &Board, item: Item) -> String {
     match item {
@@ -150,7 +146,7 @@ fn clearance_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec
             continue;
         }
         let (gap, pa, pb) = a.gap_within(b, need);
-        if gap < need - TOLERANCE {
+        if gap < need - r.tolerance {
             let (what, sev, rule) = if gap <= 1e-6 { ("Short circuit", Severity::Error, RuleId::ShortCircuit) } else { ("Too close", Severity::Error, RuleId::Clearance) };
             if !r.is_on(rule) {
                 continue;
@@ -222,7 +218,7 @@ fn edge_problems(board: &Board, items: &[Cu], dirty: &[bool], out: &mut Vec<Prob
         let mid = |b: &Blob| b.core.iter().fold(P::default(), |s, q| s.add(*q)).scale(1.0 / b.core.len().max(1) as f64);
         let inside = cu.parts.iter().all(|part| point_in_ring(mid(part), edge));
         if let Some((gap, at)) = worst
-            && (!inside || gap < need - TOLERANCE)
+            && (!inside || gap < need - r.tolerance)
         {
             out.push(Problem {
                 rule: RuleId::BoardOutlineClearance,
@@ -446,7 +442,7 @@ fn small_problems(board: &Board, copper: &Copper, out: &mut Vec<Problem>) {
             } else if r.component_gap > 0.0 {
                 // Not touching, but nearer than the rule allows (corner to corner, or side by side).
                 let apart = (-w).max(0.0).hypot((-h).max(0.0));
-                if apart < r.component_gap - TOLERANCE {
+                if apart < r.component_gap - r.tolerance {
                     out.push(Problem {
                         rule: RuleId::ComponentClearance,
                         severity: Severity::Warning,
@@ -521,7 +517,7 @@ fn hole_gap_problems(board: &Board, out: &mut Vec<Problem>) {
             }
             let (a, b) = (&holes[i], &holes[j]);
             let apart = a.1.dist(b.1) - a.2 - b.2;
-            if apart < r.hole_gap - TOLERANCE {
+            if apart < r.hole_gap - r.tolerance {
                 out.push(Problem {
                     rule: RuleId::HoleToHoleClearance,
                     severity: Severity::Error,

@@ -83,7 +83,8 @@ a schematic editor.
 - Symbol editor: pins (number, name, type), body graphics, multi-part symbols.
 - Components: symbol + footprint + pin map + parameters (value, manufacturer part number, supplier links) — the thing a schematic places.
 - Libraries as files you can keep in git; search across them; usage report ("which boards use this").
-- Import KiCad `.kicad_mod` and `.kicad_sym`, so the big public libraries are reachable on day one.
+- Import KiCad `.kicad_mod`, `.kicad_sym`, boards and sheets: done (see the README). Next: KiCad 5's older file format, per-pad layers (so a pad on the far side needn't be a second part), blind and buried vias, and following a sheet's sub-sheets.
+- Write a `.PcbDoc`, so a board from KiCad (or Coppersmith) can go to Altium as a board, not only as Gerbers.
 
 ## 3. Schematic capture
 

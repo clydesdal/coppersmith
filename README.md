@@ -524,6 +524,44 @@ summarises a board (with its rules), a schematic sheet (parts, wires,
 labels, ports), or a whole project: every sheet's netlist joined up and
 checked net by net against the board, listing any pin the two disagree on.
 
+### KiCad boards, sheets and libraries
+
+**Open** (and `coppersmith FILE`) also takes KiCad 6 to 10's files:
+
+- **`.kicad_pcb` boards**, with the rules from the `.kicad_pro` beside them
+  (clearance, track width, via sizes, hole and ring sizes, edge clearance,
+  hole to hole, and the net classes with the nets they hold, by name or
+  pattern). Parts come in with their pads and silkscreen, courtyard and
+  assembly drawing, a part underneath mirrored as KiCad has it; tracks (arcs
+  included), vias, zones (poured again here, with their clearance, thermal gap
+  and spoke width, island removal and fill order), keep-out zones with what each
+  keeps out, and the edge from `Edge.Cuts`, however many lines and arcs it's
+  drawn in. A pad on the far side of its part (a PCI edge connector's) makes a
+  second part of the same name on that side. The board opens unsaved.
+- **`.kicad_sch` sheets**: parts (many-unit symbols too) with their value and
+  footprint, wires, net labels, global and hierarchical labels as ports,
+  supplies as power ports in the right style, on a page of the sheet's own
+  size. The sheet opens unsaved.
+- **`.kicad_mod` footprints** (one, or a `.pretty` folder of them) and
+  **`.kicad_sym` symbol libraries**, in the library editor and the Parts list.
+
+What comes in is checked against KiCad's own demo boards: they read with every
+part, track, via and zone, **nothing left unrouted, and no short circuits or
+clearance errors**, and the PIC programmer's sheet comes in with every pin joined
+but the six it flags no-connect. A gap is allowed to come out a micron short on a
+KiCad board, as KiCad's own check allows. Left out, and said in the status bar:
+text and drawings on the board itself, dimensions, cut-outs in the edge, hatched
+zones (poured solid), trapezoid and custom-shaped pads (drawn as rectangles or
+their anchor), blind and buried vias (made through vias), bus members and
+hierarchical sheets on a sheet (a sub-sheet's own file opens by itself), and
+alternate (De Morgan) symbol bodies. Older KiCad 5 files are only partly read.
+
+**Out to Altium.** Footprints write as a `.PcbLib`, symbols as a `.SchLib` and
+sheets as a `.SchDoc` (a KiCad board can't be saved as a `.PcbDoc`: Coppersmith
+has no PcbDoc writer; the Gerbers and drill files it writes, which Altium reads,
+are the way out for a board). Each of these is read back by Coppersmith's own
+Altium reader and compared, but **none has been opened in Altium itself**.
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,

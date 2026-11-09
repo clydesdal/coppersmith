@@ -73,7 +73,7 @@ impl LibWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib"]));
+            let dialog = rfd::FileDialog::new().set_title("Open a library").add_filter("Altium and KiCad libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib", "kicad_mod", "kicad_sym"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();

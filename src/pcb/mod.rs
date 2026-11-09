@@ -9,6 +9,7 @@ pub mod drc;
 pub mod font;
 pub mod geom;
 pub mod gerber;
+pub mod kicad;
 pub mod library;
 pub mod model;
 pub mod pour;
