@@ -84,8 +84,8 @@ impl LibWindow {
     fn ask_save_as(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         let (title, ext, file) = match self.ed.kind {
-            Kind::Footprints => ("Save the footprints as a PcbLib", "PcbLib", format!("{}.PcbLib", self.ed.name)),
-            Kind::Symbols => ("Save the symbols as a SchLib", "SchLib", format!("{}.SchLib", self.ed.name)),
+            Kind::Footprints => ("Save the footprints as a PcbLib", "PcbLib", format!("{}.PcbLib", crate::ui::app::copy_stem(&self.ed.name))),
+            Kind::Symbols => ("Save the symbols as a SchLib", "SchLib", format!("{}.SchLib", crate::ui::app::copy_stem(&self.ed.name))),
         };
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new().set_title(title).add_filter("Altium library", &[ext]).set_file_name(file);

@@ -203,6 +203,11 @@ pub enum Asked {
     Export(PathBuf),
 }
 
+/// A name with `_CSMITH` on it (once), for a copy saved from another file.
+pub fn copy_stem(name: &str) -> String {
+    if name.to_ascii_uppercase().ends_with("_CSMITH") { name.to_string() } else { format!("{name}_CSMITH") }
+}
+
 /// The files a board can be saved as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BoardFormat {
@@ -236,8 +241,7 @@ impl BoardFormat {
     /// The name a board is offered under: with `_CSMITH` on it, so saving
     /// a board that came from another tool doesn't write over the original.
     pub fn file_name(self, board: &str) -> String {
-        let stem = if board.to_ascii_uppercase().ends_with("_CSMITH") { board.to_string() } else { format!("{board}_CSMITH") };
-        format!("{stem}.{}", self.ext())
+        format!("{}.{}", copy_stem(board), self.ext())
     }
 
     pub fn about(self) -> &'static str {
@@ -1304,7 +1308,11 @@ impl App {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         let name = format.file_name(&self.doc.name);
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Save the board").set_file_name(&name).add_filter(format.name(), &[format.ext()]);
+            // Every format is a choice in the dialog's list of types, the one picked in the window first.
+            let mut dialog = rfd::FileDialog::new().set_title("Save the board").set_file_name(&name).add_filter(format.name(), &[format.ext()]);
+            for other in BoardFormat::ALL.into_iter().filter(|f| *f != format) {
+                dialog = dialog.add_filter(other.name(), &[other.ext()]);
+            }
             if let Some(path) = dialog.save_file() {
                 // A name typed without its ending gets the format's.
                 let path = if path.extension().is_none() { path.with_extension(format.ext()) } else { path };

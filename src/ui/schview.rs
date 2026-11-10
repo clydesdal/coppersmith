@@ -442,7 +442,7 @@ impl SchWindow {
     }
 
     fn ask_save_as(&self, ctx: &egui::Context) {
-        let (tx, ctx, name) = (self.tx.clone(), ctx.clone(), format!("{}.cssch", self.sch.name));
+        let (tx, ctx, name) = (self.tx.clone(), ctx.clone(), format!("{}.cssch", crate::ui::app::copy_stem(&self.sch.name)));
         std::thread::spawn(move || {
             if let Some(path) = rfd::FileDialog::new().set_title("Save the schematic").add_filter("Coppersmith schematic", &["cssch"]).add_filter("Altium sheet", &["SchDoc"]).set_file_name(name).save_file() {
                 let _ = tx.send(Dialog::SaveAs(path));
