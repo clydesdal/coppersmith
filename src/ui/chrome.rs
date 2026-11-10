@@ -295,6 +295,7 @@ impl App {
         if item(ui, "Open project…", "", true) {
             self.ask_open_project(ctx);
         }
+        self.recent_menu(ui);
         ui.separator();
         if item(ui, "New library", "", true) {
             self.open_library_editor(None);
@@ -323,6 +324,38 @@ impl App {
         ui.separator();
         if item(ui, "Quit", "", true) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The files opened lately, to open again.
+    fn recent_menu(&mut self, ui: &mut Ui) {
+        let mut chosen: Option<std::path::PathBuf> = None;
+        let mut clear = false;
+        ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+            ui.menu_button("Open recent", |ui| {
+                for p in &self.recent {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
+                    let folder = p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+                    let button = egui::Button::new(name).shortcut_text(RichText::new(folder).color(FAINT));
+                    let r = ui.add_enabled(p.exists(), button).on_hover_text(p.display().to_string());
+                    if r.clicked() {
+                        chosen = Some(p.clone());
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Clear the list").clicked() {
+                    clear = true;
+                    ui.close();
+                }
+            });
+        });
+        if let Some(p) = chosen {
+            let _ = self.asked_tx.send(Asked::Open(p));
+        }
+        if clear {
+            self.recent.clear();
+            crate::ui::recent::save(&self.recent);
         }
     }
 

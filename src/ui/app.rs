@@ -360,6 +360,8 @@ pub struct App {
     pub show_rules: bool,
     /// The Save as window, when it's open, and the format last chosen.
     pub save_as: Option<SaveAs>,
+    /// Files opened lately, newest first.
+    pub recent: Vec<PathBuf>,
     pub last_format: BoardFormat,
     pub rules_focus: Option<crate::pcb::rulebook::RuleId>,
     /// The symbols read from the project's library files, so they're read once.
@@ -491,6 +493,7 @@ impl App {
             show_classes: false,
             show_rules: false,
             save_as: None,
+            recent: crate::ui::recent::load(),
             last_format: BoardFormat::Coppersmith,
             rules_focus: None,
             symbol_cache: std::collections::HashMap::new(),
@@ -1996,14 +1999,23 @@ impl App {
 
     /// Remembers which project a file is in, when it isn't the one on show.
     pub fn note_file(&mut self, path: &std::path::Path) {
+        self.remember_recent(path);
         if self.project.as_ref().is_some_and(|p| p.contains(path)) || path.parent().is_none() {
             return;
         }
         self.project = Some(crate::pcb::project::Project::around(path));
     }
 
+    /// Puts a file at the top of the list of those opened lately.
+    pub fn remember_recent(&mut self, path: &std::path::Path) {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        crate::ui::recent::push(&mut self.recent, &path);
+        crate::ui::recent::save(&self.recent);
+    }
+
     /// Takes a project file as the project, and shows its files.
     pub fn open_project(&mut self, path: &std::path::Path) {
+        self.remember_recent(path);
         match crate::pcb::project::Project::from_file(path) {
             Ok(p) => {
                 self.notice = Some(format!("Project {}: {} files", p.name, p.files.len()));

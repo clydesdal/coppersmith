@@ -11,6 +11,7 @@ pub mod libedit;
 pub mod libview;
 pub mod schview;
 pub mod panels;
+pub mod recent;
 pub mod play;
 pub mod routing;
 pub mod rulesview;
