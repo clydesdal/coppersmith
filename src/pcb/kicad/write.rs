@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn kicads_demo_boards_survive_a_round_trip_connected() {
         for name in ["pic.kicad_pcb", "video.kicad_pcb"] {
-            let dir = std::env::var_os("COPPERSMITH_KICAD_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/Users/dal/.claude/jobs/8cfb36ba/tmp/kicad".into());
+            let dir = std::env::var_os("COPPERSMITH_KICAD_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/Users/dal/Documents/examplelayouts/kicad".into());
             let Some(path) = Some(dir.join(name)).filter(|p| p.exists()) else { continue };
             let a = crate::pcb::kicad::read_board(&path).unwrap().board;
             let (mut b, _) = there_and_back(&a);

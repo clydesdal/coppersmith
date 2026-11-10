@@ -587,6 +587,42 @@ Its pad, via and text records start from records copied out of a real board.
 **It has been read back by Coppersmith, and its record sizes match a real
 board's, but it has not been opened in Altium, which may refuse or repair it.**
 
+### PADS boards
+
+**Open** (and `coppersmith FILE`) reads PADS Layout and PowerPCB boards in the
+ASCII format (`.asc`, from *File ▸ Export* in PADS; the first line says
+`!PADS-POWERPCB-…`, which is how it is told from LTspice's `.asc`). Versions 5
+to 10 and the year-numbered ones are read, in the BASIC units PADS writes (and
+mils, metric and inches). What comes in: the outline, parts with their pads and
+silkscreen (a part underneath is turned and then mirrored, as PADS does), nets,
+tracks, vias, pours (poured again here), free copper and keepouts, the layer
+table, and the default clearance and width rules. PADS repeats shared stretches
+of a track once for each connection it is in; they come in once.
+
+Left out, and said in the status bar: free text, dimensions, board drawing that
+isn't on a part, board cutouts, copper drawn in a footprint, blind and buried
+vias (taken as through), slots (taken as round), and a pad that is a different
+shape on the inner layers (it takes its outer shape on every layer: Coppersmith
+has one shape a pad). The rules that are for particular nets are not read.
+
+**Save as ▸ PADS ASCII board (.asc)** writes version 9.5. Every net is written
+as pin-to-pin connections: copper that ends in the open is carried to the
+nearest pin by an unrouted leg, as PADS does for a connection only partly
+routed, so no copper is lost on a net with two pins or more (copper on a net of
+fewer can't be written, and is counted). The window lists the rest: pours come
+as outlines for PADS to pour, parts have one gate and no schematic link, only
+the clearance table and widths are written as rules, arcs become short straight
+tracks.
+
+**Checked against six real boards** from KiCad's test set (2 to 8 copper
+layers, versions 5 to 10, an EasyEDA export, one with every net unrouted): each
+reads with the connections the file has, and writes and reads back with the same
+parts, pads, nets, vias, open connections and rule findings. An Altium board
+(EZDisplay) written as PADS has the same 675 connections open before and after.
+**The file has not been opened in PADS itself**, and the format was worked out
+from real files and KiCad's importer, not from Mentor's own description (see
+`docs/PADS-FORMAT.md` for what it says and how sure each line is).
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,
@@ -620,6 +656,8 @@ What each computer needs besides Rust:
         slide.rs       moving tracks without losing their 45° corners
         gerber.rs      Gerber and Excellon output
         altium/        reading Altium / Circuit Studio libraries, boards, sheets, projects
+        kicad/         reading and writing KiCad boards, sheets, libraries
+        pads/          reading and writing PADS ASCII boards
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board
       ui/            the window

@@ -217,16 +217,19 @@ pub enum BoardFormat {
     Kicad,
     /// An Altium board: a copy, with some things lost.
     Altium,
+    /// A PADS ASCII board: a copy, with some things lost.
+    Pads,
 }
 
 impl BoardFormat {
-    pub const ALL: [BoardFormat; 3] = [BoardFormat::Coppersmith, BoardFormat::Kicad, BoardFormat::Altium];
+    pub const ALL: [BoardFormat; 4] = [BoardFormat::Coppersmith, BoardFormat::Kicad, BoardFormat::Altium, BoardFormat::Pads];
 
     pub fn ext(self) -> &'static str {
         match self {
             BoardFormat::Coppersmith => "cspcb",
             BoardFormat::Kicad => "kicad_pcb",
             BoardFormat::Altium => "PcbDoc",
+            BoardFormat::Pads => "asc",
         }
     }
 
@@ -235,6 +238,7 @@ impl BoardFormat {
             BoardFormat::Coppersmith => "Coppersmith board (.cspcb)",
             BoardFormat::Kicad => "KiCad board (.kicad_pcb)",
             BoardFormat::Altium => "Altium board (.PcbDoc)",
+            BoardFormat::Pads => "PADS ASCII board (.asc)",
         }
     }
 
@@ -249,6 +253,7 @@ impl BoardFormat {
             BoardFormat::Coppersmith => "Everything is kept. Opens here.",
             BoardFormat::Kicad => "For KiCad 8, 9 and 10, with the rules in a .kicad_pro beside it. A copy: this board stays as it is.",
             BoardFormat::Altium => "For Altium Designer. A copy: this board stays as it is.",
+            BoardFormat::Pads => "For PADS Layout and PowerPCB (version 9.5 ASCII). A copy: this board stays as it is.",
         }
     }
 }
@@ -1245,6 +1250,10 @@ impl App {
             self.export_altium(path);
             return;
         }
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("asc")) {
+            self.export_pads(path);
+            return;
+        }
         let path = if path.extension().is_none() { path.with_extension("cspcb") } else { path };
         match std::fs::write(&path, self.doc.save()) {
             Ok(()) => {
@@ -1254,6 +1263,25 @@ impl App {
             }
             Err(e) => self.notice = Some(format!("{} couldn't be saved: {e}", path.display())),
         }
+    }
+
+    /// Writes the board as a PADS ASCII file.
+    fn export_pads(&mut self, path: PathBuf) {
+        let w = match crate::pcb::pads::write::board(&self.doc) {
+            Ok(w) => w,
+            Err(e) => {
+                self.notice = Some(e);
+                return;
+            }
+        };
+        // PADS reads one byte a letter: what Latin-1 has is kept, the rest becomes a question mark.
+        let bytes: Vec<u8> = w.text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect();
+        if let Err(e) = std::fs::write(&path, bytes) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let lost = format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" });
+        self.notice = Some(format!("Exported {} for PADS{lost}", path.display()));
     }
 
     /// Writes the board as an Altium `.PcbDoc`.
@@ -1332,9 +1360,9 @@ impl App {
             // Boards first; projects, schematics and libraries open in their own places.
             let dialog = rfd::FileDialog::new()
                 .set_title("Open")
-                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb", "kicad_pcb", "kicad_sch", "kicad_mod", "kicad_sym", "kicad_pro"]))
+                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb", "kicad_pcb", "kicad_sch", "kicad_mod", "kicad_sym", "kicad_pro", "asc"]))
                 .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb", "kicad_pro"]))
-                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "kicad_pcb"]))
+                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "kicad_pcb", "asc"]))
                 .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch", "kicad_sch"]))
                 .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib", "kicad_mod", "kicad_sym"]));
             if let Some(path) = dialog.pick_file() {
@@ -2455,6 +2483,7 @@ mod tests {
         assert_eq!(BoardFormat::Altium.file_name("EZDisplay"), "EZDisplay_CSMITH.PcbDoc");
         assert_eq!(BoardFormat::Kicad.file_name("pic_programmer"), "pic_programmer_CSMITH.kicad_pcb");
         assert_eq!(BoardFormat::Coppersmith.file_name("board"), "board_CSMITH.cspcb");
+        assert_eq!(BoardFormat::Pads.file_name("ClaySight_MK1"), "ClaySight_MK1_CSMITH.asc");
         // Not twice.
         assert_eq!(BoardFormat::Altium.file_name("EZDisplay_CSMITH"), "EZDisplay_CSMITH.PcbDoc");
         assert_eq!(BoardFormat::Altium.file_name("EZDisplay_csmith"), "EZDisplay_csmith.PcbDoc");

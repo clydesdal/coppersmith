@@ -94,7 +94,7 @@ pub fn is_schematic(path: &Path) -> bool {
 
 /// The kinds of Altium file there are readers for.
 pub fn is_board(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc")) || crate::pcb::kicad::is_board(path)
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc")) || crate::pcb::kicad::is_board(path) || crate::pcb::pads::is_board(path)
 }
 
 pub fn is_sheet(path: &Path) -> bool {
@@ -109,6 +109,9 @@ pub fn is_project(path: &Path) -> bool {
 pub fn read_board(path: &Path) -> Result<pcbdoc::ImportedBoard, String> {
     if crate::pcb::kicad::is_board(path) {
         return crate::pcb::kicad::read_board(path);
+    }
+    if crate::pcb::pads::is_board(path) {
+        return crate::pcb::pads::read_board(path);
     }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();

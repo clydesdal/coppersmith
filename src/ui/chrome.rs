@@ -830,6 +830,7 @@ impl App {
         if st.format != Fmt::Coppersmith && !st.notes.iter().any(|(f, _)| *f == st.format) {
             let notes = match st.format {
                 Fmt::Kicad => crate::pcb::kicad::write::board(&self.doc, &self.doc.name).notes,
+                Fmt::Pads => crate::pcb::pads::write::board(&self.doc).map(|w| w.notes).unwrap_or_else(|e| vec![e]),
                 _ => crate::pcb::altium::pcbdoc_write::board(&self.doc).map(|w| w.notes).unwrap_or_else(|e| vec![e]),
             };
             st.notes.push((st.format, notes));
@@ -845,7 +846,7 @@ impl App {
             ui.add_space(4.0);
             let shown = st.notes.iter().find(|(f, _)| *f == st.format).map(|(_, n)| n.clone());
             match (st.format, &shown) {
-                (Fmt::Kicad | Fmt::Altium, Some(notes)) => {
+                (Fmt::Kicad | Fmt::Altium | Fmt::Pads, Some(notes)) => {
                     if notes.is_empty() {
                         ui.label(RichText::new("Nothing in this board is lost.").color(theme::GREEN));
                     } else {
@@ -862,7 +863,11 @@ impl App {
                         });
                     }
                     ui.add_space(4.0);
-                    let tool = if st.format == Fmt::Altium { "Altium" } else { "KiCad" };
+                    let tool = match st.format {
+                        Fmt::Altium => "Altium",
+                        Fmt::Pads => "PADS",
+                        _ => "KiCad",
+                    };
                     ui.label(RichText::new(format!("The file was written to open in {tool}, but it has not been opened in {tool} itself.")).size(11.5).color(FAINT));
                 }
                 _ => {

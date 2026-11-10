@@ -49,7 +49,7 @@ mod tests {
 
     /// Where KiCad's own demo boards were fetched to for testing (not kept in the repository).
     fn sample(name: &str) -> Option<std::path::PathBuf> {
-        let dir = std::env::var_os("COPPERSMITH_KICAD_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/Users/dal/.claude/jobs/8cfb36ba/tmp/kicad".into());
+        let dir = std::env::var_os("COPPERSMITH_KICAD_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/Users/dal/Documents/examplelayouts/kicad".into());
         let p = dir.join(name);
         p.exists().then_some(p)
     }

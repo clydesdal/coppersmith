@@ -12,6 +12,7 @@ pub mod gerber;
 pub mod kicad;
 pub mod library;
 pub mod model;
+pub mod pads;
 pub mod pour;
 pub mod project;
 pub mod router;
