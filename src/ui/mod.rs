@@ -1,8 +1,10 @@
 //! The window: the editor's state and edits (app), the board view (view),
-//! the panels and bars round it (panels), and the Copperview look (theme,
-//! icons). `play` acts out scripted input for picture checks.
+//! the panels and bars round it (panels), how it's laid out and what can be
+//! picked (dock), and the Copperview look (theme, icons). `play` acts out scripted input for picture checks.
 
 pub mod app;
+pub mod chrome;
+pub mod dock;
 pub mod icons;
 pub mod panels;
 pub mod play;

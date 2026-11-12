@@ -23,6 +23,43 @@ to it.
 | Keepout | K | Click an area's corners on the layer in use; click the first corner (or Enter) to close. Pours keep out of it. See below. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
 
+### The window
+
+Everything is in the menus along the top: **File**, **Edit**, **View**,
+**Place**, **Route**, **Tools** and **Help**, each entry with its shortcut
+beside it (**Help ▸ Keyboard shortcuts**, F1, lists them all).
+
+The panels either side are chosen from **tabs along their bottoms**. On the left,
+*Layers* (what to show, which layer to work on), *Parts* (the footprint library)
+and *Select* (what can be picked); on the right, *Properties* (the details of what's
+picked, or the board's and its rules), *Checks* and *Nets*. A badge on a tab
+says something's there: the number of errors on Checks, and a yellow one on
+Select when something is held back. Picking something on the board brings
+Properties forward. Drag a panel's edge to size it; hide the left or right panel
+with the arrows at the top right, **View ▸ Left panel / Right panel**, or
+Ctrl+[ and Ctrl+].
+
+The tools, the layer, track width, grid and view buttons float over the board.
+**View ▸ Ribbon of controls** (Ctrl+Shift+R) puts them in a strip under the menus
+instead, with file and edit buttons, the select filter and the tools in groups;
+in a narrow window it scrolls sideways. The layout (panels shown, their tabs, the
+ribbon, the select filter) is remembered between runs, in `window.json` in
+Coppersmith's data folder.
+
+**Selecting what you mean.** The select filter says which kinds of thing can be
+picked: parts, names, tracks, vias, pours, fills and keepouts. Click a kind's switch
+on the *Select* tab to turn it off or on, *only* to take just that kind, or use the
+presets (*All*, *Copper*, *Parts*, *None*). The same controls are in the chip at
+the bottom right, which turns yellow when something is held back, and in
+**Edit ▸ Selection filter**. A kind that's off is left alone, so a click goes through
+it to what's under it, boxes and Select all skip it, and a click that finds only
+held-back things says what it found.
+
+    coppersmith BOARD.cspcb --layout 'ribbon, no-left, right:checks, filter:tracks+vias'
+
+opens the window in a given layout, for scripted pictures; such a run neither
+reads nor writes the remembered one.
+
 ### Names on the silkscreen
 
 Click **Top silkscreen** or **Bottom silkscreen** in the layer list (or step to

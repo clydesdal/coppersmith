@@ -1,6 +1,7 @@
 //! The board view: drawing every layer, and what the mouse does in each tool.
 
 use crate::ui::app::*;
+use crate::ui::dock::{Pick, first_allowed, held_back_kind};
 use crate::pcb::copper::Item;
 use crate::pcb::drc::Severity;
 use crate::pcb::geom::*;
@@ -210,6 +211,18 @@ impl App {
     /// As `pick`; `inside_pours` lets a point inside a pour's copper pick
     /// the pour (a click does; a drag there draws a box instead).
     pub fn pick_with(&self, q: P, tol: f64, inside_pours: bool) -> Option<Sel> {
+        first_allowed(&self.pick_hits(q, tol, inside_pours), &self.filter)
+    }
+
+    /// What's under a point that the select filter is holding back, when
+    /// there's nothing else there to pick.
+    pub fn held_back(&self, q: P, tol: f64) -> Option<Pick> {
+        held_back_kind(&self.pick_hits(q, tol, true), &self.filter)
+    }
+
+    /// Everything under a point, in the order a click should reach it,
+    /// whatever the select filter says.
+    fn pick_hits(&self, q: P, tol: f64, inside_pours: bool) -> Vec<(u8, f64, Sel)> {
         let mut hits: Vec<(u8, f64, Sel)> = Vec::new();
         // On a silkscreen layer, the names on it come first.
         if let Some(side) = self.silk
@@ -287,7 +300,7 @@ impl App {
             }
         }
         hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        hits.first().map(|h| h.2)
+        hits
     }
 
     /// Is a keepout's layer showing (for one on every layer, any copper layer)?
@@ -375,7 +388,10 @@ impl App {
         self.draw_overlays(&painter, &tr);
         self.draw_scale(&painter, full);
         self.badges(ui, full);
-        self.floating_tools(ui, full);
+        // With the ribbon on, its controls are the ones under the menus.
+        if !self.ribbon {
+            self.floating_tools(ui, full);
+        }
     }
 
     fn navigate(&mut self, ui: &Ui, response: &egui::Response, rect: Rect) {
@@ -448,8 +464,16 @@ impl App {
                             }
                         }
                         (Some(h), false) => self.sel = vec![h],
-                        (None, false) => self.sel.clear(),
+                        (None, false) => {
+                            self.sel.clear();
+                            if let Some(kind) = self.held_back(q, tol) {
+                                self.notice = Some(format!("There's {} there, but {} are filtered out (see the Select tab)", kind.one(), kind.name().to_lowercase()));
+                            }
+                        }
                         (None, true) => {}
+                    }
+                    if !self.sel.is_empty() {
+                        self.show_properties();
                     }
                 }
                 if response.double_clicked() {
@@ -828,7 +852,22 @@ impl App {
                     sel.push(Sel::Pour(v.id));
                 }
             }
+            // On a silkscreen layer, the names on it too.
+            if let Some(side) = self.silk
+                && self.shows(Layer::Silk(side))
+            {
+                for f in self.doc.footprints.iter().filter(|f| f.side == side && !f.refdes.is_empty()) {
+                    if take(f.label_bbox(&self.doc.rules)) {
+                        sel.push(Sel::Name(f.id));
+                    }
+                }
+            }
+            // Only the kinds the select filter lets through.
+            sel.retain(|s| self.filter.allows(*s));
             self.sel = sel;
+            if !self.sel.is_empty() {
+                self.show_properties();
+            }
         }
     }
 
@@ -1377,108 +1416,117 @@ impl App {
                 .corner_radius(CornerRadius::same(12))
                 .inner_margin(egui::Margin::same(5))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let tools = [
-                            (Tool::Select, Icon::Cursor, "Select", "Click to pick, drag to move. R turns, L flips to the other side (S)"),
-                            (Tool::Route, Icon::Route, "Route", "Click a pad to start a track, click to turn, V for a via (W)"),
-                            (Tool::Via, Icon::Via, "Via", "Click to drop a via (V)"),
-                            (Tool::Outline, Icon::Outline, "Outline", "Click the board's corners; click the first one to close (O)"),
-                            (Tool::Pour, Icon::Pour, "Pour", "Click a copper pour's corners on the layer in use; click the first one to close (P)"),
-                            (Tool::Keepout, Icon::Keepout, "Keepout", "Click an area's corners to keep pours out of it; its card says what else to keep out (K)"),
-                        ];
-                        for (tool, icon, label, tip) in tools {
-                            if segmented_tool(ui, icon, label, self.tool == tool).on_hover_text(tip).clicked() {
-                                self.set_tool(tool);
-                            }
-                        }
-                        ui.add_space(2.0);
-                        ui.separator();
-                        ui.add_space(2.0);
-
-                        let layer = self.working();
-                        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The layer you're working on (copper 1–6, +, −; silkscreen to move names)");
-                        egui::Popup::from_toggle_button_response(&pick)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                            .align(egui::RectAlign::TOP_START)
-                            .show(|ui| {
-                                for l in self.doc.copper_layers() {
-                                    let name = Layer::Cu(l).name();
-                                    if ui.selectable_label(self.silk.is_none() && l == self.layer, name).clicked() {
-                                        self.switch_layer(l);
-                                    }
-                                }
-                                ui.separator();
-                                for side in [Side::Top, Side::Bottom] {
-                                    if ui.selectable_label(self.silk == Some(side), Layer::Silk(side).name()).clicked() {
-                                        self.work_on_silk(side);
-                                    }
-                                }
-                            });
-
-                        let width = segmented_tool(ui, Icon::Route, &self.unit.len(self.width), false)
-                            .on_hover_text("Track width for new routes");
-                        egui::Popup::from_toggle_button_response(&width)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                            .align(egui::RectAlign::TOP_START)
-                            .show(|ui| {
-                                for w in WIDTHS {
-                                    if ui.selectable_label((w - self.width).abs() < 1e-9, self.unit.len(w)).clicked() {
-                                        self.width = w;
-                                        if let Some(r) = &mut self.route {
-                                            r.width = w;
-                                        }
-                                    }
-                                }
-                            });
-
-                        if self.tool == Tool::Route {
-                            let m = self.route_mode;
-                            let label = format!("{} · {}", m.corner.name(), m.conflict.name());
-                            let pill = segmented_tool(ui, Icon::Filter, &label, false)
-                                .on_hover_text("How the router turns corners and gets past things (Shift+Space, Shift+R)");
-                            egui::Popup::from_toggle_button_response(&pill)
-                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                                .align(egui::RectAlign::TOP_START)
-                                .show(|ui| self.routing_menu(ui));
-                        }
-
-                        let grid = segmented_tool(ui, Icon::Grid, &self.unit.len(self.grid), self.show_grid)
-                            .on_hover_text("Snap grid (G shows or hides it)");
-                        egui::Popup::from_toggle_button_response(&grid)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-                            .align(egui::RectAlign::TOP_START)
-                            .show(|ui| {
-                                for g in GRIDS {
-                                    if ui.selectable_label((g - self.grid).abs() < 1e-9, self.unit.len(g)).clicked() {
-                                        self.grid = g;
-                                    }
-                                }
-                                ui.separator();
-                                if ui.selectable_label(self.show_grid, "Show the grid").clicked() {
-                                    self.show_grid = !self.show_grid;
-                                }
-                            });
-
-                        ui.add_space(2.0);
-                        ui.separator();
-                        ui.add_space(2.0);
-                        if segmented_tool(ui, Icon::Fit, "Fit", self.fitted).on_hover_text("Fit the board to the window (F)").clicked() {
-                            self.fit_pending = true;
-                        }
-                        if icon_button(ui, Icon::Flip, self.mirror).on_hover_text("See it from underneath (X)").clicked() {
-                            self.mirror = !self.mirror;
-                        }
-                        ui.add_space(2.0);
-                        ui.separator();
-                        ui.label(RichText::new(format!("{:.0} px/mm", self.scale)).font(theme::mono(11.5)).color(FAINT));
-                    });
+                    ui.horizontal(|ui| self.tool_controls(ui, false));
                 });
         });
     }
 
+    /// The tools, the layer and track width, the grid and the view: in the bar
+    /// floating over the board, or in the ribbon, where `down` has what they
+    /// open drop below them.
+    pub(crate) fn tool_controls(&mut self, ui: &mut Ui, down: bool) {
+        let align = if down { egui::RectAlign::BOTTOM_START } else { egui::RectAlign::TOP_START };
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let tools = [
+            (Tool::Select, Icon::Cursor, "Select", "Click to pick, drag to move. R turns, L flips to the other side (S)"),
+            (Tool::Route, Icon::Route, "Route", "Click a pad to start a track, click to turn, V for a via (W)"),
+            (Tool::Via, Icon::Via, "Via", "Click to drop a via (V)"),
+            (Tool::Outline, Icon::Outline, "Outline", "Click the board's corners; click the first one to close (O)"),
+            (Tool::Pour, Icon::Pour, "Pour", "Click a copper pour's corners on the layer in use; click the first one to close (P)"),
+            (Tool::Keepout, Icon::Keepout, "Keepout", "Click an area's corners to keep pours out of it; its card says what else to keep out (K)"),
+        ];
+        for (tool, icon, label, tip) in tools {
+            if segmented_tool(ui, icon, label, self.tool == tool).on_hover_text(tip).clicked() {
+                self.set_tool(tool);
+            }
+        }
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(2.0);
+
+        let layer = self.working();
+        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The layer you're working on (copper 1–6, +, −; silkscreen to move names)");
+        egui::Popup::from_toggle_button_response(&pick)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .align(align)
+            .show(|ui| {
+                for l in self.doc.copper_layers() {
+                    let name = Layer::Cu(l).name();
+                    if ui.selectable_label(self.silk.is_none() && l == self.layer, name).clicked() {
+                        self.switch_layer(l);
+                    }
+                }
+                ui.separator();
+                for side in [Side::Top, Side::Bottom] {
+                    if ui.selectable_label(self.silk == Some(side), Layer::Silk(side).name()).clicked() {
+                        self.work_on_silk(side);
+                    }
+                }
+            });
+
+        let width = segmented_tool(ui, Icon::Route, &self.unit.len(self.width), false)
+            .on_hover_text("Track width for new routes");
+        egui::Popup::from_toggle_button_response(&width)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .align(align)
+            .show(|ui| {
+                for w in WIDTHS {
+                    if ui.selectable_label((w - self.width).abs() < 1e-9, self.unit.len(w)).clicked() {
+                        self.width = w;
+                        if let Some(r) = &mut self.route {
+                            r.width = w;
+                        }
+                    }
+                }
+            });
+
+        if self.tool == Tool::Route {
+            let m = self.route_mode;
+            let label = format!("{} · {}", m.corner.name(), m.conflict.name());
+            let pill = segmented_tool(ui, Icon::Filter, &label, false)
+                .on_hover_text("How the router turns corners and gets past things (Shift+Space, Shift+R)");
+            egui::Popup::from_toggle_button_response(&pill)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .align(align)
+                .show(|ui| self.routing_menu(ui));
+        }
+
+        let grid = segmented_tool(ui, Icon::Grid, &self.unit.len(self.grid), self.show_grid)
+            .on_hover_text("Snap grid (G shows or hides it)");
+        egui::Popup::from_toggle_button_response(&grid)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .align(align)
+            .show(|ui| {
+                for g in GRIDS {
+                    if ui.selectable_label((g - self.grid).abs() < 1e-9, self.unit.len(g)).clicked() {
+                        self.grid = g;
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(self.show_grid, "Show the grid").clicked() {
+                    self.show_grid = !self.show_grid;
+                }
+            });
+
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(2.0);
+        if segmented_tool(ui, Icon::Fit, "Fit", self.fitted).on_hover_text("Fit the board to the window (F)").clicked() {
+            self.fit_pending = true;
+        }
+        if icon_button(ui, Icon::Flip, self.mirror).on_hover_text("See it from underneath (X)").clicked() {
+            self.mirror = !self.mirror;
+        }
+        // The scale is the floating bar's; the ribbon is wide enough already.
+        if !down {
+            ui.add_space(2.0);
+            ui.separator();
+            ui.label(RichText::new(format!("{:.0} px/mm", self.scale)).font(theme::mono(11.5)).color(FAINT));
+        }
+    }
+
     /// The router's settings, with the keys that change them as you route.
-    fn routing_menu(&mut self, ui: &mut Ui) {
+    pub(crate) fn routing_menu(&mut self, ui: &mut Ui) {
         use crate::pcb::router::{Conflict, Corner};
         ui.set_min_width(250.0);
         let m = &mut self.route_mode;
