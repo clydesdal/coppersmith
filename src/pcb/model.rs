@@ -580,6 +580,11 @@ impl Restrict {
         Restrict { vias: bits & 1 != 0, tracks: bits & 2 != 0, pours: bits & 4 != 0, smd_pads: bits & 8 != 0, th_pads: bits & 16 != 0 }
     }
 
+    /// Back to Altium's `KEEPOUTRESTRICTIONS` bits.
+    pub fn to_altium(&self) -> u32 {
+        u32::from(self.vias) | u32::from(self.tracks) << 1 | u32::from(self.pours) << 2 | u32::from(self.smd_pads) << 3 | u32::from(self.th_pads) << 4
+    }
+
     pub fn any(&self) -> bool {
         self.vias || self.tracks || self.pours || self.smd_pads || self.th_pads
     }

@@ -310,8 +310,33 @@ with the details on hover.
     coppersmith --read-altium LIBRARY.IntLib
 
 lists what's in a library, symbols included (pins, prefix, linked footprint),
-and what was left out. Symbols are read now and kept for the schematic
-editor still to come. Writing Altium libraries is next.
+and what was left out. Symbols are kept for the schematic editor still to come.
+
+### The library editor
+
+**File ▸ Library editor…** (or `coppersmith --library FILE.PcbLib`) replaces
+the board with an editor for Altium libraries, and reads and writes the same
+files: footprints as a `.PcbLib`, symbols as a `.SchLib`. Open an `.IntLib` and
+both come in; save writes each kind to its own file.
+
+- **Footprints.** Pads (shape, size, hole, turn, number), and lines and circles
+  on the silkscreen, courtyard and assembly layers. Click a tool, then the
+  drawing; the selection takes its details in the right panel; drag to move
+  on the grid; R turns; Delete removes; Ctrl+Z undoes. *Pad patterns* makes two
+  rows numbered as a DIP or SOIC is (with an outline and a pin 1 mark), or a
+  row of pads. **Save to my footprints** writes a PcbLib into the folder the
+  Parts list reads, so the footprints can be placed straight away.
+- **Symbols.** Pins (number, name, electrical type, length, direction, hidden),
+  and lines and rectangles for the body, on a 100 mil grid, with many-part
+  symbols and the footprints a symbol links to (it says when one isn't in a
+  library that's open).
+
+Not yet: editing keepouts, text and arcs (they're read, shown and kept, but not
+drawn with a tool), 3D bodies, and picking more than one thing. What's written
+is read back by Coppersmith's own reader in tests, for the real test libraries
+as well as made-up ones; **it hasn't been opened in Altium Designer or Circuit
+Studio**, which fill in the bookkeeping they keep (unique ids, embedded models)
+when they next save.
 
 ### Altium and Circuit Studio boards and schematics
 

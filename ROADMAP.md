@@ -61,8 +61,16 @@ Next:
 
 Started in 0.3.13: Altium and Circuit Studio libraries are read — PcbLib
 footprints into the library, SchLib symbols into a symbol model, IntLib
-both. Next: write PcbLib/SchLib that Circuit Studio opens (needs checking in
-Circuit Studio).
+both. A library editor now reads and writes PcbLib and SchLib (footprint pads
+and drawing, symbol pins and body); the written files read back identically in
+Coppersmith, but **still need opening in Altium/Circuit Studio** to be sure
+they accept them. Next for the editor: keepout, text and arc tools, multi-select,
+IPC wizards, a components layer (symbol + footprint + parameters).
+
+For schematic capture the pieces are in place: the symbol model, the SchLib
+writer, and a SchDoc reader (parts, wires, junctions, net names, netlist
+checked against a board). What's missing is a SchDoc writer and the sheet
+editor itself.
 
 0.3.14 reads boards (PcbDoc/CSPcbDoc: parts, nets, copper, rules) and
 schematics (SchDoc, PrjPcb netlists checked against the board). 0.3.15

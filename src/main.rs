@@ -213,6 +213,7 @@ fn run() -> Result<(), String> {
             "--play" => launch.play = Some(value("--play")?),
             "--select" => launch.select = Some(value("--select")?),
             "--layout" => launch.layout = Some(value("--layout")?),
+            "--library" => launch.library = Some(PathBuf::from(value("--library")?)),
             "--zoom" => {
                 let v = numbers(&value("--zoom")?, 3, "--zoom")?;
                 launch.zoom = Some((p(v[0], v[1]), v[2]));

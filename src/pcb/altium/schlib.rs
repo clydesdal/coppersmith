@@ -31,7 +31,7 @@ pub enum PinKind {
     Power,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Pin {
     /// Which part of a many-part symbol it belongs to (from 1).
     pub part: u32,
@@ -55,7 +55,7 @@ impl Pin {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Drawing {
     Line(P, P),
     Rect(P, P),
@@ -66,7 +66,7 @@ pub enum Drawing {
     Text { at: P, text: String },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Symbol {
     pub name: String,
     pub description: String,
