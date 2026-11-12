@@ -1,5 +1,16 @@
 # Coppersmith
 
+This started out as a bet.  Its beyond ambitious and will most likely never lead anywhere.
+I would very much like to get rid of windows, but need a few important programs.  Altium is
+one of them.  This is an experiment to see how far I can come up with a vibe coded layout tool.
+So far this is extremely rough.  No code was reversed, or systems copied.  This would probably 
+work a lot better if it were.  Anyway, basically I can load/save kicad, Altium, pads all in varying
+degrees of functionality.  You can somewhat layout traces, export gerbers.  DRC, Schematic capture, 
+libraries are all very broken.  
+
+You can read the rest, but its LLM documentation, so some of it doesn't make sense.
+
+
 Lay out printed circuit boards: place parts, route copper, check the rules,
 and write Gerbers. It wears Copperview's clothes and hands its output straight
 to it.
