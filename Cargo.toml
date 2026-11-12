@@ -1,6 +1,6 @@
 [package]
 name = "coppersmith"
-version = "0.3.16"
+version = "0.3.17"
 edition = "2024"
 rust-version = "1.88"
 description = "Lay out printed circuit boards: place parts, route copper, check the rules, and write Gerbers."
