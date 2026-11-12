@@ -1021,10 +1021,7 @@ mod tests {
 
     #[test]
     fn a_circuit_studio_board_reads() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/TestFixtureISSIPCB.CSPcbDoc");
-        if !path.exists() {
-            return;
-        }
+        let path = altium_file!("TestFixtureISSIPCB.CSPcbDoc");
         let got = read(&std::fs::read(&path).unwrap(), "fixture").unwrap();
         let b = &got.board;
         assert!(b.outline.len() >= 4, "{:?}", b.outline);

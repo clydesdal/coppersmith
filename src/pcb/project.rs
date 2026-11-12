@@ -147,10 +147,6 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn data(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name)
-    }
-
     #[test]
     fn kinds_are_told_by_extension_in_any_case() {
         assert_eq!(FileKind::of(Path::new("a/01 MAIN.SchDoc")), Some(FileKind::Schematic));
@@ -163,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_project_file_lists_its_documents_and_leaves_out_the_outputs() {
-        let p = Project::from_file(&data("TestFixtureISSI.PrjPcb")).unwrap();
+        let p = Project::from_file(&altium_file!("TestFixtureISSI.PrjPcb")).unwrap();
         assert_eq!(p.name, "TestFixtureISSI");
         let names: Vec<String> = p.files.iter().map(|f| f.path.file_name().unwrap().to_string_lossy().to_string()).collect();
         // Schematics first, then boards, then libraries.
@@ -175,13 +171,13 @@ mod tests {
     #[test]
     fn a_file_belongs_to_the_project_that_lists_it_else_to_its_folder() {
         // Listed by the project file in the same folder.
-        let p = Project::around(&data("Sheet1.SchDoc"));
+        let p = Project::around(&altium_file!("Sheet1.SchDoc"));
         assert_eq!(p.name, "TestFixtureISSI");
-        assert!(p.file.is_some() && p.contains(&data("fixturelib.SchLib")));
+        assert!(p.file.is_some() && p.contains(&altium_file!("fixturelib.SchLib")));
         // Not listed (Sheet2 isn't in the project): the folder, which has everything.
-        let p = Project::around(&data("Sheet2.SchDoc"));
+        let p = Project::around(&altium_file!("Sheet2.SchDoc"));
         assert_eq!(p.name, "altium");
-        assert!(p.file.is_none() && p.contains(&data("Sheet2.SchDoc")) && p.contains(&data("DAL_LIB.PcbLib")));
+        assert!(p.file.is_none() && p.contains(&altium_file!("Sheet2.SchDoc")) && p.contains(&altium_file!("DAL_LIB.PcbLib")));
         assert!(p.files.len() >= 8);
     }
 

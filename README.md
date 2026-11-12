@@ -11,6 +11,16 @@ to it.
 
 `coppersmith --help` lists every option.
 
+## Example board
+
+`examples/p4dev` is a real KiCad project to try it on: a 4-layer, 100 × 70 mm
+ESP32-P4 + ESP32-C5 dev board with 158 parts, five schematic sheets and its
+own footprints and symbols.
+
+    coppersmith examples/p4dev/p4dev.kicad_pcb
+
+![The P4DEV example board in Coppersmith](shots/p4dev.png)
+
 ## Working on a board
 
 | Tool | Key | What it does |

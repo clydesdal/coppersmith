@@ -7,6 +7,20 @@
 // A release build on Windows opens no console window behind the app.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+/// Tests that read real Altium files: the path in testdata/altium, or skip the
+/// test when it isn't there. Those files are private, so they stay out of git.
+#[cfg(test)]
+macro_rules! altium_file {
+    ($name:expr) => {{
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join($name);
+        if !path.exists() {
+            eprintln!("skipped: no {}", path.display());
+            return;
+        }
+        path
+    }};
+}
+
 mod pcb;
 mod platform;
 mod ui;

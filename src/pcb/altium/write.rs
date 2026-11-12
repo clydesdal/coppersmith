@@ -524,7 +524,7 @@ mod symbol_tests {
 
     #[test]
     fn real_symbols_survive_a_round_trip() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/DAL_LIB.SchLib");
+        let path = altium_file!("DAL_LIB.SchLib");
         let before = altium::read(&path).unwrap();
         let bytes = schlib(&before.symbols).unwrap();
         let after = reader::read(&bytes, "DAL_LIB").unwrap();
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_real_library_survives_a_round_trip() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/DAL_LIB.PcbLib");
+        let path = altium_file!("DAL_LIB.PcbLib");
         let before = altium::read(&path).unwrap();
         let bytes = pcblib(&before.footprints).unwrap();
         let after = reader::read(&bytes, "DAL_LIB").unwrap();

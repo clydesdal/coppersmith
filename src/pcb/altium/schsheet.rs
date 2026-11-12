@@ -411,10 +411,6 @@ mod tests {
     use super::*;
     use crate::pcb::altium::{schdoc, schlib};
 
-    fn data(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name)
-    }
-
     fn symbol() -> Symbol {
         let pin = |part, n: &str, name: &str, x: f64, y: f64, a: f64| Pin { part, number: n.into(), name: name.into(), at: p(x, y), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
         Symbol {
@@ -589,7 +585,7 @@ mod tests {
     #[test]
     fn the_real_sheets_read_with_the_same_nets_as_the_older_reader() {
         for f in ["Sheet1.SchDoc", "Sheet2.SchDoc"] {
-            let bytes = std::fs::read(data(f)).unwrap();
+            let bytes = std::fs::read(altium_file!(f)).unwrap();
             let old = schdoc::read(&bytes, f).unwrap();
             let (new, _) = read(&bytes, f).unwrap();
             assert_eq!(old.parts.len(), new.parts.len(), "{f}");
@@ -606,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_real_sheet_survives_being_written_and_read_again() {
-        let bytes = std::fs::read(data("Sheet1.SchDoc")).unwrap();
+        let bytes = std::fs::read(altium_file!("Sheet1.SchDoc")).unwrap();
         let (first, _) = read(&bytes, "Sheet1").unwrap();
         let (again, _) = read(&write(&first).unwrap(), "Sheet1").unwrap();
         assert_eq!(first.parts.len(), again.parts.len());

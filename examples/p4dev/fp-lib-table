@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "p4dev")(type "KiCad")(uri "${KIPRJMOD}/p4dev.pretty")(options "")(descr "P4DEV project footprints"))
+)

@@ -306,14 +306,10 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
-    fn data(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name)
-    }
-
     #[test]
     fn reads_every_test_library() {
         for f in ["DAL_LIB.PcbLib", "fixturelib.PcbLib", "PcbLib1.PcbLib", "DAL_LIB.SchLib", "fixturelib.SchLib", "Schlib1.SchLib", "DAL_INTLIB.IntLib"] {
-            let got = read(&data(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+            let got = read(&altium_file!(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
             // PcbLib1 holds a single empty footprint.
             if f != "PcbLib1.PcbLib" {
                 assert!(!got.footprints.is_empty() || !got.symbols.is_empty(), "{f}: nothing read");
@@ -337,8 +333,8 @@ mod tests {
 
     #[test]
     fn the_intlib_holds_the_same_parts_as_its_libraries() {
-        let int = read(&data("DAL_INTLIB.IntLib")).unwrap();
-        let pcb = read(&data("DAL_LIB.PcbLib")).unwrap();
+        let int = read(&altium_file!("DAL_INTLIB.IntLib")).unwrap();
+        let pcb = read(&altium_file!("DAL_LIB.PcbLib")).unwrap();
         assert_eq!(int.footprints.len(), pcb.footprints.len());
         assert!(!int.symbols.is_empty());
     }

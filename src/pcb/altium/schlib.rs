@@ -255,14 +255,14 @@ pub(super) fn text_pin(p: &HashMap<String, String>, part: u32) -> Pin {
 mod tests {
     use super::*;
 
-    fn lib(name: &str) -> Imported {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name);
-        read(&std::fs::read(path).unwrap(), name).unwrap()
+    fn lib(path: std::path::PathBuf) -> Imported {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        read(&std::fs::read(&path).unwrap(), &name).unwrap()
     }
 
     #[test]
     fn symbols_come_with_pins_and_footprints() {
-        let got = lib("DAL_LIB.SchLib");
+        let got = lib(altium_file!("DAL_LIB.SchLib"));
         assert!(got.symbols.len() >= 10, "{}", got.symbols.len());
         let conn = got.symbols.iter().find(|s| s.name == "10137238").expect("10137238");
         assert!(conn.description.contains("Connector"));

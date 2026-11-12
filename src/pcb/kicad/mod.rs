@@ -107,6 +107,30 @@ mod tests {
         assert_eq!(r.unwrap(), 2);
     }
 
+    fn example(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/p4dev").join(name)
+    }
+
+    #[test]
+    fn the_p4dev_example_board_reads_whole() {
+        let got = read_board(&example("p4dev.kicad_pcb")).unwrap();
+        let b = &got.board;
+        assert_eq!((b.copper, b.footprints.len(), b.tracks.len(), b.vias.len()), (4, 158, 1167, 460));
+        // Its own footprints come from the project's p4dev.pretty, next to the board.
+        assert!(b.footprints.iter().any(|f| f.pads.len() >= 105), "the 104-pin QFN and its pad");
+    }
+
+    #[test]
+    fn the_p4dev_example_sheets_read_with_their_parts() {
+        let mut parts = 0;
+        for f in ["p4.kicad_sch", "c5.kicad_sch", "power.kicad_sch", "io.kicad_sch", "lcd.kicad_sch"] {
+            let (s, _) = sch::read_sheet(&std::fs::read_to_string(example(f)).unwrap(), f).unwrap();
+            assert!(!s.parts.is_empty() && (!s.wires.is_empty() || !s.labels.is_empty()), "{f} came in empty");
+            parts += s.parts.len();
+        }
+        assert!(parts >= 140, "{parts} parts on the sheets");
+    }
+
     #[test]
     fn kicads_own_demo_sheet_comes_in_with_its_nets_and_goes_out_as_an_altium_schdoc() {
         let Some(path) = sample("pic.kicad_sch") else { return };
