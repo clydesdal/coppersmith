@@ -7,7 +7,7 @@ use crate::pcb::project::FileKind;
 use crate::ui::app::{App, Asked, Doc, GRIDS, Mode, Tool, Unit, WIDTHS};
 use crate::ui::dock::{EditorCmd, EditorLeft, Filter, LeftTab, Pick, RightTab};
 use crate::ui::icons::Icon;
-use crate::ui::panels::{chip, icon_button, segmented, small_icon, tool_button};
+use crate::ui::panels::{chip, segmented, small_icon};
 use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
@@ -236,22 +236,28 @@ impl App {
             let mode = self.mode();
             ui.menu_button("File", |ui| match mode {
                 Mode::Board => self.file_menu(ui, &ctx),
+                Mode::View3d => self.view3d_file_menu(ui, &ctx),
                 _ => self.editor_file_menu(ui, &ctx),
             });
-            ui.menu_button("Edit", |ui| match mode {
-                Mode::Board => self.edit_menu(ui),
-                _ => self.editor_edit_menu(ui, &ctx),
-            });
+            if mode != Mode::View3d {
+                ui.menu_button("Edit", |ui| match mode {
+                    Mode::Board => self.edit_menu(ui),
+                    _ => self.editor_edit_menu(ui, &ctx),
+                });
+            }
             ui.menu_button("View", |ui| match mode {
                 Mode::Board => self.view_menu(ui),
+                Mode::View3d => self.view3d_view_menu(ui, &ctx),
                 _ => self.editor_view_menu(ui, &ctx),
             });
             match mode {
                 Mode::Board => {
                     ui.menu_button("Place", |ui| self.place_menu(ui));
                     ui.menu_button("Route", |ui| self.route_menu(ui));
+                    ui.menu_button("Rules", |ui| self.rules_menu(ui));
                     ui.menu_button("Tools", |ui| self.tools_menu(ui));
                 }
+                Mode::View3d => {}
                 _ => {
                     ui.menu_button("Place", |ui| self.editor_place_menu(ui, &ctx));
                 }
@@ -289,6 +295,7 @@ impl App {
         if item(ui, "Open project…", "", true) {
             self.ask_open_project(ctx);
         }
+        self.recent_menu(ui);
         ui.separator();
         if item(ui, "New library", "", true) {
             self.open_library_editor(None);
@@ -317,6 +324,65 @@ impl App {
         ui.separator();
         if item(ui, "Quit", "", true) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The files opened lately, to open again.
+    fn recent_menu(&mut self, ui: &mut Ui) {
+        let mut chosen: Option<std::path::PathBuf> = None;
+        let mut clear = false;
+        ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+            ui.menu_button("Open recent", |ui| {
+                for p in &self.recent {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string());
+                    let folder = p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+                    let button = egui::Button::new(name).shortcut_text(RichText::new(folder).color(FAINT));
+                    let r = ui.add_enabled(p.exists(), button).on_hover_text(p.display().to_string());
+                    if r.clicked() {
+                        chosen = Some(p.clone());
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Clear the list").clicked() {
+                    clear = true;
+                    ui.close();
+                }
+            });
+        });
+        if let Some(p) = chosen {
+            let _ = self.asked_tx.send(Asked::Open(p));
+        }
+        if clear {
+            self.recent.clear();
+            crate::ui::recent::save(&self.recent);
+        }
+    }
+
+    fn view3d_file_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        if item(ui, "Open project…", "", true) {
+            self.ask_open_project(ctx);
+        }
+        if item(ui, "Close this tab", "Ctrl+W", true) {
+            if let Some(i) = self.active {
+                self.close_doc(i);
+            }
+        }
+        ui.separator();
+        if item(ui, "Quit", "", true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn view3d_view_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        for (text, cmd) in [("Top", EditorCmd::Tool(0)), ("Bottom", EditorCmd::Tool(1)), ("Angle", EditorCmd::Tool(2)), ("Fit to the window", EditorCmd::Fit)] {
+            if item(ui, text, "", true) {
+                self.editor_command(ctx, cmd);
+            }
+        }
+        ui.separator();
+        if check(ui, "Left panel", "Ctrl+[", self.show_left, false) {
+            self.show_left = !self.show_left;
         }
     }
 
@@ -436,11 +502,18 @@ impl App {
     }
 
     fn view_menu(&mut self, ui: &mut Ui) {
+        if item(ui, "3D view", "", true) {
+            self.open_3d();
+        }
+        ui.separator();
         if item(ui, "Fit the board to the window", "F", true) {
             self.fit_pending = true;
         }
         if check(ui, "See it from underneath", "X", self.mirror, true) {
             self.mirror = !self.mirror;
+        }
+        if check(ui, "Net names on tracks", "", self.show_net_names, true) {
+            self.show_net_names = !self.show_net_names;
         }
         ui.separator();
         ui.menu_button("Grid", |ui| {
@@ -588,11 +661,150 @@ impl App {
                 }
             });
         }
-        ui.separator();
+        if item(ui, "Join tracks lying on one another", "", !self.doc.tracks.is_empty()) {
+            let mut joined = 0;
+            self.edit(|b| {
+                joined = crate::ui::app::merge_overlapping(b, &Default::default());
+                crate::ui::app::merge_straight(b);
+            });
+            self.notice = Some(match joined {
+                0 => "No tracks lie on one another.".to_string(),
+                1 => "Joined 1 track that lay on another.".to_string(),
+                n => format!("Joined {n} tracks that lay on others."),
+            });
+        }
+    }
+
+    /// The checks and the rules they check against.
+    fn rules_menu(&mut self, ui: &mut Ui) {
         let errors = self.errors();
-        let text = if errors == 0 { "The checks find no errors".to_string() } else { format!("The checks find {errors} errors") };
+        let text = if errors == 0 { "Design rule check: no errors".to_string() } else { format!("Design rule check: {errors} errors") };
         if item(ui, &text, "", true) {
             self.right_tab = RightTab::Checks;
+            self.show_right = true;
+        }
+        ui.separator();
+        if item(ui, "Design rules…", "", true) {
+            self.show_rules = true;
+        }
+        if item(ui, "Board rules", "", true) {
+            self.sel.clear();
+            self.show_properties();
+            self.show_right = true;
+        }
+        let b = &self.doc;
+        let any = !(b.net_classes.is_empty() && b.diff_pairs.is_empty() && b.pair_classes.is_empty() && b.class_rules.is_empty());
+        let text = if any {
+            format!("Net classes and rules ({} classes, {} pairs)", b.net_classes.len() + b.pair_classes.len(), b.diff_pairs.len())
+        } else {
+            "Net classes and rules".to_string()
+        };
+        if item(ui, &text, "", true) {
+            self.show_classes = true;
+        }
+    }
+
+    /// The window of net classes, differential pairs, classes of pairs, and the
+    /// rules asked of them.
+    pub fn classes_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_classes;
+        let mut pick: Option<Vec<u32>> = None;
+        let u = self.unit;
+        egui::Window::new("Net classes and rules").open(&mut open).collapsible(false).resizable(true).default_width(470.0).show(ctx, |ui| {
+            let b = &self.doc;
+            if b.net_classes.is_empty() && b.diff_pairs.is_empty() && b.pair_classes.is_empty() && b.class_rules.is_empty() {
+                ui.label(RichText::new("This board has no net classes, pairs or rules for them. Boards from Altium bring theirs.").color(DIM));
+                return;
+            }
+            ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                let names = |nets: &[u32]| nets.iter().map(|n| b.net_name(*n)).collect::<Vec<_>>().join(", ");
+                if !b.net_classes.is_empty() {
+                    ui.label(RichText::new("Net classes").font(semibold(14.0)));
+                    for c in &b.net_classes {
+                        egui::CollapsingHeader::new(format!("{}   {} nets", c.name, c.nets.len())).id_salt(("nc", &c.name)).show(ui, |ui| {
+                            ui.label(RichText::new(names(&c.nets)).size(12.0).color(DIM));
+                            if ui.small_button("Pick them on the board").clicked() {
+                                pick = Some(c.nets.clone());
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
+                if !b.pair_classes.is_empty() {
+                    ui.label(RichText::new("Classes of differential pairs").font(semibold(14.0)));
+                    for c in &b.pair_classes {
+                        egui::CollapsingHeader::new(format!("{}   {} pairs", c.name, c.pairs.len())).id_salt(("pc", &c.name)).show(ui, |ui| {
+                            ui.label(RichText::new(c.pairs.join(", ")).size(12.0).color(DIM));
+                            if ui.small_button("Pick them on the board").clicked() {
+                                pick = Some(b.pair_class_nets(&c.name));
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
+                }
+                if !b.diff_pairs.is_empty() {
+                    egui::CollapsingHeader::new(RichText::new(format!("Differential pairs ({})", b.diff_pairs.len())).font(semibold(14.0)))
+                        .id_salt("pairs")
+                        .show(ui, |ui| {
+                            for d in &b.diff_pairs {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&d.name).color(FG));
+                                    ui.label(RichText::new(format!("{} / {}", b.net_name(d.pos), b.net_name(d.neg))).size(12.0).color(FAINT));
+                                });
+                            }
+                        });
+                    ui.add_space(8.0);
+                }
+                if !b.class_rules.is_empty() {
+                    ui.label(RichText::new("Rules asked of classes").font(semibold(14.0)));
+                    for r in &b.class_rules {
+                        let (what, scope) = (
+                            match r.kind {
+                                ClassRuleKind::Width => "Width",
+                                ClassRuleKind::PairRouting => "Pair routing",
+                                ClassRuleKind::MatchedLengths => "Matched lengths",
+                            },
+                            match &r.scope {
+                                ClassScope::NetClass(n) => format!("net class {n}"),
+                                ClassScope::PairClass(n) => format!("pair class {n}"),
+                            },
+                        );
+                        egui::CollapsingHeader::new(format!("{}   {what} for {scope}", r.name)).id_salt(("cr", &r.name, &scope)).show(ui, |ui| {
+                            if let Some(t) = r.tolerance {
+                                ui.label(RichText::new(format!("Lengths match within {}", u.len(t))).size(12.0).color(DIM));
+                            }
+                            if let Some(v) = r.max_uncoupled {
+                                ui.label(RichText::new(format!("At most {} uncoupled", u.len(v))).size(12.0).color(DIM));
+                            }
+                            for l in &r.layers {
+                                let layer = if l.layer == u8::MAX { "All layers".to_string() } else { Layer::Cu(l.layer).name() };
+                                let mut parts: Vec<String> = Vec::new();
+                                if let Some(s) = crate::ui::panels::span(u, l.min_width, l.max_width) {
+                                    parts.push(format!("width {s}"));
+                                }
+                                if let Some(p) = l.pref_width {
+                                    parts.push(format!("prefer {}", u.len(p)));
+                                }
+                                if let Some(s) = crate::ui::panels::span(u, l.min_gap, l.max_gap) {
+                                    parts.push(format!("gap {s}"));
+                                }
+                                if let Some(p) = l.pref_gap {
+                                    parts.push(format!("prefer gap {}", u.len(p)));
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(layer).size(12.0).color(FG));
+                                    ui.label(RichText::new(parts.join(" · ")).size(12.0).color(DIM));
+                                });
+                            }
+                        });
+                    }
+                }
+            });
+        });
+        self.show_classes = open;
+        if let Some(nets) = pick {
+            self.sel = nets.into_iter().flat_map(|n| crate::ui::panels::whole_net(&self.doc, n)).collect();
+            self.show_properties();
             self.show_right = true;
         }
     }
@@ -603,6 +815,80 @@ impl App {
         }
         if item(ui, "About Coppersmith", "", true) {
             self.notice = Some(format!("Coppersmith {} — lay out boards, check them, write Gerbers", env!("CARGO_PKG_VERSION")));
+        }
+    }
+
+    /// The Save as window: the format to save in, what that would lose, then where.
+    pub fn save_as_window(&mut self, ctx: &egui::Context) {
+        let Some(mut st) = self.save_as.take() else { return };
+        // A save that something waits on (closing, opening another) is to Coppersmith's own file.
+        let waiting = self.after_save.is_some();
+        if waiting {
+            st.format = crate::ui::app::BoardFormat::Coppersmith;
+        }
+        use crate::ui::app::BoardFormat as Fmt;
+        if st.format != Fmt::Coppersmith && !st.notes.iter().any(|(f, _)| *f == st.format) {
+            let notes = match st.format {
+                Fmt::Kicad => crate::pcb::kicad::write::board(&self.doc, &self.doc.name).notes,
+                Fmt::Pads => crate::pcb::pads::write::board(&self.doc).map(|w| w.notes).unwrap_or_else(|e| vec![e]),
+                _ => crate::pcb::altium::pcbdoc_write::board(&self.doc).map(|w| w.notes).unwrap_or_else(|e| vec![e]),
+            };
+            st.notes.push((st.format, notes));
+        }
+        let (mut keep, mut place, mut cancel) = (true, None, false);
+        egui::Window::new("Save the board as").collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).default_width(520.0).open(&mut keep).show(ctx, |ui| {
+            for f in crate::ui::app::BoardFormat::ALL.into_iter().filter(|f| !waiting || *f == crate::ui::app::BoardFormat::Coppersmith) {
+                ui.radio_value(&mut st.format, f, RichText::new(f.name()).font(semibold(14.0)));
+                ui.label(RichText::new(f.about()).size(12.0).color(FAINT));
+                ui.add_space(4.0);
+            }
+            ui.separator();
+            ui.add_space(4.0);
+            let shown = st.notes.iter().find(|(f, _)| *f == st.format).map(|(_, n)| n.clone());
+            match (st.format, &shown) {
+                (Fmt::Kicad | Fmt::Altium | Fmt::Pads, Some(notes)) => {
+                    if notes.is_empty() {
+                        ui.label(RichText::new("Nothing in this board is lost.").color(theme::GREEN));
+                    } else {
+                        ui.label(RichText::new(format!("What may be lost or changed ({})", notes.len())).font(semibold(13.0)).color(theme::YELLOW));
+                        ui.add_space(2.0);
+                        ScrollArea::vertical().max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
+                            for n in notes {
+                                ui.horizontal_top(|ui| {
+                                    ui.label(RichText::new("•").color(theme::YELLOW));
+                                    ui.add(egui::Label::new(RichText::new(n).size(12.5).color(DIM)).wrap());
+                                });
+                                ui.add_space(3.0);
+                            }
+                        });
+                    }
+                    ui.add_space(4.0);
+                    let tool = match st.format {
+                        Fmt::Altium => "Altium",
+                        Fmt::Pads => "PADS",
+                        _ => "KiCad",
+                    };
+                    ui.label(RichText::new(format!("The file was written to open in {tool}, but it has not been opened in {tool} itself.")).size(11.5).color(FAINT));
+                }
+                _ => {
+                    ui.label(RichText::new("Nothing is lost: this is Coppersmith's own format.").color(theme::GREEN));
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Choose where…").clicked() {
+                    place = Some(st.format);
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        keep &= !cancel;
+        if let Some(f) = place {
+            self.ask_save_place(ctx, f);
+        } else if keep {
+            self.save_as = Some(st);
         }
     }
 
@@ -642,45 +928,14 @@ impl App {
     }
 
     pub fn ribbon_bar(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
         // In a window too narrow for all of it, it scrolls sideways rather than being cut off.
-        ScrollArea::horizontal().auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| self.ribbon_row(ui, &ctx));
+        ScrollArea::horizontal().auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded).show(ui, |ui| self.ribbon_row(ui));
     }
 
-    fn ribbon_row(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+    fn ribbon_row(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            App::group(ui, "File", |ui| {
-                if icon_button(ui, Icon::New, false).on_hover_text("New board (Ctrl+N)").clicked() {
-                    self.new_board();
-                }
-                if icon_button(ui, Icon::Folder, false).on_hover_text("Open a board (Ctrl+O)").clicked() {
-                    self.ask_open(ctx);
-                }
-                if icon_button(ui, Icon::Save, false).on_hover_text("Save (Ctrl+S)").clicked() {
-                    self.save(ctx);
-                }
-                if tool_button(ui, Icon::Export, "Gerbers", true).on_hover_text("Write Gerber and drill files (Ctrl+E)").clicked() {
-                    self.ask_export(ctx);
-                }
-            });
-            ui.separator();
-            App::group(ui, "Edit", |ui| {
-                let (undo, redo, picked) = (self.can_undo(), self.can_redo(), !self.sel.is_empty());
-                if ui.add_enabled(undo, egui::Button::new("Undo")).on_hover_text("Ctrl+Z").clicked() {
-                    self.undo();
-                }
-                if ui.add_enabled(redo, egui::Button::new("Redo")).on_hover_text("Ctrl+Shift+Z").clicked() {
-                    self.redo();
-                }
-                if ui.add_enabled(picked, egui::Button::new("Copy")).on_hover_text("Ctrl+D").clicked() {
-                    self.duplicate_selection();
-                }
-                if ui.add_enabled(picked, egui::Button::new("Delete")).on_hover_text("Delete").clicked() {
-                    self.delete_selection();
-                }
-            });
-            ui.separator();
+            // File and Edit are in the menus (and their keys); the ribbon keeps what needs to be at hand.
             App::group(ui, "Pick", |ui| self.filter_chip(ui, true));
             ui.separator();
             App::group(ui, "Tools", |ui| self.tool_controls(ui, true));
@@ -708,6 +963,7 @@ impl App {
                         Mode::Board => ("PCB", ACCENT),
                         Mode::Schematic => ("SCH", theme::GREEN),
                         Mode::Library => ("LIB", theme::YELLOW),
+                        Mode::View3d => ("3D", theme::rgb(0xc7_8b_ff)),
                     };
                     let closable = tab.is_some();
                     let kind_galley = ui.painter().layout_no_wrap(kind.to_string(), FontId::proportional(10.5), color);
@@ -752,6 +1008,9 @@ impl App {
                     }
                     if item(ui, "New library", "", true) {
                         self.open_library_editor(None);
+                    }
+                    if item(ui, "3D view of the board", "", true) {
+                        self.open_3d();
                     }
                     ui.separator();
                     if item(ui, "Open…", "Ctrl+O", true) {
@@ -855,6 +1114,11 @@ impl App {
     /// editor's own list, by the tabs along its bottom.
     pub fn editor_left_dock(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // The 3D view has no list of its own: the project is all there is.
+        if self.mode() == Mode::View3d {
+            egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| self.project_page(ui));
+            return;
+        }
         let items = match self.lib_active() {
             Some(w) if w.ed.kind == crate::ui::libedit::Kind::Footprints => "Footprints",
             _ => "Symbols",
@@ -869,8 +1133,8 @@ impl App {
             EditorLeft::Project => self.project_page(ui),
             EditorLeft::Items => match self.active.and_then(|i| self.docs.get_mut(i)) {
                 Some(Doc::Library(w)) => w.list(ui),
-                Some(Doc::Schematic(w)) => w.symbol_list(ui, &ctx),
-                None => {}
+                Some(Doc::Schematic(w)) => w.symbol_panel(ui, &ctx),
+                Some(Doc::View3d(_)) | None => {}
             },
         });
     }

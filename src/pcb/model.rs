@@ -1,6 +1,7 @@
 //! What a board is made of. This is also the saved file, written as JSON.
 
 use crate::pcb::geom::*;
+use crate::pcb::rulebook::{RuleId, SeenRule};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, PartialOrd, Ord)]
@@ -20,6 +21,17 @@ impl Side {
 
 /// Copper 0 is the top and 31 the bottom, whatever the layer count, so
 /// changing from two layers to four leaves the outer tracks where they are.
+/// What an inner copper layer is used for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayerRole {
+    /// A plane, whole and with nothing else on it.
+    Plane,
+    /// A plane that's cut into several pieces, or has a trace or two run across it.
+    Split,
+    /// A layer for routing.
+    Signal,
+}
+
 pub const TOP: u8 = 0;
 pub const BOTTOM: u8 = 31;
 
@@ -635,6 +647,86 @@ pub struct Net {
     pub name: String,
 }
 
+/// A named group of nets (Altium's net class), which rules can be asked of.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct NetClass {
+    pub name: String,
+    pub nets: Vec<u32>,
+}
+
+/// Two nets routed as a differential pair.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DiffPair {
+    pub name: String,
+    pub pos: u32,
+    pub neg: u32,
+}
+
+/// A named group of differential pairs, such as a controlled-impedance bus.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PairClass {
+    pub name: String,
+    /// Names of the pairs in it.
+    pub pairs: Vec<String>,
+}
+
+/// What a class rule is about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClassRuleKind {
+    /// Track widths.
+    Width,
+    /// Width and gap for the two tracks of a pair.
+    PairRouting,
+    /// How alike in length the nets are to be.
+    MatchedLengths,
+}
+
+/// Which nets a class rule is for.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum ClassScope {
+    NetClass(String),
+    PairClass(String),
+}
+
+/// The widths and gaps a rule allows on one copper layer (mm); `None` where
+/// it says nothing.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LayerLimit {
+    pub layer: u8,
+    pub min_width: Option<f64>,
+    pub pref_width: Option<f64>,
+    pub max_width: Option<f64>,
+    pub min_gap: Option<f64>,
+    pub pref_gap: Option<f64>,
+    pub max_gap: Option<f64>,
+}
+
+/// A rule asked of a class of nets or pairs, rather than of the whole board.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ClassRule {
+    pub name: String,
+    pub kind: ClassRuleKind,
+    pub scope: ClassScope,
+    /// Per layer; layer `u8::MAX` stands for every layer.
+    pub layers: Vec<LayerLimit>,
+    /// For matched lengths: how far apart the lengths may be.
+    pub tolerance: Option<f64>,
+    /// For pair routing: the most that may run uncoupled.
+    pub max_uncoupled: Option<f64>,
+    /// For matched lengths on pairs: compare the two nets of each pair, and/or each pair with the others.
+    #[serde(default = "yes")]
+    pub within_pairs: bool,
+    #[serde(default)]
+    pub between_pairs: bool,
+}
+
+impl ClassRule {
+    /// What it allows on a layer: that layer's own limits, or the all-layers ones.
+    pub fn on(&self, layer: u8) -> Option<&LayerLimit> {
+        self.layers.iter().find(|l| l.layer == layer).or_else(|| self.layers.iter().find(|l| l.layer == u8::MAX))
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Rules {
     pub clearance: f64,
@@ -657,6 +749,80 @@ pub struct Rules {
     /// pairs that differ.
     #[serde(default)]
     pub gaps: Vec<Gap>,
+    /// Rules switched off: the checks for them aren't made.
+    #[serde(default = "default_off")]
+    pub off: Vec<RuleId>,
+    /// The widest a track may be (0: no limit).
+    #[serde(default)]
+    pub max_track: f64,
+    /// The largest drill (0: no limit).
+    #[serde(default)]
+    pub max_drill: f64,
+    /// The pad and hole sizes a via may have (0: no limit).
+    #[serde(default)]
+    pub via_min_dia: f64,
+    #[serde(default)]
+    pub via_max_dia: f64,
+    #[serde(default)]
+    pub via_min_drill: f64,
+    #[serde(default)]
+    pub via_max_drill: f64,
+    /// The least gap between the edges of two drilled holes.
+    #[serde(default = "default_hole_gap")]
+    pub hole_gap: f64,
+    /// The least gap between the courtyards of two parts.
+    #[serde(default)]
+    pub component_gap: f64,
+    /// The smallest angle two tracks of a net may meet at, in degrees.
+    #[serde(default = "default_min_angle")]
+    pub min_angle: f64,
+    /// The least and most a net's tracks may add up to (0: no limit).
+    #[serde(default)]
+    pub min_net_length: f64,
+    #[serde(default)]
+    pub max_net_length: f64,
+    /// What a file said of its rules, kept so it can be shown whole.
+    #[serde(default)]
+    pub seen: Vec<SeenRule>,
+    /// How much short of its gap copper may be before it's too close. Altium's
+    /// coordinates are 2.5 nm apart and each rounds when it comes in, so a gap
+    /// that is exactly the rule's there can come out a few nanometres short here.
+    /// A board from KiCad, whose own checker is looser, has a micron.
+    #[serde(default = "default_tolerance")]
+    pub tolerance: f64,
+}
+
+fn default_tolerance() -> f64 {
+    1e-5
+}
+
+/// Rules a new board starts with off: the ones that need a decision about the board's own
+/// limits before they mean anything.
+fn default_off() -> Vec<RuleId> {
+    vec![RuleId::HoleToHoleClearance, RuleId::AcuteAngle, RuleId::Length, RuleId::RoutingVias]
+}
+
+fn default_hole_gap() -> f64 {
+    0.254
+}
+
+fn default_min_angle() -> f64 {
+    90.0
+}
+
+impl Rules {
+    /// Whether the check for a rule is made.
+    pub fn is_on(&self, rule: RuleId) -> bool {
+        !self.off.contains(&rule)
+    }
+
+    pub fn set_on(&mut self, rule: RuleId, on: bool) {
+        self.off.retain(|r| *r != rule);
+        if !on {
+            self.off.push(rule);
+        }
+    }
+
 }
 
 /// The kinds of copper a clearance is measured between.
@@ -735,6 +901,20 @@ impl Default for Rules {
             text_height: 1.0,
             min_diag: default_min_diag(),
             gaps: Vec::new(),
+            off: default_off(),
+            max_track: 0.0,
+            max_drill: 0.0,
+            via_min_dia: 0.0,
+            via_max_dia: 0.0,
+            via_min_drill: 0.0,
+            via_max_drill: 0.0,
+            hole_gap: default_hole_gap(),
+            component_gap: 0.0,
+            min_angle: default_min_angle(),
+            min_net_length: 0.0,
+            max_net_length: 0.0,
+            seen: Vec::new(),
+            tolerance: default_tolerance(),
         }
     }
 }
@@ -759,6 +939,15 @@ pub struct Board {
     pub keepouts: Vec<Keepout>,
     /// Net 0 is "not connected"; it's never stored here.
     pub nets: Vec<Net>,
+    /// Groups of nets, differential pairs, groups of pairs, and the rules asked of them.
+    #[serde(default)]
+    pub net_classes: Vec<NetClass>,
+    #[serde(default)]
+    pub diff_pairs: Vec<DiffPair>,
+    #[serde(default)]
+    pub pair_classes: Vec<PairClass>,
+    #[serde(default)]
+    pub class_rules: Vec<ClassRule>,
     pub rules: Rules,
     pub next_id: u32,
 }
@@ -777,6 +966,10 @@ impl Default for Board {
             fills: Vec::new(),
             keepouts: Vec::new(),
             nets: Vec::new(),
+            net_classes: Vec::new(),
+            diff_pairs: Vec::new(),
+            pair_classes: Vec::new(),
+            class_rules: Vec::new(),
             rules: Rules::default(),
             next_id: 1,
         }
@@ -791,6 +984,42 @@ impl Board {
     pub fn new_id(&mut self) -> u32 {
         self.next_id += 1;
         self.next_id - 1
+    }
+
+    /// What each inner copper layer is for, worked out from what's on it: a
+    /// plane (a plane pour, or a pour over most of the board with next to no
+    /// tracks), a plane that is split up or has a trace on it, or one that
+    /// carries signals.
+    pub fn inner_layer_roles(&self) -> Vec<(u8, LayerRole)> {
+        let outline_area = if self.outline.len() >= 3 { ring_area(&self.outline).abs() } else { 0.0 };
+        let area = if outline_area > 0.0 {
+            outline_area
+        } else {
+            let e = self.extent();
+            e.w() * e.h()
+        };
+        self.copper_layers()
+            .into_iter()
+            .filter(|l| *l != TOP && *l != BOTTOM)
+            .map(|l| {
+                let pours = self.pours.iter().filter(|p| p.layer == l);
+                let tracks = self.tracks.iter().filter(|t| t.layer == l).count();
+                // How much trace: a few stray dots from an import aren't a trace on a plane.
+                let trace_length: f64 = self.tracks.iter().filter(|t| t.layer == l).map(|t| t.a.dist(t.b)).sum();
+                let planed = pours.clone().any(|p| p.plane);
+                // Over most of the board: the whole of it (no outline given), or what's poured.
+                let broad = pours.clone().any(|p| p.outline.is_empty() || p.fill.iter().map(|i| i.area).sum::<f64>() >= 0.5 * area);
+                let role = if planed || (broad && tracks < 30) {
+                    // Cut up: several plane pours, or several pieces each a real share of the board.
+                    let pieces = pours.clone().flat_map(|p| p.fill.iter()).filter(|i| i.area >= 0.05 * area).count();
+                    let cut_up = pours.clone().filter(|p| p.plane).count() >= 2 || pieces >= 2;
+                    if trace_length >= 3.0 || cut_up { LayerRole::Split } else { LayerRole::Plane }
+                } else {
+                    LayerRole::Signal
+                };
+                (l, role)
+            })
+            .collect()
     }
 
     /// The copper layers from top to bottom.
@@ -810,6 +1039,75 @@ impl Board {
 
     pub fn net_by_name(&self, name: &str) -> Option<u32> {
         self.nets.iter().find(|n| n.name.eq_ignore_ascii_case(name)).map(|n| n.id)
+    }
+
+    /// The differential pair a net is one side of, if the board defines it.
+    pub fn pair_of(&self, net: u32) -> Option<&DiffPair> {
+        if net == 0 {
+            return None;
+        }
+        self.diff_pairs.iter().find(|d| d.pos == net || d.neg == net)
+    }
+
+    /// The net classes a net belongs to.
+    pub fn net_classes_of(&self, net: u32) -> Vec<&NetClass> {
+        self.net_classes.iter().filter(|c| c.nets.contains(&net)).collect()
+    }
+
+    /// The classes of pairs the net's pair belongs to.
+    pub fn pair_classes_of(&self, net: u32) -> Vec<&PairClass> {
+        match self.pair_of(net) {
+            Some(d) => self.pair_classes.iter().filter(|c| c.pairs.iter().any(|p| p.eq_ignore_ascii_case(&d.name))).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The rules asked of the classes a net is in.
+    pub fn class_rules_for(&self, net: u32) -> Vec<&ClassRule> {
+        let nets: Vec<&str> = self.net_classes_of(net).iter().map(|c| c.name.as_str()).collect();
+        let pairs: Vec<&str> = self.pair_classes_of(net).iter().map(|c| c.name.as_str()).collect();
+        self.class_rules
+            .iter()
+            .filter(|r| match &r.scope {
+                ClassScope::NetClass(n) => nets.iter().any(|x| x.eq_ignore_ascii_case(n)),
+                ClassScope::PairClass(n) => pairs.iter().any(|x| x.eq_ignore_ascii_case(n)),
+            })
+            .collect()
+    }
+
+    /// Every net of a pair class (both sides of each pair).
+    pub fn pair_class_nets(&self, class: &str) -> Vec<u32> {
+        let Some(c) = self.pair_classes.iter().find(|c| c.name.eq_ignore_ascii_case(class)) else { return Vec::new() };
+        c.pairs.iter().filter_map(|p| self.diff_pairs.iter().find(|d| d.name.eq_ignore_ascii_case(p))).flat_map(|d| [d.pos, d.neg]).collect()
+    }
+
+    /// The other half of a differential pair, found by name (`USB_DP`/`USB_DN`,
+    /// `CLK_P`/`CLK_N`, `RX+`/`RX-`, `TX0P`/`TX0N`): the same name with the
+    /// polarity swapped, if the board has a net called that.
+    pub fn diff_partner(&self, net: u32) -> Option<u32> {
+        if net == 0 {
+            return None;
+        }
+        // The board's own pairs first; names only where it has none for this net.
+        if let Some(d) = self.pair_of(net) {
+            return Some(if d.pos == net { d.neg } else { d.pos });
+        }
+        let name = self.nets.iter().find(|n| n.id == net)?.name.to_ascii_uppercase();
+        const ENDS: [(&str, &str); 6] = [("_DP", "_DN"), ("DP", "DN"), ("_P", "_N"), ("+", "-"), ("P", "N"), ("_POS", "_NEG")];
+        for (p, n) in ENDS {
+            for (mine, other) in [(p, n), (n, p)] {
+                if let Some(stem) = name.strip_suffix(mine) {
+                    if stem.is_empty() {
+                        continue;
+                    }
+                    let want = format!("{stem}{other}");
+                    if let Some(found) = self.nets.iter().find(|x| x.id != net && x.name.eq_ignore_ascii_case(&want)) {
+                        return Some(found.id);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// The net with this name, made if it isn't there yet.
@@ -932,6 +1230,88 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
+    /// Prints the tracks and vias of one net:
+    /// COPPERSMITH_BOARD=file COPPERSMITH_NET=name cargo test dump_net -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_net() {
+        let (Some(f), Some(name)) = (std::env::var_os("COPPERSMITH_BOARD"), std::env::var("COPPERSMITH_NET").ok()) else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&f)).unwrap().board;
+        let Some(net) = b.net_by_name(&name) else { return println!("no net {name}") };
+        for t in b.tracks.iter().filter(|t| t.net == net) {
+            println!("track {} layer {} w {:.4} ({:.4},{:.4}) -> ({:.4},{:.4}) mid {:?}", t.id, t.layer, t.w, t.a.x, t.a.y, t.b.x, t.b.y, t.mid.map(|m| (m.x, m.y)));
+        }
+        for v in b.vias.iter().filter(|v| v.net == net) {
+            println!("via {} at ({:.4},{:.4})", v.id, v.at.x, v.at.y);
+        }
+    }
+
+    /// Prints what's on each copper layer of a board, to see how planes and signals differ:
+    /// COPPERSMITH_BOARD=file cargo test dump_layers -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_layers() {
+        let Some(f) = std::env::var_os("COPPERSMITH_BOARD") else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&f)).unwrap().board;
+        let area = ring_area(&b.outline).abs();
+        for l in b.copper_layers() {
+            let tracks: Vec<f64> = b.tracks.iter().filter(|t| t.layer == l).map(|t| t.a.dist(t.b)).collect();
+            let total: f64 = tracks.iter().sum();
+            let pours: Vec<_> = b.pours.iter().filter(|p| p.layer == l).collect();
+            let mut islands: Vec<f64> = pours.iter().flat_map(|p| p.fill.iter().map(|i| i.area / area * 100.0)).collect();
+            islands.sort_by(|a, c| c.total_cmp(a));
+            println!("layer {l}: {} tracks ({total:.1} mm), {} pours (plane {}), islands % of board: {:?}", tracks.len(), pours.len(), pours.iter().filter(|p| p.plane).count(), islands.iter().take(6).map(|v| format!("{v:.1}")).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn inner_layers_are_found_to_be_planes_or_for_signals() {
+        let mut b = Board::default();
+        b.copper = 6;
+        b.outline = rect_outline(p(0.0, 0.0), p(40.0, 30.0));
+        let net = b.net("N");
+        // Layer 1: a plane. 2: busy with tracks. 3: a pour over the board and almost nothing else. 4: nothing at all.
+        let mut plane = Pour::new(1, 1, net, Vec::new(), &b.rules);
+        plane.plane = true;
+        b.pours.push(plane);
+        for k in 0..40 {
+            b.tracks.push(Track { mid: None, id: 100 + k, a: p(1.0, k as f64 * 0.5), b: p(9.0, k as f64 * 0.5), w: 0.2, layer: 2, net });
+        }
+        b.pours.push(Pour::new(3, 3, net, Vec::new(), &b.rules));
+        let roles = b.inner_layer_roles();
+        assert_eq!(roles, vec![(1, LayerRole::Plane), (2, LayerRole::Signal), (3, LayerRole::Plane), (4, LayerRole::Signal)]);
+        // A plane with a trace across it, and one cut into two pours, are worth a pick of their own.
+        let mut b = b;
+        b.copper = 8;
+        let mut with_trace = Pour::new(5, 5, net, Vec::new(), &b.rules);
+        with_trace.plane = true;
+        b.pours.push(with_trace);
+        b.tracks.push(Track { mid: None, id: 900, a: p(1.0, 1.0), b: p(9.0, 1.0), w: 0.2, layer: 5, net });
+        for (id, outline) in [(6, vec![p(0.0, 0.0), p(20.0, 0.0), p(20.0, 30.0), p(0.0, 30.0)]), (7, vec![p(20.0, 0.0), p(40.0, 0.0), p(40.0, 30.0), p(20.0, 30.0)])] {
+            let mut half = Pour::new(id, 6, net, outline, &b.rules);
+            half.plane = true;
+            b.pours.push(half);
+        }
+        let roles = b.inner_layer_roles();
+        assert_eq!(roles[4], (5, LayerRole::Split), "a trace on a plane");
+        assert_eq!(roles[5], (6, LayerRole::Split), "two plane pours on one layer");
+        assert_eq!(roles[0], (1, LayerRole::Plane), "a whole plane stays a plane");
+        // A couple of stray dots (an import's leftovers) aren't a trace across a plane.
+        b.tracks.push(Track { mid: None, id: 901, a: p(2.0, 2.0), b: p(2.0, 2.0), w: 0.15, layer: 1, net });
+        b.tracks.push(Track { mid: None, id: 902, a: p(3.0, 2.0), b: p(3.1, 2.0), w: 0.15, layer: 1, net });
+        assert_eq!(b.inner_layer_roles()[0], (1, LayerRole::Plane), "dots don't make a split plane");
+        b.copper = 6;
+        // A busy layer with a ground pour poured over it is still a signal layer.
+        for k in 0..40 {
+            b.tracks.push(Track { mid: None, id: 200 + k, a: p(1.0, k as f64 * 0.5), b: p(9.0, k as f64 * 0.5), w: 0.2, layer: 3, net });
+        }
+        assert_eq!(b.inner_layer_roles()[2], (3, LayerRole::Signal));
+        // Two layers have no inner ones.
+        let mut two = Board::default();
+        two.copper = 2;
+        assert!(two.inner_layer_roles().is_empty());
+    }
+
     use super::*;
 
     #[test]
@@ -1114,6 +1494,20 @@ mod tests {
         assert!(t.h() > t.w() - 1e-9, "turned, it's taller than wide: {t:?}");
         f.label_height = Some(2.0);
         assert!(f.label_bbox(&rules).h() > t.h(), "a taller name has a taller box");
+    }
+
+    #[test]
+    fn differential_partners_are_found_by_name() {
+        let mut b = Board::default();
+        let ids: Vec<u32> = ["USB_DP", "USB_DN", "CLK_P", "CLK_N", "RX+", "RX-", "TX0P", "TX0N", "VCC", "GND", "LONE_P"].iter().map(|n| b.net(n)).collect();
+        assert_eq!(b.diff_partner(ids[0]), Some(ids[1]));
+        assert_eq!(b.diff_partner(ids[1]), Some(ids[0]));
+        assert_eq!(b.diff_partner(ids[2]), Some(ids[3]));
+        assert_eq!(b.diff_partner(ids[4]), Some(ids[5]));
+        assert_eq!(b.diff_partner(ids[6]), Some(ids[7]));
+        assert_eq!(b.diff_partner(ids[8]), None);
+        assert_eq!(b.diff_partner(ids[10]), None, "no partner on the board, no pair");
+        assert_eq!(b.diff_partner(0), None);
     }
 
     #[test]

@@ -124,6 +124,8 @@ pub struct Launch {
     pub library: Option<PathBuf>,
     /// A schematic to open in the schematic editor, for `--schematic`.
     pub schematic: Option<PathBuf>,
+    /// Open the 3D view, for `--3d`.
+    pub view3d: bool,
 }
 
 /// Which tab is on show once tab `closed` is gone: the same one (its place
@@ -141,6 +143,8 @@ pub fn active_after_close(active: Option<usize>, closed: usize) -> Option<usize>
 pub enum Doc {
     Library(Box<crate::ui::libview::LibWindow>),
     Schematic(Box<crate::ui::schview::SchWindow>),
+    /// The board as a solid, to turn round.
+    View3d(Box<crate::ui::view3d::View3d>),
 }
 
 impl Doc {
@@ -153,6 +157,7 @@ impl Doc {
         match self {
             Doc::Library(w) => Self::file_name(w.ed.path().or(w.ed.fp_path.as_deref()).or(w.ed.sym_path.as_deref())).unwrap_or_else(|| w.ed.name.clone()),
             Doc::Schematic(w) => Self::file_name(w.path.as_deref()).unwrap_or_else(|| w.sch.name.clone()),
+            Doc::View3d(_) => "3D view".to_string(),
         }
     }
 
@@ -160,6 +165,7 @@ impl Doc {
         match self {
             Doc::Library(w) => w.ed.dirty,
             Doc::Schematic(w) => w.dirty,
+            Doc::View3d(_) => false,
         }
     }
 
@@ -167,6 +173,7 @@ impl Doc {
         match self {
             Doc::Library(w) => w.ed.fp_path.iter().chain(w.ed.sym_path.iter()).cloned().collect(),
             Doc::Schematic(w) => w.path.iter().cloned().collect(),
+            Doc::View3d(_) => Vec::new(),
         }
     }
 
@@ -174,6 +181,7 @@ impl Doc {
         match self {
             Doc::Library(_) => Mode::Library,
             Doc::Schematic(_) => Mode::Schematic,
+            Doc::View3d(_) => Mode::View3d,
         }
     }
 }
@@ -184,6 +192,7 @@ pub enum Mode {
     Board,
     Library,
     Schematic,
+    View3d,
 }
 
 pub enum Asked {
@@ -192,6 +201,68 @@ pub enum Asked {
     Open(PathBuf),
     SaveAs(PathBuf),
     Export(PathBuf),
+}
+
+/// A name with `_CSMITH` on it (once), for a copy saved from another file.
+pub fn copy_stem(name: &str) -> String {
+    if name.to_ascii_uppercase().ends_with("_CSMITH") { name.to_string() } else { format!("{name}_CSMITH") }
+}
+
+/// The files a board can be saved as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoardFormat {
+    /// Coppersmith's own: everything is kept.
+    Coppersmith,
+    /// A KiCad board and project: a copy, with some things lost.
+    Kicad,
+    /// An Altium board: a copy, with some things lost.
+    Altium,
+    /// A PADS ASCII board: a copy, with some things lost.
+    Pads,
+}
+
+impl BoardFormat {
+    pub const ALL: [BoardFormat; 4] = [BoardFormat::Coppersmith, BoardFormat::Kicad, BoardFormat::Altium, BoardFormat::Pads];
+
+    pub fn ext(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "cspcb",
+            BoardFormat::Kicad => "kicad_pcb",
+            BoardFormat::Altium => "PcbDoc",
+            BoardFormat::Pads => "asc",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "Coppersmith board (.cspcb)",
+            BoardFormat::Kicad => "KiCad board (.kicad_pcb)",
+            BoardFormat::Altium => "Altium board (.PcbDoc)",
+            BoardFormat::Pads => "PADS ASCII board (.asc)",
+        }
+    }
+
+    /// The name a board is offered under: with `_CSMITH` on it, so saving
+    /// a board that came from another tool doesn't write over the original.
+    pub fn file_name(self, board: &str) -> String {
+        format!("{}.{}", copy_stem(board), self.ext())
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            BoardFormat::Coppersmith => "Everything is kept. Opens here.",
+            BoardFormat::Kicad => "For KiCad 8, 9 and 10, with the rules in a .kicad_pro beside it. A copy: this board stays as it is.",
+            BoardFormat::Altium => "For Altium Designer. A copy: this board stays as it is.",
+            BoardFormat::Pads => "For PADS Layout and PowerPCB (version 9.5 ASCII). A copy: this board stays as it is.",
+        }
+    }
+}
+
+/// The Save as window: which format, and what it would lose.
+pub struct SaveAs {
+    pub format: BoardFormat,
+    /// What saving in each of the other formats would lose, worked out when first asked.
+    pub notes: Vec<(BoardFormat, Vec<String>)>,
 }
 
 /// What waits on the "save changes?" question.
@@ -266,6 +337,8 @@ pub struct App {
     pub placing: Option<(Footprint, String)>,
     pub grid: f64,
     pub show_grid: bool,
+    /// The net's name written along its tracks, once zoomed in enough to read it.
+    pub show_net_names: bool,
     pub unit: Unit,
     pub width: f64,
     pub highlight: Option<u32>,
@@ -286,12 +359,33 @@ pub struct App {
     prefs_saved: Option<Prefs>,
     /// The keyboard shortcuts window.
     pub show_keys: bool,
+    /// The window of net classes, pairs and the rules asked of them.
+    pub show_classes: bool,
+    /// The design rules window, and the rule it should open on.
+    pub show_rules: bool,
+    /// The Save as window, when it's open, and the format last chosen.
+    pub save_as: Option<SaveAs>,
+    /// Files opened lately, newest first.
+    pub recent: Vec<PathBuf>,
+    pub last_format: BoardFormat,
+    pub rules_focus: Option<crate::pcb::rulebook::RuleId>,
+    /// The symbols read from the project's library files, so they're read once.
+    pub symbol_cache: std::collections::HashMap<PathBuf, Vec<crate::pcb::altium::schlib::Symbol>>,
     /// The schematics and libraries open in tabs beside the board.
     pub docs: Vec<Doc>,
     /// Which tab is on show: one of `docs`, or the board (None).
     pub active: Option<usize>,
     /// A tab with unsaved changes that has been asked to close once.
     pub pending_close: Option<usize>,
+    /// Silkscreen layers hidden by an inner-layer quick pick, to bring back with the next other pick.
+    pub silk_hid: Vec<Layer>,
+    /// What each inner copper layer is for, found out when the board changed last (and which change).
+    pub layer_roles: (u64, Vec<(u8, crate::pcb::model::LayerRole)>),
+    /// The graphics card's side of the 3D view, and what it said went wrong.
+    pub gpu3d: crate::ui::gpu3d::Shared,
+    pub gpu3d_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// The 3D tab has closed: let go of what was drawn for it.
+    gpu3d_release: bool,
     /// The schematics, boards and libraries that go together.
     pub project: Option<crate::pcb::project::Project>,
     /// Which page of an editor tab's left dock is showing.
@@ -300,7 +394,7 @@ pub struct App {
     pub project_sel: Option<PathBuf>,
     pub last_field_edit: f64,
     pub confirm: Option<Then>,
-    after_save: Option<Then>,
+    pub(crate) after_save: Option<Then>,
     may_close: bool,
 
     pub pinch: Pinch,
@@ -317,7 +411,11 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> Self {
         theme::install_fonts(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(theme::visuals());
+        // The look is its own dark one, whatever the system's light or dark setting is:
+        // both themes get it, and the dark one is always used.
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
+        cc.egui_ctx.set_visuals_of(egui::Theme::Dark, theme::visuals());
+        cc.egui_ctx.set_visuals_of(egui::Theme::Light, theme::visuals());
         cc.egui_ctx.all_styles_mut(|s| {
             s.spacing.item_spacing = vec2(8.0, 6.0);
             s.spacing.button_padding = vec2(10.0, 5.0);
@@ -382,6 +480,7 @@ impl App {
             placing: None,
             grid: 0.25,
             show_grid: true,
+            show_net_names: true,
             unit: Unit::Mm,
             highlight: None,
             focus: None,
@@ -396,9 +495,21 @@ impl App {
             filter: prefs.filter,
             prefs_saved: None,
             show_keys: false,
+            show_classes: false,
+            show_rules: false,
+            save_as: None,
+            recent: crate::ui::recent::load(),
+            last_format: BoardFormat::Coppersmith,
+            rules_focus: None,
+            symbol_cache: std::collections::HashMap::new(),
             docs: Vec::new(),
             active: None,
             pending_close: None,
+            silk_hid: Vec::new(),
+            layer_roles: (u64::MAX, Vec::new()),
+            gpu3d: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu3d_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu3d_release: false,
             project: None,
             editor_tab: crate::ui::dock::EditorLeft::Items,
             project_sel: None,
@@ -1130,6 +1241,19 @@ impl App {
     }
 
     pub fn save_to(&mut self, path: PathBuf) {
+        // A KiCad board is written as a copy: this board's own file and its unsaved state stay as they are.
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("kicad_pcb")) {
+            self.export_kicad(path);
+            return;
+        }
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc")) {
+            self.export_altium(path);
+            return;
+        }
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("asc")) {
+            self.export_pads(path);
+            return;
+        }
         let path = if path.extension().is_none() { path.with_extension("cspcb") } else { path };
         match std::fs::write(&path, self.doc.save()) {
             Ok(()) => {
@@ -1141,6 +1265,62 @@ impl App {
         }
     }
 
+    /// Writes the board as a PADS ASCII file.
+    fn export_pads(&mut self, path: PathBuf) {
+        let w = match crate::pcb::pads::write::board(&self.doc) {
+            Ok(w) => w,
+            Err(e) => {
+                self.notice = Some(e);
+                return;
+            }
+        };
+        // PADS reads one byte a letter: what Latin-1 has is kept, the rest becomes a question mark.
+        let bytes: Vec<u8> = w.text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect();
+        if let Err(e) = std::fs::write(&path, bytes) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let lost = format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" });
+        self.notice = Some(format!("Exported {} for PADS{lost}", path.display()));
+    }
+
+    /// Writes the board as an Altium `.PcbDoc`.
+    fn export_altium(&mut self, path: PathBuf) {
+        let w = match crate::pcb::altium::pcbdoc_write::board(&self.doc) {
+            Ok(w) => w,
+            Err(e) => {
+                self.notice = Some(e);
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&path, &w.bytes) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let lost = format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" });
+        self.notice = Some(format!("Exported {} for Altium{lost}", path.display()));
+    }
+
+    /// Writes the board as a KiCad board, and its rules as a KiCad project beside it (unless there already is one).
+    fn export_kicad(&mut self, path: PathBuf) {
+        let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let w = crate::pcb::kicad::write::board(&self.doc, &name);
+        if let Err(e) = std::fs::write(&path, &w.pcb) {
+            self.notice = Some(format!("{} couldn't be written: {e}", path.display()));
+            return;
+        }
+        let project = path.with_extension("kicad_pro");
+        let project_note = if project.exists() {
+            "; the .kicad_pro already there is left as it is, so its rules weren't written"
+        } else if std::fs::write(&project, &w.project).is_ok() {
+            ", with its rules in a .kicad_pro"
+        } else {
+            "; the .kicad_pro couldn't be written"
+        };
+        let lost = if w.notes.is_empty() { String::new() } else { format!(" — {} thing{} changed or lost, as the Save as window listed", w.notes.len(), if w.notes.len() == 1 { "" } else { "s" }) };
+        self.notice = Some(format!("Exported {} for KiCad{project_note}{lost}", path.display()));
+    }
+
     pub fn save(&mut self, ctx: &egui::Context) {
         match self.path.clone() {
             Some(path) => self.save_to(path),
@@ -1148,15 +1328,25 @@ impl App {
         }
     }
 
-    pub fn ask_save_as(&self, ctx: &egui::Context) {
+    /// Opens the Save as window, where the format is chosen (and what it loses is shown) before a place is.
+    pub fn ask_save_as(&mut self, _ctx: &egui::Context) {
+        self.save_as = Some(SaveAs { format: self.last_format, notes: Vec::new() });
+    }
+
+    /// The place to save to, asked of the system's dialog, for the format chosen.
+    pub fn ask_save_place(&mut self, ctx: &egui::Context, format: BoardFormat) {
+        self.last_format = format;
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
-        let name = format!("{}.cspcb", self.doc.name);
+        let name = format.file_name(&self.doc.name);
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new()
-                .set_title("Save the board")
-                .set_file_name(&name)
-                .add_filter("Coppersmith board", &["cspcb"]);
+            // Every format is a choice in the dialog's list of types, the one picked in the window first.
+            let mut dialog = rfd::FileDialog::new().set_title("Save the board").set_file_name(&name).add_filter(format.name(), &[format.ext()]);
+            for other in BoardFormat::ALL.into_iter().filter(|f| *f != format) {
+                dialog = dialog.add_filter(other.name(), &[other.ext()]);
+            }
             if let Some(path) = dialog.save_file() {
+                // A name typed without its ending gets the format's.
+                let path = if path.extension().is_none() { path.with_extension(format.ext()) } else { path };
                 let _ = tx.send(Asked::SaveAs(path));
                 ctx.request_repaint();
             }
@@ -1170,11 +1360,11 @@ impl App {
             // Boards first; projects, schematics and libraries open in their own places.
             let dialog = rfd::FileDialog::new()
                 .set_title("Open")
-                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb"]))
-                .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb"]))
-                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc"]))
-                .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch"]))
-                .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib"]));
+                .add_filter("Everything Coppersmith opens", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "SchDoc", "CSSchDoc", "cssch", "PcbLib", "SchLib", "IntLib", "PrjPcb", "CSPrjPcb", "kicad_pcb", "kicad_sch", "kicad_mod", "kicad_sym", "kicad_pro", "asc"]))
+                .add_filter("Projects", &cases(&["PrjPcb", "CSPrjPcb", "kicad_pro"]))
+                .add_filter("Boards", &cases(&["cspcb", "json", "PcbDoc", "CSPcbDoc", "kicad_pcb", "asc"]))
+                .add_filter("Schematics", &cases(&["SchDoc", "CSSchDoc", "cssch", "kicad_sch"]))
+                .add_filter("Libraries", &cases(&["PcbLib", "SchLib", "IntLib", "kicad_mod", "kicad_sym"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Open(path));
                 ctx.request_repaint();
@@ -1187,7 +1377,7 @@ impl App {
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new()
                 .set_title("Add an Altium library")
-                .add_filter("Altium footprint library", &crate::pcb::altium::with_cases(&["PcbLib", "IntLib"]));
+                .add_filter("Footprint library", &crate::pcb::altium::with_cases(&["PcbLib", "IntLib", "kicad_mod"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::AddLibrary(path));
                 ctx.request_repaint();
@@ -1611,23 +1801,58 @@ impl App {
         self.docs.iter().position(|d| d.paths().iter().any(|p| crate::pcb::project::same_file(p, path)))
     }
 
-    /// The symbols of the libraries open in tabs, for sheets to place.
-    fn doc_symbols(&self) -> Vec<crate::pcb::altium::schlib::Symbol> {
-        self.docs.iter().filter_map(|d| if let Doc::Library(w) = d { Some(w.ed.symbols.clone()) } else { None }).flatten().collect()
+    /// The libraries of symbols a sheet can place from: the project's symbol libraries
+    /// (read once, and kept), the one open in a tab standing for its file so a sheet
+    /// sees its edits, and any other library open in a tab.
+    pub fn symbol_libraries(&mut self) -> Vec<crate::ui::schview::SymbolLibrary> {
+        use crate::pcb::project::{FileKind, same_file};
+        use crate::ui::schview::SymbolLibrary;
+        let is_symbols = |p: &std::path::Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("schlib") || e.eq_ignore_ascii_case("intlib"));
+        let stem = |p: &std::path::Path| p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let mut out: Vec<SymbolLibrary> = Vec::new();
+        let files: Vec<PathBuf> = self.project.iter().flat_map(|p| p.files.iter()).filter(|f| f.kind == FileKind::Library && !f.missing && is_symbols(&f.path)).map(|f| f.path.clone()).collect();
+        for path in files {
+            let open = self.docs.iter().find_map(|d| match d {
+                Doc::Library(w) if w.ed.sym_path.as_deref().is_some_and(|q| same_file(q, &path)) => Some(w.ed.symbols.clone()),
+                _ => None,
+            });
+            let symbols = match open {
+                Some(s) => s,
+                None => self.symbol_cache.entry(path.clone()).or_insert_with(|| crate::pcb::altium::read(&path).map(|g| g.symbols).unwrap_or_default()).clone(),
+            };
+            if !symbols.is_empty() {
+                out.push(SymbolLibrary { name: stem(&path), path: Some(path), symbols });
+            }
+        }
+        for d in &self.docs {
+            if let Doc::Library(w) = d
+                && !w.ed.symbols.is_empty()
+                && !w.ed.sym_path.as_deref().is_some_and(|q| out.iter().any(|l| l.path.as_deref().is_some_and(|p| same_file(p, q))))
+            {
+                let name = w.ed.sym_path.as_deref().map(stem).unwrap_or_else(|| w.ed.name.clone());
+                out.push(SymbolLibrary { name, path: w.ed.sym_path.clone(), symbols: w.ed.symbols.clone() });
+            }
+        }
+        out
+    }
+
+    /// Gives the sheet on show the libraries on offer.
+    fn feed_symbols(&mut self) {
+        let Some(i) = self.active else { return };
+        if !matches!(self.docs.get(i), Some(Doc::Schematic(_))) {
+            return;
+        }
+        let libs = self.symbol_libraries();
+        if let Some(Doc::Schematic(w)) = self.docs.get_mut(i) {
+            w.set_libraries(libs);
+        }
     }
 
     /// Shows a tab, or the board (None).
     pub fn activate(&mut self, tab: Option<usize>) {
         self.active = tab.filter(|i| *i < self.docs.len());
         self.pending_close = None;
-        if let Some(i) = self.active
-            && matches!(self.docs[i], Doc::Schematic(_))
-        {
-            let symbols = self.doc_symbols();
-            if let Doc::Schematic(w) = &mut self.docs[i] {
-                w.add_symbols(&symbols);
-            }
-        }
+        self.feed_symbols();
     }
 
     /// Closes a tab. One with unsaved changes asks to be closed twice.
@@ -1637,6 +1862,9 @@ impl App {
             self.notice = Some(format!("{} has unsaved changes: save it (Ctrl+S), or close it again to leave them", d.title()));
             self.pending_close = Some(i);
             return;
+        }
+        if matches!(self.docs[i], Doc::View3d(_)) {
+            self.gpu3d_release = true;
         }
         self.docs.remove(i);
         self.pending_close = None;
@@ -1705,7 +1933,6 @@ impl App {
             self.note_file(path);
         }
         let mut win = crate::ui::schview::SchWindow::new();
-        win.add_symbols(&self.doc_symbols());
         if let Some(path) = path {
             self.notice = Some(win.open_file(path));
         }
@@ -1749,6 +1976,16 @@ impl App {
                 w.command(cmd, ctx, &mut out);
                 notice = out.notice;
             }
+            Some(Doc::View3d(v)) => {
+                use crate::ui::dock::EditorCmd;
+                match cmd {
+                    EditorCmd::Fit => v.refit(),
+                    EditorCmd::Tool(0) => v.top(),
+                    EditorCmd::Tool(1) => v.bottom(),
+                    EditorCmd::Tool(2) => v.angle(),
+                    _ => {}
+                }
+            }
             None => {}
         }
         if notice.is_some() {
@@ -1759,16 +1996,54 @@ impl App {
         }
     }
 
+    /// Shows the board in 3D, in a tab of its own (the one already open if there is one).
+    pub fn open_3d(&mut self) {
+        let i = match self.docs.iter().position(|d| matches!(d, Doc::View3d(_))) {
+            Some(i) => i,
+            None => {
+                self.docs.push(Doc::View3d(Box::new(crate::ui::view3d::View3d::new(None))));
+                self.docs.len() - 1
+            }
+        };
+        self.activate(Some(i));
+    }
+
+    /// Makes the solid again when the board has changed since (and its pours have caught up).
+    fn refresh_3d(&mut self) {
+        let current = !self.flood || self.poured_rev == self.rev;
+        let rev = self.rev;
+        let active = self.active;
+        let doc = &self.doc;
+        let Some(Doc::View3d(v)) = active.and_then(|i| self.docs.get_mut(i)) else { return };
+        if current && v.solid.as_ref().is_none_or(|s| s.rev != rev) {
+            let solid = crate::pcb::solid::build(doc, rev);
+            let plain = solid.as_ref().is_some_and(|s| !s.outlined);
+            v.set_solid(solid);
+            if plain {
+                self.notice = Some("The board has no outline, so the 3D view uses a plain slab round its parts".into());
+            }
+        }
+    }
+
     /// Remembers which project a file is in, when it isn't the one on show.
     pub fn note_file(&mut self, path: &std::path::Path) {
+        self.remember_recent(path);
         if self.project.as_ref().is_some_and(|p| p.contains(path)) || path.parent().is_none() {
             return;
         }
         self.project = Some(crate::pcb::project::Project::around(path));
     }
 
+    /// Puts a file at the top of the list of those opened lately.
+    pub fn remember_recent(&mut self, path: &std::path::Path) {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        crate::ui::recent::push(&mut self.recent, &path);
+        crate::ui::recent::save(&self.recent);
+    }
+
     /// Takes a project file as the project, and shows its files.
     pub fn open_project(&mut self, path: &std::path::Path) {
+        self.remember_recent(path);
         match crate::pcb::project::Project::from_file(path) {
             Ok(p) => {
                 self.notice = Some(format!("Project {}: {} files", p.name, p.files.len()));
@@ -1776,6 +2051,7 @@ impl App {
                 self.left_tab = LeftTab::Project;
                 self.editor_tab = crate::ui::dock::EditorLeft::Project;
                 self.show_left = true;
+                self.feed_symbols();
             }
             Err(e) => self.notice = Some(e),
         }
@@ -1784,7 +2060,7 @@ impl App {
     pub fn ask_open_project(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.asked_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open a project").add_filter("Altium or Circuit Studio project", &crate::pcb::altium::with_cases(&["PrjPcb", "CSPrjPcb"]));
+            let dialog = rfd::FileDialog::new().set_title("Open a project").add_filter("Altium, Circuit Studio or KiCad project", &crate::pcb::altium::with_cases(&["PrjPcb", "CSPrjPcb", "kicad_pro"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Asked::Project(path));
                 ctx.request_repaint();
@@ -1794,7 +2070,9 @@ impl App {
 
     /// The editor in the tab on show.
     fn show_editor(&mut self, ui: &mut Ui) {
+        self.refresh_3d();
         let Some(i) = self.active else { return };
+        let (gpu, report) = (self.gpu3d.clone(), self.gpu3d_error.clone());
         let known: Vec<String> = self.lib.defs.iter().map(|d| d.name.clone()).collect();
         let (mut notice, mut reload) = (None, false);
         match self.docs.get_mut(i) {
@@ -1802,8 +2080,22 @@ impl App {
                 let out = w.show(ui, &known);
                 (notice, reload) = (out.notice, out.reload_parts);
             }
-            Some(Doc::Schematic(w)) => notice = w.show(ui, &known).notice,
+            Some(Doc::Schematic(w)) => {
+                let out = w.show(ui, &known);
+                notice = out.notice;
+                // A tool that has its list in the left panel brings it forward.
+                if out.show_symbols {
+                    self.editor_tab = crate::ui::dock::EditorLeft::Items;
+                    self.show_left = true;
+                }
+            }
+            Some(Doc::View3d(v)) => v.show(ui, &gpu, &report),
             None => {}
+        }
+        if let Ok(mut said) = report.lock()
+            && let Some(e) = said.take()
+        {
+            notice = Some(format!("The 3D view couldn't be drawn: {e}"));
         }
         if notice.is_some() {
             self.notice = notice;
@@ -1825,7 +2117,9 @@ impl App {
                     ui.add(egui::Label::new(egui::RichText::new(n).size(12.5).color(theme::YELLOW)).truncate());
                 }
                 None => {
-                    let what = if self.mode() == Mode::Schematic { "Schematic editor · symbols from Altium libraries; saves as SchDoc or Coppersmith's .cssch" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
+                    let what = if self.mode() == Mode::View3d {
+                        "3D view · drag to turn, right-drag to move, scroll to zoom · the board's copper, mask and silk as they would be made"
+                    } else if self.mode() == Mode::Schematic { "Schematic editor · symbols from Altium libraries; saves as SchDoc or Coppersmith's .cssch" } else { "Library editor · footprints (PcbLib) and symbols (SchLib), as Altium reads them" };
                     ui.label(egui::RichText::new(what).size(12.0).color(theme::FAINT));
                 }
             }
@@ -1835,6 +2129,9 @@ impl App {
     fn apply_launch(&mut self) {
         if !self.applied_launch && self.frames >= 8 && let Some(path) = self.launch.library.take() {
             self.open_library_editor(Some(&path));
+        }
+        if !self.applied_launch && self.frames >= 8 && std::mem::take(&mut self.launch.view3d) {
+            self.open_3d();
         }
         if !self.applied_launch && self.frames >= 8 && self.launch.schematic.is_some() {
             let path = self.launch.schematic.take();
@@ -1873,6 +2170,18 @@ pub fn note_slow(what: &str, started: std::time::Instant) {
     }
 }
 
+/// Whether a track from `from` to `mid` and another from `mid` to `to` carry on
+/// in one straight line, going the same way: the joint lies within half a
+/// micron of the line from end to end. (Boards from Altium are rounded to a
+/// nanometre or so, so the same line is never exact to the last digit.)
+fn carries_on(from: P, mid: P, to: P) -> bool {
+    let (d1, d2, whole) = (mid.sub(from), to.sub(mid), to.sub(from));
+    if d1.len() < 1e-9 || d2.len() < 1e-9 || d1.dot(d2) <= 0.0 {
+        return false;
+    }
+    whole.cross(mid.sub(from)).abs() / whole.len() <= 5e-4
+}
+
 /// Joins a track to the next when they carry straight on, so a route laid in
 /// clicks doesn't leave a string of short pieces.
 pub(crate) fn merge_straight(b: &mut Board) {
@@ -1899,40 +2208,144 @@ pub(crate) fn merge_straight(b: &mut Board) {
     }
     let mut alive = vec![true; b.tracks.len()];
     for i in 0..b.tracks.len() {
-        // Joins on whatever carries straight on from its end, again and again.
+        // Joins on whatever carries straight on from either end, again and
+        // again, however each piece happens to be laid: two that meet head on
+        // (both running towards the joint) are as much one run as head to tail.
         while alive[i] && b.tracks[i].mid.is_none() {
-            let mid = b.tracks[i].b;
-            // What's joined here: tracks with an end here, and vias.
-            let mut at: Vec<usize> = Vec::new();
-            for c in round(mid) {
-                for &k in ends.get(&c).into_iter().flatten() {
-                    if alive[k] && (b.tracks[k].a.same(mid) || b.tracks[k].b.same(mid)) && !at.contains(&k) {
-                        at.push(k);
+            let mut joined = false;
+            for at_b in [true, false] {
+                let (mid, far_t) = if at_b { (b.tracks[i].b, b.tracks[i].a) } else { (b.tracks[i].a, b.tracks[i].b) };
+                // What's joined here: tracks with an end here, and vias.
+                let mut at: Vec<usize> = Vec::new();
+                for c in round(mid) {
+                    for &k in ends.get(&c).into_iter().flatten() {
+                        if alive[k] && (b.tracks[k].a.same(mid) || b.tracks[k].b.same(mid)) && !at.contains(&k) {
+                            at.push(k);
+                        }
                     }
                 }
-            }
-            let via_count = round(mid).iter().filter_map(|c| vias.get(c)).flatten().filter(|v| v.same(mid)).count();
-            // Something else joining in the middle keeps the corner.
-            if at.len() + via_count != 2 {
+                let via_count = round(mid).iter().filter_map(|c| vias.get(c)).flatten().filter(|v| v.same(mid)).count();
+                // Something else joining in the middle keeps the corner.
+                if at.len() + via_count != 2 {
+                    continue;
+                }
+                let Some(&j) = at.iter().find(|&&k| k != i) else { continue };
+                let (t, u) = (&b.tracks[i], &b.tracks[j]);
+                if u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 {
+                    continue;
+                }
+                let far_u = if u.a.same(mid) { u.b } else { u.a };
+                if !carries_on(far_t, mid, far_u) {
+                    continue;
+                }
+                if at_b {
+                    b.tracks[i].b = far_u;
+                } else {
+                    b.tracks[i].a = far_u;
+                }
+                alive[j] = false;
+                ends.entry(cell(far_u)).or_default().push(i);
+                joined = true;
                 break;
             }
-            let Some(&j) = at.iter().find(|&&k| k != i) else { break };
-            let (t, u) = (&b.tracks[i], &b.tracks[j]);
-            if u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+            if !joined {
                 break;
             }
-            let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
-            if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
-                break;
-            }
-            let end = u.b;
-            b.tracks[i].b = end;
-            alive[j] = false;
-            ends.entry(cell(end)).or_default().push(i);
         }
     }
     let mut keep = alive.into_iter();
     b.tracks.retain(|_| keep.next().unwrap_or(true));
+}
+
+/// What two straight tracks make when they lie on one line and overlap: the
+/// track that spans both, running the way `t` does. `None` if they're not
+/// parallel, not on one line, or only touch.
+fn overlap_union(t: &Track, u: &Track) -> Option<(P, P)> {
+    let d = t.b.sub(t.a);
+    let e = u.b.sub(u.a);
+    let (len, elen) = (d.len(), e.len());
+    if len < 1e-9 || elen < 1e-9 || d.cross(e).abs() > 1e-6 * len * elen {
+        return None;
+    }
+    let n = d.scale(1.0 / len);
+    let off = |q: P| q.sub(t.a).cross(n).abs();
+    if off(u.a) > 1e-4 || off(u.b) > 1e-4 {
+        return None;
+    }
+    let s = |q: P| q.sub(t.a).dot(n);
+    let (ulo, uhi) = (s(u.a).min(s(u.b)), s(u.a).max(s(u.b)));
+    if ulo.max(0.0) + 1e-6 >= uhi.min(len) {
+        return None;
+    }
+    let ends = [(t.a, 0.0), (t.b, len), (u.a, s(u.a)), (u.b, s(u.b))];
+    let lo = ends.iter().min_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)?;
+    let hi = ends.iter().max_by(|x, y| x.1.total_cmp(&y.1)).map(|x| x.0)?;
+    Some((lo, hi))
+}
+
+/// Joins straight tracks that lie on top of one another (same layer, net and
+/// width, on one line, overlapping) into one, as happens when a trace is moved
+/// along another. Of two, the one in `prefer` (what's picked) keeps its number.
+/// Returns how many were taken out.
+pub(crate) fn merge_overlapping(b: &mut Board, prefer: &std::collections::HashSet<u32>) -> usize {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(u8, u32, i64), Vec<usize>> = HashMap::new();
+    for (i, t) in b.tracks.iter().enumerate() {
+        if t.mid.is_none() && !t.a.same(t.b) {
+            groups.entry((t.layer, t.net, (t.w * 1e6).round() as i64)).or_default().push(i);
+        }
+    }
+    let mut dead = vec![false; b.tracks.len()];
+    let mut merged = 0;
+    for mut idx in groups.into_values().filter(|g| g.len() >= 2) {
+        // Left to right, so a track is only compared with those that can reach it;
+        // one that grows leftwards upsets the order, so go round until nothing joins.
+        loop {
+            let mut changed = false;
+            let (lo, hi) = (|t: &Track| t.a.x.min(t.b.x), |t: &Track| t.a.x.max(t.b.x));
+            idx.sort_by(|&p, &q| lo(&b.tracks[p]).total_cmp(&lo(&b.tracks[q])));
+            for ai in 0..idx.len() {
+                let i = idx[ai];
+                if dead[i] {
+                    continue;
+                }
+                for bi in ai + 1..idx.len() {
+                    let j = idx[bi];
+                    if dead[j] {
+                        continue;
+                    }
+                    if lo(&b.tracks[j]) > hi(&b.tracks[i]) + 1e-4 {
+                        break;
+                    }
+                    let Some((a, e)) = overlap_union(&b.tracks[i], &b.tracks[j]) else { continue };
+                    let (keep, gone) = if prefer.contains(&b.tracks[j].id) && !prefer.contains(&b.tracks[i].id) { (j, i) } else { (i, j) };
+                    b.tracks[keep].a = a;
+                    b.tracks[keep].b = e;
+                    dead[gone] = true;
+                    merged += 1;
+                    changed = true;
+                    if gone == i {
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    if merged > 0 {
+        let mut keep = dead.into_iter().map(|d| !d);
+        b.tracks.retain(|_| keep.next().unwrap_or(true));
+    }
+    merged
+}
+
+/// Tidies tracks after a move or a route: those on top of one another become
+/// one, and straight runs in pieces join up.
+pub(crate) fn tidy_tracks(b: &mut Board, prefer: &std::collections::HashSet<u32>) {
+    merge_overlapping(b, prefer);
+    merge_straight(b);
 }
 
 /// What `merge_straight` was before it used an index: the same joins, found by
@@ -1947,25 +2360,34 @@ pub(crate) fn merge_straight_slow(b: &mut Board) {
                     continue;
                 }
                 let (t, u) = (&b.tracks[i], &b.tracks[j]);
-                if t.mid.is_some() || u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 || !t.b.same(u.a) {
+                if t.mid.is_some() || u.mid.is_some() || t.layer != u.layer || t.net != u.net || (t.w - u.w).abs() > 1e-9 {
                     continue;
                 }
-                let (d1, d2) = (t.b.sub(t.a), u.b.sub(u.a));
-                if d1.cross(d2).abs() > 1e-9 * d1.len() * d2.len() || d1.dot(d2) <= 0.0 {
-                    continue;
+                // Each end of one against each end of the other.
+                for at_b in [true, false] {
+                    let (mid, far_t) = if at_b { (t.b, t.a) } else { (t.a, t.b) };
+                    if !(u.a.same(mid) || u.b.same(mid)) {
+                        continue;
+                    }
+                    let far_u = if u.a.same(mid) { u.b } else { u.a };
+                    if !carries_on(far_t, mid, far_u) {
+                        continue;
+                    }
+                    // Something else joining in the middle keeps the corner.
+                    let others = b.tracks.iter().filter(|o| o.a.same(mid) || o.b.same(mid)).count()
+                        + b.vias.iter().filter(|v| v.at.same(mid)).count();
+                    if others != 2 {
+                        continue;
+                    }
+                    if at_b {
+                        b.tracks[i].b = far_u;
+                    } else {
+                        b.tracks[i].a = far_u;
+                    }
+                    b.tracks.remove(j);
+                    joined = true;
+                    break 'outer;
                 }
-                // Something else joining in the middle keeps the corner.
-                let mid = t.b;
-                let others = b.tracks.iter().filter(|o| o.a.same(mid) || o.b.same(mid)).count()
-                    + b.vias.iter().filter(|v| v.at.same(mid)).count();
-                if others != 2 {
-                    continue;
-                }
-                let end = u.b;
-                b.tracks[i].b = end;
-                b.tracks.remove(j);
-                joined = true;
-                break 'outer;
             }
         }
         if !joined {
@@ -2006,12 +2428,19 @@ impl eframe::App for App {
         Panel::top("menus").resizable(false).frame(top_frame).show(ui, |ui| self.menu_bar(ui));
         let tab_frame = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 4));
         Panel::top("doc_tabs").resizable(false).frame(tab_frame).show(ui, |ui| self.tab_bar(ui));
+        // A closed 3D tab lets go of its pictures, from inside a draw so the card's context is current.
+        if self.gpu3d_release && self.mode() != Mode::View3d {
+            let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1.0, 1.0));
+            ui.painter().add(crate::ui::gpu3d::release(rect, self.gpu3d.clone()));
+            self.gpu3d_release = false;
+            ctx.request_repaint();
+        }
         if self.mode() != Mode::Board {
             let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
             Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.library_status(ui));
             if self.show_left && width >= 600.0 {
                 let frame = egui::Frame::new().fill(theme::PANEL);
-                Panel::left("editor_left").resizable(true).default_size(270.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.editor_left_dock(ui));
+                Panel::left("editor_left").resizable(true).default_size(190.0).size_range(160.0..=310.0).frame(frame).show(ui, |ui| self.editor_left_dock(ui));
             }
             self.show_editor(ui);
             self.shortcuts_window(&ctx);
@@ -2024,16 +2453,19 @@ impl eframe::App for App {
         // The panels either side, each with its tabs along the bottom.
         if self.show_left && width >= 600.0 {
             let frame = egui::Frame::new().fill(theme::PANEL);
-            Panel::left("left").resizable(true).default_size(280.0).size_range(230.0..=440.0).frame(frame).show(ui, |ui| self.left_dock(ui));
+            Panel::left("left").resizable(true).default_size(196.0).size_range(160.0..=310.0).frame(frame).show(ui, |ui| self.left_dock(ui));
         }
         if self.show_right && width >= 900.0 {
             let frame = egui::Frame::new().fill(theme::PANEL);
-            Panel::right("right").resizable(true).default_size(310.0).size_range(250.0..=480.0).frame(frame).show(ui, |ui| self.right_dock(ui));
+            Panel::right("right").resizable(true).default_size(217.0).size_range(175.0..=336.0).frame(frame).show(ui, |ui| self.right_dock(ui));
         }
         let status_frame = egui::Frame::new().fill(theme::WELL).inner_margin(egui::Margin::symmetric(12, 5));
         Panel::bottom("status").resizable(false).frame(status_frame).show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui));
         self.shortcuts_window(&ctx);
+        self.classes_window(&ctx);
+        self.rules_window(&ctx);
+        self.save_as_window(&ctx);
         self.keep_layout();
         // A change made this frame shows its effect straight away.
         if self.copper_rev != self.rev || self.checked_rev != self.rev {
@@ -2045,6 +2477,17 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_copy_is_named_so_it_cant_stomp_the_original() {
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay"), "EZDisplay_CSMITH.PcbDoc");
+        assert_eq!(BoardFormat::Kicad.file_name("pic_programmer"), "pic_programmer_CSMITH.kicad_pcb");
+        assert_eq!(BoardFormat::Coppersmith.file_name("board"), "board_CSMITH.cspcb");
+        assert_eq!(BoardFormat::Pads.file_name("ClaySight_MK1"), "ClaySight_MK1_CSMITH.asc");
+        // Not twice.
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay_CSMITH"), "EZDisplay_CSMITH.PcbDoc");
+        assert_eq!(BoardFormat::Altium.file_name("EZDisplay_csmith"), "EZDisplay_csmith.PcbDoc");
+    }
 
     #[test]
     fn closing_a_tab_keeps_the_right_one_on_show() {
@@ -2117,7 +2560,16 @@ mod tests {
     /// A board's tracks in a form that doesn't depend on their numbering or order.
     fn shape(b: &Board) -> Vec<(u8, u32, i64, [i64; 4])> {
         let k = |v: f64| (v * 10_000.0).round() as i64;
-        let mut out: Vec<_> = b.tracks.iter().map(|t| (t.layer, t.net, k(t.w), [k(t.a.x), k(t.a.y), k(t.b.x), k(t.b.y)])).collect();
+        // Whichever way round a track is laid, it's the same track.
+        let mut out: Vec<_> = b
+            .tracks
+            .iter()
+            .map(|t| {
+                let (a, e) = ((k(t.a.x), k(t.a.y)), (k(t.b.x), k(t.b.y)));
+                let (a, e) = if a <= e { (a, e) } else { (e, a) };
+                (t.layer, t.net, k(t.w), [a.0, a.1, e.0, e.1])
+            })
+            .collect();
         out.sort();
         out
     }
@@ -2147,7 +2599,7 @@ mod tests {
                     // A different width or net: the run stops being one.
                     0 => t.w = 0.3,
                     1 => t.net = nets[1 - (net == nets[1]) as usize],
-                    // Laid the other way round: it doesn't carry on.
+                    // Laid the other way round: it still carries on, meeting the last head on.
                     2 => std::mem::swap(&mut t.a, &mut t.b),
                     // Something joined in the middle.
                     3 => {
@@ -2225,6 +2677,115 @@ mod tests {
         let pad2 = f.pad_center(1);
         assert!(b.tracks.iter().any(|t| t.net == led && (t.a.same(pad2) || t.b.same(pad2))), "{pad2:?}");
         assert!(b.tracks.iter().filter(|t| t.net == led).all(|t| crate::pcb::slide::octilinear(t.b.sub(t.a))));
+    }
+
+    fn track(id: u32, a: P, e: P, w: f64, net: u32) -> Track {
+        Track { mid: None, id, a, b: e, w, layer: TOP, net }
+    }
+
+    #[test]
+    fn tracks_lying_on_one_another_become_one() {
+        let none = std::collections::HashSet::new();
+        // Overlapping, one inside another, and a third that carries on past them.
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1),
+            track(2, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1),
+            track(3, p(2.0, 0.0), p(3.0, 0.0), 0.25, 1),
+            track(4, p(9.0, 0.0), p(15.0, 0.0), 0.25, 1),
+        ];
+        assert_eq!(merge_overlapping(&mut b, &none), 3);
+        assert_eq!(b.tracks.len(), 1);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(15.0, 0.0)), "{:?}", b.tracks[0]);
+        // Slanted ones, whichever way they run.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(4.0, 4.0), 0.25, 1), track(2, p(6.0, 6.0), p(2.0, 2.0), 0.25, 1)];
+        assert_eq!(merge_overlapping(&mut b, &none), 1);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(6.0, 6.0)));
+    }
+
+    #[test]
+    fn tracks_that_differ_or_only_touch_are_left_alone() {
+        let none = std::collections::HashSet::new();
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1),
+            track(2, p(4.0, 0.0), p(10.0, 0.0), 0.30, 1),
+            track(3, p(4.0, 0.0), p(10.0, 0.0), 0.25, 2),
+            track(4, p(4.0, 0.1), p(10.0, 0.1), 0.25, 1),
+            track(5, p(4.0, 0.0), p(8.0, 1.0), 0.25, 1),
+            track(6, p(6.0, 0.0), p(9.0, 0.0), 0.25, 1),
+        ];
+        b.tracks.push(Track { layer: BOTTOM, ..track(7, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1) });
+        assert_eq!(merge_overlapping(&mut b, &none), 0, "other width, net, layer, a gap sideways, another angle, and one only touching");
+        assert_eq!(b.tracks.len(), 7);
+        // The one that only touches is joined by the usual end-to-end merge.
+        tidy_tracks(&mut b, &none);
+        assert_eq!(b.tracks.len(), 6);
+    }
+
+    #[test]
+    fn what_is_picked_keeps_its_number_when_it_merges() {
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(6.0, 0.0), 0.25, 1), track(2, p(4.0, 0.0), p(10.0, 0.0), 0.25, 1)];
+        let picked: std::collections::HashSet<u32> = [2].into_iter().collect();
+        merge_overlapping(&mut b, &picked);
+        assert_eq!(b.tracks.len(), 1);
+        assert_eq!(b.tracks[0].id, 2);
+        assert!(b.tracks[0].a.same(p(0.0, 0.0)) && b.tracks[0].b.same(p(10.0, 0.0)));
+    }
+
+    #[test]
+    fn tracks_meeting_head_on_become_one_whichever_way_they_are_laid() {
+        // Both running towards the joint, as a slide leaves them when the track between vanishes.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, 1), track(2, p(9.0, 0.0), p(5.0, 0.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 1);
+        let t = &b.tracks[0];
+        let ends = [t.a, t.b];
+        assert!(ends.iter().any(|q| q.same(p(0.0, 0.0))) && ends.iter().any(|q| q.same(p(9.0, 0.0))), "{t:?}");
+        // Both running away from the joint.
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(5.0, 0.0), p(0.0, 0.0), 0.25, 1), track(2, p(5.0, 0.0), p(9.0, 3.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 2, "a corner isn't a run");
+        let mut b = Board::default();
+        b.tracks = vec![track(1, p(5.0, 0.0), p(0.0, 0.0), 0.25, 1), track(2, p(5.0, 0.0), p(9.0, 0.0), 0.25, 1)];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 1);
+        // A branch at the joint keeps it, as before.
+        let mut b = Board::default();
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, 1),
+            track(2, p(9.0, 0.0), p(5.0, 0.0), 0.25, 1),
+            track(3, p(5.0, 0.0), p(5.0, 4.0), 0.25, 1),
+        ];
+        merge_straight(&mut b);
+        assert_eq!(b.tracks.len(), 3);
+    }
+
+    #[test]
+    fn a_slid_track_that_vanishes_leaves_one_run() {
+        // X ─ A ┐        sliding the middle track along its neighbours' line, so it
+        //       │ T      shrinks to nothing, leaves X and Y meeting head on.
+        //   Y ─ B ┘
+        let mut b = Board::default();
+        let n = b.net("N");
+        // X runs right to the joint, the track between has shrunk to a point, and Y
+        // runs left to it from the far side.
+        b.tracks = vec![
+            track(1, p(0.0, 0.0), p(5.0, 0.0), 0.25, n),
+            track(2, p(5.0, 0.0), p(5.0, 0.0), 0.25, n),
+            track(3, p(10.0, 0.0), p(5.0, 0.0), 0.25, n),
+        ];
+        let dots = std::collections::HashSet::new();
+        crate::pcb::slide::tidy(&mut b, &dots);
+        assert_eq!(b.tracks.len(), 2, "the vanished track is taken out");
+        tidy_tracks(&mut b, &dots);
+        assert_eq!(b.tracks.len(), 1, "{:?}", b.tracks);
+        let t = &b.tracks[0];
+        assert!([t.a, t.b].iter().any(|q| q.same(p(0.0, 0.0))) && [t.a, t.b].iter().any(|q| q.same(p(10.0, 0.0))));
     }
 
     #[test]

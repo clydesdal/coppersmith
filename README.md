@@ -11,6 +11,16 @@ to it.
 
 `coppersmith --help` lists every option.
 
+## Example board
+
+`examples/p4dev` is a real KiCad project to try it on: a 4-layer, 100 × 70 mm
+ESP32-P4 + ESP32-C5 dev board with 158 parts, five schematic sheets and its
+own footprints and symbols.
+
+    coppersmith examples/p4dev/p4dev.kicad_pcb
+
+![The P4DEV example board in Coppersmith](shots/p4dev.png)
+
 ## Working on a board
 
 | Tool | Key | What it does |
@@ -38,6 +48,14 @@ Select when something is held back. Picking something on the board brings
 Properties forward. Drag a panel's edge to size it; hide the left or right panel
 with the arrows at the top right, **View ▸ Left panel / Right panel**, or
 Ctrl+[ and Ctrl+].
+
+At the top of the *Layers* list are quick choices for the copper: **All**, **Top**,
+**Bottom** and **Planes** (every inner plane), and on a second row one chip for
+each inner layer that carries signals (**In 2**, **In 5**…), which shows just that
+layer and works on it. Which inner layers are planes and which are for signals is
+worked out from the board whenever it changes: a layer with a plane pour, or a
+pour over most of the board and next to no tracks, is a plane; anything else
+inside is a signal layer. Silkscreen and the other layers keep as you set them.
 
 The tools, the layer, track width, grid and view buttons float over the board.
 **View ▸ Ribbon of controls** (Ctrl+Shift+R) puts them in a strip under the menus
@@ -257,8 +275,35 @@ G grid, U units, Ctrl+Z / Ctrl+Shift+Z undo and redo, Ctrl+S save (⌘ on a Mac 
 Ctrl+O open, Ctrl+N new, Ctrl+E write Gerbers. Scroll or pinch to zoom,
 right- or middle-drag to pan.
 
+Zoomed in, each net's name is written along its tracks on the working layer,
+turned to follow them and kept the right way up, on every straight track long
+enough to hold it (the part on the screen, for a long one). View ▸ *Net names on
+tracks* turns it off.
+
 The rule check runs all the time: problems are marked on the board and listed
 on the right; click one to go to it.
+
+**Design rules.** *Rules ▸ Design rules…* opens a window with every rule
+Altium's files use (36 kinds, in Altium's groups: electrical, routing, high
+speed, manufacturing, placement, planes and pours, mask, surface mount, test
+points, supplies), each with what it asks and its controls. A rule is
+*Checked* (a switch turns its check on and off, and the number it asks for is
+there to change), *Applied* (used when pours and Gerbers are made) or *Shown
+only* (read from the file and kept, not checked yet), and what the file says of
+each (its scope, its settings) is listed under it. The checks: clearance and
+short circuit, un-routed nets, track width (least and most), the width a net
+class asks of each layer, hole sizes (least and most), annular ring, hole to
+hole, board outline, component clearance (overlap, and a gap), keep-outs,
+matched lengths within a pair or across a class, net length, acute angles, and
+un-poured polygons. From an Altium file a rule it doesn't have or has switched
+off starts off, as in Altium; the via style rule (for through vias only, which a
+board here can't tell from blind ones), hole to hole, acute angle and length
+start off on a new board.
+
+Click a marker on the board, or a problem in the list: the Checks panel shows
+the problem, the **rule it breaks** and that rule's controls (for a class
+width or matched-length problem, the rules of that net's class), so it can be
+changed on the spot, and one undo takes it back.
 
 ## Files
 
@@ -373,19 +418,43 @@ and *New schematic* add tabs.
 ### The schematic editor
 
 **+ ▸ New schematic** (or `coppersmith --schematic FILE`) opens a sheet to
-draw on. Symbols come from the list on the left: a few built in (resistor,
-capacitor, inductor, diode, an 8-pin chip), and any Altium `.SchLib`/`.IntLib`
-you add with **+** (copied into the data folder's `symbols` folder so they stay),
-or open in the library editor when you switch.
+draw on. The left panel (the *Symbols* tab) has two pages, and the tool you pick
+brings its page forward:
+
+- **Markers**, for **Net label** and **Power**: the standard things that aren't
+  parts, each drawn as it will look on the sheet. *Power and ground:* GND, AGND
+  (signal ground), PE (earth), VCC, +3V3, +5V, +12V, −12V, VDD, VBAT, VIN, VAC,
+  in Altium's styles (power ground, signal ground, earth, bar, circle, arrow,
+  wave); a name typed over takes the look its name usually has. *Nets:* a net
+  label, a bus (`NAME[0..7]`), and a **differential pair**, which puts down
+  `NAME_P` and `NAME_N` a grid apart in one click (the number counts up for the
+  next). *Ports:* input, output, bidirectional, unspecified. A picked supply or
+  port can change style or direction in the card on the right.
+- **Parts**, for **Part**: the symbols of the **project's libraries**, the
+  `.SchLib` and `.IntLib` files its project lists (read once and kept; the ones
+  open in a tab stand in with their edits). Choose one library or all, search,
+  and see the symbol under the pointer drawn before you place it. **+** opens
+  another library for that sheet. Nothing is built in or kept in a data folder:
+  with no project, the list is empty until you open one.
 
 - **Part:** pick a symbol, click to put it down, again for more; R turns it, X
   mirrors it, Esc stops. Designators count up (R1, R2…).
 - **Wire:** click the corners; it draws in right angles (Space picks which way
   the corner bends) and ends itself when it lands on a pin or another wire; Esc
   ends it anywhere. Junction dots appear where a wire meets another partway.
-- **Net label** and **Power:** type a name, click a pin or wire. A label with a
-  number at the end counts up (D0, D1…); a power port points away from its pin
-  and joins every port of the same name.
+- **Net label** and **Power:** pick a marker, type a name, click a pin or wire. A
+  label with a number at the end counts up (D0, D1…); a power port points away
+  from its pin (a ground hangs down when it's on its own) and joins every port
+  of the same name.
+- **Looks:** everything on the sheet is sized in millimetres (strokes, pin
+  numbers and names, supply and port symbols), so a symbol keeps its proportions
+  at any zoom. Altium's "show name" and "show designator" flags on pins are kept,
+  so a resistor's pins aren't labelled inside its body.
+- **The page:** the sheet is drawn as a sheet of paper on a darker desk, with its
+  border in from the edge and the grid on the paper. The paper size (A4, A3, A2,
+  A1, A0, A, B, C, D, E, or a custom size read from a SchDoc) is in the *Sheet*
+  card on the right when nothing is picked; it's read from and written to the
+  SchDoc's sheet record, and the view fits to the page.
 - **Select:** click or drag. Moving a part takes the wires on its pins with it,
   keeping them square. The right panel has the designator, value and footprint
   of what's picked (the symbol's footprints are offered), then the **checks**
@@ -401,6 +470,25 @@ tests; **they haven't been opened in Altium or Circuit Studio.** Not yet: buses,
 sheet entries and hierarchy, a sheet border and title block, text notes,
 multi-select and copy/paste, moving the designator and value text, and
 putting a schematic's changes onto the board (Update PCB).
+
+### The 3D view
+
+**View ▸ 3D view** (or **+ ▸ 3D view of the board**, or `coppersmith BOARD --3d`)
+opens the board as a solid in a **3D** tab: green solder mask over the copper,
+bare gold on the pads, white silkscreen, drilled and plated holes, the board's
+own outline. Drag to turn it, right-drag or middle-drag to move, scroll or pinch
+to zoom. The bar along the bottom has *Top*, *Bottom* and *Angle* views, *Fit*, a
+switch for each of copper, mask and silk, six mask colours (green is the first)
+and the board's thickness (1.6 mm to start). The picture is made from the board
+as it is now, the way the Gerbers are (pads, tracks, vias, pours and fills for
+copper; openings over the pads for the mask; the drawing and names for the
+silkscreen), and is made again when the board changes while the tab is on show.
+It is Copperview's 3D view (the same lighting and way of putting the layers on a
+mesh of the board), taking its layers from Coppersmith's board instead of from
+Gerber files.
+
+Not yet: part bodies (the 3D view shows the board, not the components on it),
+inner copper layers, and saving the picture.
 
 ### Altium and Circuit Studio boards and schematics
 
@@ -446,6 +534,105 @@ summarises a board (with its rules), a schematic sheet (parts, wires,
 labels, ports), or a whole project: every sheet's netlist joined up and
 checked net by net against the board, listing any pin the two disagree on.
 
+### KiCad boards, sheets and libraries
+
+**Open** (and `coppersmith FILE`) also takes KiCad 6 to 10's files:
+
+- **`.kicad_pcb` boards**, with the rules from the `.kicad_pro` beside them
+  (clearance, track width, via sizes, hole and ring sizes, edge clearance,
+  hole to hole, and the net classes with the nets they hold, by name or
+  pattern). Parts come in with their pads and silkscreen, courtyard and
+  assembly drawing, a part underneath mirrored as KiCad has it; tracks (arcs
+  included), vias, zones (poured again here, with their clearance, thermal gap
+  and spoke width, island removal and fill order), keep-out zones with what each
+  keeps out, and the edge from `Edge.Cuts`, however many lines and arcs it's
+  drawn in. A pad on the far side of its part (a PCI edge connector's) makes a
+  second part of the same name on that side. The board opens unsaved.
+- **`.kicad_sch` sheets**: parts (many-unit symbols too) with their value and
+  footprint, wires, net labels, global and hierarchical labels as ports,
+  supplies as power ports in the right style, on a page of the sheet's own
+  size. The sheet opens unsaved.
+- **`.kicad_mod` footprints** (one, or a `.pretty` folder of them) and
+  **`.kicad_sym` symbol libraries**, in the library editor and the Parts list.
+
+What comes in is checked against KiCad's own demo boards: they read with every
+part, track, via and zone, **nothing left unrouted, and no short circuits or
+clearance errors**, and the PIC programmer's sheet comes in with every pin joined
+but the six it flags no-connect. A gap is allowed to come out a micron short on a
+KiCad board, as KiCad's own check allows. Left out, and said in the status bar:
+text and drawings on the board itself, dimensions, cut-outs in the edge, hatched
+zones (poured solid), trapezoid and custom-shaped pads (drawn as rectangles or
+their anchor), blind and buried vias (made through vias), bus members and
+hierarchical sheets on a sheet (a sub-sheet's own file opens by itself), and
+alternate (De Morgan) symbol bodies. Older KiCad 5 files are only partly read.
+
+**Out to Altium.** Footprints write as a `.PcbLib`, symbols as a `.SchLib` and
+sheets as a `.SchDoc`; a board saves as a `.PcbDoc` (see Save as below, and
+the Gerbers and drill files are still there too). Each of these is read back by
+Coppersmith's own Altium reader and compared, but **none has been opened in
+Altium itself**.
+
+**Save as another format.** **File ▸ Save as…** asks for the format first:
+Coppersmith's own `.cspcb` (everything kept), a KiCad 8-style `.kicad_pcb` with
+the rules and net classes in a `.kicad_pro` beside it (an existing one is left
+alone), or an Altium `.PcbDoc`. The name offered ends in `_CSMITH`, so saving a
+board that came from another tool doesn't write over the original. The window lists what the chosen format would lose or change
+before you pick a place. Exporting is a copy: the open board keeps its own
+file and unsaved state. What is listed: pours come unfilled (press B in
+KiCad), special clearances between kinds of copper, per-layer widths, matched
+lengths, differential pairs and the other Altium rule kinds aren't carried,
+rule on/off isn't, tracks on layers the board lacks, stack-up and outline.
+Tracks, vias and pads translate exactly (checked on an Altium board: the same
+connections are open before and after), and KiCad's demo boards survive the
+trip. **The written file has been read back by Coppersmith, not opened in
+KiCad itself.**
+
+For an Altium `.PcbDoc` the same applies: the window lists the losses (pours
+come as outlines to repour in Altium, power planes become ordinary pours, only
+the general design rules and the class rules are written, parts carry no link to
+a schematic or library, only designators are written as text, the layer stack
+has default materials). Pads, tracks, arcs, vias, regions, keepouts, nets,
+classes and pairs are written, and an Altium board's copper reads back exactly.
+Its pad, via and text records start from records copied out of a real board.
+**It has been read back by Coppersmith, and its record sizes match a real
+board's, but it has not been opened in Altium, which may refuse or repair it.**
+
+### PADS boards
+
+**Open** (and `coppersmith FILE`) reads PADS Layout and PowerPCB boards in the
+ASCII format (`.asc`, from *File ▸ Export* in PADS; the first line says
+`!PADS-POWERPCB-…`, which is how it is told from LTspice's `.asc`). Versions 5
+to 10 and the year-numbered ones are read, in the BASIC units PADS writes (and
+mils, metric and inches). What comes in: the outline, parts with their pads and
+silkscreen (a part underneath is turned and then mirrored, as PADS does), nets,
+tracks, vias, pours (poured again here), free copper and keepouts, the layer
+table, and the default clearance and width rules. PADS repeats shared stretches
+of a track once for each connection it is in; they come in once.
+
+Left out, and said in the status bar: free text, dimensions, board drawing that
+isn't on a part, board cutouts, copper drawn in a footprint, blind and buried
+vias (taken as through), slots (taken as round), and a pad that is a different
+shape on the inner layers (it takes its outer shape on every layer: Coppersmith
+has one shape a pad). The rules that are for particular nets are not read.
+
+**Save as ▸ PADS ASCII board (.asc)** writes version 9.5. Every net is written
+as pin-to-pin connections: copper that ends in the open is carried to the
+nearest pin by an unrouted leg, as PADS does for a connection only partly
+routed, so no copper is lost on a net with two pins or more (copper on a net of
+fewer can't be written, and is counted). The window lists the rest: pours come
+as outlines for PADS to pour, parts have one gate and no schematic link, only
+the clearance table and widths are written as rules, arcs become short straight
+tracks.
+
+**Checked against six real boards** from KiCad's test set (2 to 8 copper
+layers, versions 5 to 10, an EasyEDA export, one with every net unrouted): each
+reads with the connections the file has, and writes and reads back with the same
+parts, pads, nets, vias, open connections and rule findings. An Altium board
+(EZDisplay) written as PADS has the same 675 connections open before and after.
+**The file has not been opened in PADS itself**, and the format was worked out
+from real files and KiCad's importer, not from Mentor's own description (see
+`docs/PADS-FORMAT.md` for what it says and how sure each line is).
+
 ## Building
 
 Coppersmith is plain Rust (1.88 or newer) and builds the same way on Linux,
@@ -459,8 +646,8 @@ What each computer needs besides Rust:
 | | Needs | Package it |
 |---|---|---|
 | Linux | a C linker; on Debian/Ubuntu also `libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev` | `sh packaging/linux/install.sh` adds it to ~/Applications and the launcher |
-| macOS | Xcode command line tools (`xcode-select --install`) | `sh packaging/macos/make-app.sh` makes `target/Coppersmith.app` (`--universal` for Apple Silicon + Intel) |
-| Windows | Visual Studio Build Tools, "Desktop development with C++" | `packaging\windows\make-zip.ps1` makes a zip with `coppersmith.exe` |
+| macOS | Xcode command line tools (`xcode-select --install`) | `sh packaging/macos/make-app.sh` makes `target/Coppersmith.app` (`--universal` for Apple Silicon + Intel); `make-dmg.sh` wraps it in `target/coppersmith-VERSION.dmg` to drag into Applications. Not signed yet, so the first open is right-click > Open |
+| Windows | Visual Studio Build Tools, "Desktop development with C++" | `packaging\windows\make-installer.ps1` makes `target\coppersmith-VERSION-setup.exe`, which adds it to the Start menu and opens .cspcb boards (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`); `make-zip.ps1` makes a zip with just `coppersmith.exe` |
 
 `.github/workflows/build.yml` builds, tests and packages all three on GitHub.
 
@@ -479,6 +666,8 @@ What each computer needs besides Rust:
         slide.rs       moving tracks without losing their 45° corners
         gerber.rs      Gerber and Excellon output
         altium/        reading Altium / Circuit Studio libraries, boards, sheets, projects
+        kicad/         reading and writing KiCad boards, sheets, libraries
+        pads/          reading and writing PADS ASCII boards
         font.rs        the silkscreen stroke font
         sample.rs      the 555 sample board
       ui/            the window

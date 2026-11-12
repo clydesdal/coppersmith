@@ -17,7 +17,7 @@ use super::schlib::{Drawing, Pin, PinKind, Symbol, binary_pin, text_pin};
 use super::write::{Out, Rec, drawing_rec, param_text};
 use super::{Reader, open, params, stream};
 use crate::pcb::geom::*;
-use crate::pcb::schematic::{Label, LabelKind, Placed, Schematic, Wire, transform, transform_angle};
+use crate::pcb::schematic::{Label, LabelKind, Paper, Placed, PortIo, PowerStyle, Schematic, Wire, transform, transform_angle};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -259,11 +259,22 @@ pub fn read(bytes: &[u8], name: &str) -> Result<(Schematic, Vec<String>), String
                     let id = out.new_id();
                     // A power port's ORIENTATION: 0 right, 1 up, 2 left, 3 down; ours count from up.
                     let turns = if kind == LabelKind::Power { (p.get("ORIENTATION").and_then(|v| v.parse::<u8>().ok()).unwrap_or(1).wrapping_sub(1)) & 3 } else { 0 };
-                    out.labels.push(Label { id, at: point(p, "LOCATION.X", "LOCATION.Y"), text: t.clone(), kind, turns });
+                    let style = if kind == LabelKind::Power { PowerStyle::from_altium(p.get("STYLE").and_then(|v| v.parse().ok()).unwrap_or(2)) } else { PowerStyle::default() };
+                    let io = if kind == LabelKind::Port { PortIo::from_altium(p.get("IOTYPE").and_then(|v| v.parse().ok()).unwrap_or(3)) } else { PortIo::default() };
+                    out.labels.push(Label { id, at: point(p, "LOCATION.X", "LOCATION.Y"), text: t.clone(), kind, turns, style, io });
                 }
             }
-            // Parts' own records, the sheet, junctions (worked out), notes and such.
-            1 | 29 | 31 | 44 | 46 | 47 | 48 => {}
+            // The sheet: its paper.
+            31 => {
+                let custom = p.get("USECUSTOMSHEET").is_some_and(|v| v == "T");
+                out.paper = if custom && p.contains_key("CUSTOMX") {
+                    Paper::Custom(coord(p, "CUSTOMX").max(10.0), coord(p, "CUSTOMY").max(10.0))
+                } else {
+                    Paper::from_style(p.get("SHEETSTYLE").and_then(|v| v.parse().ok()).unwrap_or(0))
+                };
+            }
+            // Parts' own records, junctions (worked out), notes and such.
+            1 | 29 | 44 | 46 | 47 | 48 => {}
             _ => skipped += 1,
         }
     }
@@ -294,7 +305,10 @@ pub fn write(s: &Schematic) -> Result<Vec<u8>, String> {
     let err = |e: std::io::Error| format!("couldn't write the sheet: {e}");
     let mut recs: Vec<Vec<u8>> = Vec::new();
     let mut sheet = Rec::new(31);
-    sheet.set("FONTIDCOUNT", 1).set("SIZE1", 10).set("FONTNAME1", "Times New Roman").set("USEMBCS", "T").set("ISBOC", "T").set("SHEETSTYLE", 0).set("SNAPGRIDON", "T").set("SNAPGRIDSIZE", 10).set("VISIBLEGRIDON", "T").set("VISIBLEGRIDSIZE", 10);
+    sheet.set("FONTIDCOUNT", 1).set("SIZE1", 10).set("FONTNAME1", "Times New Roman").set("USEMBCS", "T").set("ISBOC", "T").set("SHEETSTYLE", s.paper.style()).set("SNAPGRIDON", "T").set("SNAPGRIDSIZE", 10).set("VISIBLEGRIDON", "T").set("VISIBLEGRIDSIZE", 10);
+    if let Paper::Custom(w, h) = s.paper {
+        sheet.set("USECUSTOMSHEET", "T").mm("CUSTOMX", w).mm("CUSTOMY", h);
+    }
     recs.push(sheet.bytes());
     let mut add = |r: &Rec| -> usize {
         recs.push(r.bytes());
@@ -365,13 +379,12 @@ pub fn write(s: &Schematic) -> Result<Vec<u8>, String> {
             }
             LabelKind::Power => {
                 r = Rec::new(17);
-                let ground = l.text.to_uppercase().contains("GND") || l.text.to_uppercase().starts_with("VSS");
-                r.set("TEXT", &l.text).set("STYLE", if ground { 4 } else { 2 }).set("SHOWNETNAME", "T").set("ORIENTATION", (l.turns + 1) & 3);
+                r.set("TEXT", &l.text).set("STYLE", l.style.altium()).set("SHOWNETNAME", "T").set("ORIENTATION", (l.turns + 1) & 3);
             }
             LabelKind::Port => {
                 r = Rec::new(18);
                 let width = (l.text.chars().count() as f64 * 1.0 + 2.0).ceil();
-                r.set("NAME", &l.text).set("STYLE", 3).set("IOTYPE", 3).set("ALIGNMENT", 2).mm("WIDTH", width * SCH * 10.0 / 10.0);
+                r.set("NAME", &l.text).set("STYLE", 3).set("IOTYPE", l.io.altium()).set("ALIGNMENT", 2).mm("WIDTH", width * SCH * 10.0 / 10.0);
             }
         }
         r.at("LOCATION.X", "LOCATION.Y", l.at);
@@ -398,12 +411,8 @@ mod tests {
     use super::*;
     use crate::pcb::altium::{schdoc, schlib};
 
-    fn data(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name)
-    }
-
     fn symbol() -> Symbol {
-        let pin = |part, n: &str, name: &str, x: f64, y: f64, a: f64| Pin { part, number: n.into(), name: name.into(), at: p(x, y), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false };
+        let pin = |part, n: &str, name: &str, x: f64, y: f64, a: f64| Pin { part, number: n.into(), name: name.into(), at: p(x, y), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
         Symbol {
             name: "OPAMP".into(),
             description: "Dual op amp".into(),
@@ -431,6 +440,7 @@ mod tests {
         s.part_mut(b).unwrap().mirror = true;
         s.part_mut(b).unwrap().part = 2;
         let tip = |s: &Schematic, id: u32, n: &str| s.part(id).unwrap().pins().into_iter().find(|p| p.number == n).unwrap().tip;
+        s.paper = Paper::B;
         let (t1, t2) = (tip(&s, a, "1"), tip(&s, b, "5"));
         s.add_wire(vec![t1, p(t1.x + 5.08, t1.y), p(t2.x, t1.y), t2]).unwrap();
         s.add_label(p(40.64, t1.y), "SIG", LabelKind::Net);
@@ -446,10 +456,48 @@ mod tests {
     }
 
     #[test]
+    fn a_power_ports_style_and_a_ports_direction_survive_a_write_and_read() {
+        use crate::pcb::schematic::{PortIo, PowerStyle};
+        let mut s = Schematic::default();
+        s.add_marker(p(10.16, 10.16), "PE", LabelKind::Power, PowerStyle::Earth, PortIo::default());
+        s.add_marker(p(20.32, 10.16), "VIN", LabelKind::Power, PowerStyle::Arrow, PortIo::default());
+        s.add_marker(p(30.48, 10.16), "+3V3", LabelKind::Power, PowerStyle::Circle, PortIo::default());
+        s.add_marker(p(10.16, 30.48), "CLK", LabelKind::Port, PowerStyle::default(), PortIo::Input);
+        s.add_marker(p(20.32, 30.48), "DATA", LabelKind::Port, PowerStyle::default(), PortIo::Output);
+        let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
+        let find = |name: &str| back.labels.iter().find(|l| l.text == name).unwrap_or_else(|| panic!("no {name}"));
+        assert_eq!(find("PE").style, PowerStyle::Earth);
+        assert_eq!(find("VIN").style, PowerStyle::Arrow);
+        assert_eq!(find("+3V3").style, PowerStyle::Circle);
+        assert_eq!(find("CLK").io, PortIo::Input);
+        assert_eq!(find("DATA").io, PortIo::Output);
+    }
+
+    #[test]
+    fn a_pins_hidden_name_and_number_stay_hidden_through_a_write_and_read() {
+        let mut sym = symbol();
+        sym.pins[0].name_shown = false;
+        sym.pins[1].number_shown = false;
+        let mut s = Schematic::default();
+        s.place(&sym, p(25.4, 25.4));
+        let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
+        let pins = back.parts[0].pins();
+        let one = pins.iter().find(|x| x.number == "1").unwrap();
+        assert!(!one.name_shown && one.number_shown, "pin 1 keeps its number but not its name");
+        let two = pins.iter().find(|x| x.name == sym.pins[1].name && x.number == sym.pins[1].number).unwrap();
+        assert!(two.name_shown && !two.number_shown, "its neighbour keeps its name but not its number");
+    }
+
+    #[test]
     fn a_sheet_written_reads_back_the_same_where_it_matters() {
         let s = sample();
         let (back, _) = read(&write(&s).unwrap(), "x").unwrap();
         assert_eq!(back.parts.len(), 2);
+        assert_eq!(back.paper, Paper::B, "the paper is kept");
+        let mut wide = s.clone();
+        wide.paper = Paper::Custom(300.0, 200.0);
+        let (custom, _) = read(&write(&wide).unwrap(), "c").unwrap();
+        assert!(matches!(custom.paper, Paper::Custom(w, h) if (w - 300.0).abs() < 0.01 && (h - 200.0).abs() < 0.01), "{:?}", custom.paper);
         for (a, b) in s.parts.iter().zip(&back.parts) {
             assert_eq!((&a.designator, &a.value, &a.footprint, a.turns, a.mirror, a.part), (&b.designator, &b.value, &b.footprint, b.turns, b.mirror, b.part));
             assert_eq!(a.at, b.at);
@@ -537,7 +585,7 @@ mod tests {
     #[test]
     fn the_real_sheets_read_with_the_same_nets_as_the_older_reader() {
         for f in ["Sheet1.SchDoc", "Sheet2.SchDoc"] {
-            let bytes = std::fs::read(data(f)).unwrap();
+            let bytes = std::fs::read(altium_file!(f)).unwrap();
             let old = schdoc::read(&bytes, f).unwrap();
             let (new, _) = read(&bytes, f).unwrap();
             assert_eq!(old.parts.len(), new.parts.len(), "{f}");
@@ -554,7 +602,7 @@ mod tests {
 
     #[test]
     fn a_real_sheet_survives_being_written_and_read_again() {
-        let bytes = std::fs::read(data("Sheet1.SchDoc")).unwrap();
+        let bytes = std::fs::read(altium_file!("Sheet1.SchDoc")).unwrap();
         let (first, _) = read(&bytes, "Sheet1").unwrap();
         let (again, _) = read(&write(&first).unwrap(), "Sheet1").unwrap();
         assert_eq!(first.parts.len(), again.parts.len());

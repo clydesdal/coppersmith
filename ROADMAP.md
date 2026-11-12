@@ -83,19 +83,25 @@ a schematic editor.
 - Symbol editor: pins (number, name, type), body graphics, multi-part symbols.
 - Components: symbol + footprint + pin map + parameters (value, manufacturer part number, supplier links) — the thing a schematic places.
 - Libraries as files you can keep in git; search across them; usage report ("which boards use this").
-- Import KiCad `.kicad_mod` and `.kicad_sym`, so the big public libraries are reachable on day one.
+- Import KiCad `.kicad_mod`, `.kicad_sym`, boards and sheets: done (see the README). Next: KiCad 5's older file format, per-pad layers (so a pad on the far side needn't be a second part), blind and buried vias, and following a sheet's sub-sheets.
+- Save as KiCad `.kicad_pcb`: done (the Save as window lists what is lost). Next: check it in real KiCad.
+- PADS ASCII boards, read and written: done (see the README). Next: open one in PADS; per-layer pad shapes; the PADS binary `.pcb`; net-specific rules; PADS library files (`.d`, `.p`).
+- Write a `.PcbDoc`: done (File ▸ Save as…). Next: open one in Altium and fix whatever it complains of; write pours filled, the stack-up, and the rest of the rules.
 
 ## 3. Schematic capture
 
 Started: a schematic editor (File ▸ Schematic editor…) places parts from
-symbol libraries (Altium SchLib/IntLib, plus a few built in), draws square
-wires with automatic junction dots, net labels (numbers count up) and power
-ports, drags parts with their wires following, turns and mirrors, and works out
+the symbol libraries of the open project (Altium SchLib/IntLib), draws square
+wires with automatic junction dots, net labels (numbers count up), power and
+ground symbols in Altium's styles, ports with a direction, bus names and
+differential pairs (`_P`/`_N` labels placed together), drags parts with their
+wires following, turns and mirrors, and works out
 the nets and a first set of checks as you go. Sheets open and save as Altium
 `.SchDoc` (the real test sheets read with the same nets as before) or as a
 Coppersmith `.cssch`. **Written SchDocs haven't been opened in Altium or Circuit
 Studio.** Next: sheet frame and title block, designator/value text you can move,
-buses and sheet entries, hierarchical sheets, annotation, a fuller ERC
+real bus wires and bus entries (a bus is only a name for now), sheet entries,
+hierarchical sheets, annotation, a fuller ERC
 (output-to-output, missing power), multi-select, copy and paste.
 
 - Sheets, symbols, wires, junctions, net labels, power ports, buses, hierarchical sheets.
@@ -123,7 +129,7 @@ poured again after every change, checked, drawn, written to Gerbers.
 
 ## 7. 3D
 
-- Reuse Copperview's 3D board view; part bodies; STEP out.
+- Started: a 3D tab of the bare board (green mask, gold pads, white silk, drilled holes), after Copperview's. Next: part bodies, STEP out, saving the picture.
 
 ## Under the hood, as boards grow
 

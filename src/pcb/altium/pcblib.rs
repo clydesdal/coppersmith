@@ -316,14 +316,14 @@ pub fn footprint(
 mod tests {
     use super::*;
 
-    fn lib(name: &str) -> Imported {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name);
-        read(&std::fs::read(path).unwrap(), name).unwrap()
+    fn lib(path: std::path::PathBuf) -> Imported {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        read(&std::fs::read(&path).unwrap(), &name).unwrap()
     }
 
     #[test]
     fn a_tssop_reads_true() {
-        let got = lib("fixturelib.PcbLib");
+        let got = lib(altium_file!("fixturelib.PcbLib"));
         let f = got.footprints.iter().find(|f| f.name == "tssop_sram").expect("tssop_sram");
         assert_eq!(f.pads.len(), 48);
         let p1 = f.pads.iter().find(|p| p.num == "1").unwrap();
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn every_footprint_in_the_big_library_reads() {
-        let got = lib("DAL_LIB.PcbLib");
+        let got = lib(altium_file!("DAL_LIB.PcbLib"));
         assert!(got.footprints.len() >= 50, "{}", got.footprints.len());
         for f in &got.footprints {
             for p in &f.pads {
@@ -464,7 +464,7 @@ mod picture {
     fn parts_board() {
         use crate::pcb::geom::p;
         let Some(out) = std::env::var_os("COPPERSMITH_PARTS") else { return };
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/DAL_INTLIB.IntLib");
+        let path = altium_file!("DAL_INTLIB.IntLib");
         let got = super::super::read(&path).unwrap();
         let mut b = crate::pcb::model::Board { name: "Altium parts".into(), ..Default::default() };
         let (mut x, mut y, mut row) = (0.0, 0.0, 0.0f64);

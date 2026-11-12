@@ -44,6 +44,9 @@ pub struct Pin {
     pub angle: f64,
     pub kind: PinKind,
     pub hidden: bool,
+    /// Whether Altium draws its name, and its number, beside it.
+    pub name_shown: bool,
+    pub number_shown: bool,
 }
 
 impl Pin {
@@ -227,7 +230,7 @@ pub(super) fn binary_pin(b: &[u8]) -> Result<Pin, String> {
     r.u32()?; // colour
     let name = r.pascal()?;
     let number = r.pascal()?;
-    Ok(Pin { part, number, name, at, length: nm(length), angle: (flags & 0x03) as f64 * 90.0, kind, hidden: flags & 0x04 != 0 })
+    Ok(Pin { part, number, name, at, length: nm(length), angle: (flags & 0x03) as f64 * 90.0, kind, hidden: flags & 0x04 != 0, name_shown: flags & 0x08 != 0, number_shown: flags & 0x10 != 0 })
 }
 
 /// The text pin record of older files.
@@ -243,6 +246,8 @@ pub(super) fn text_pin(p: &HashMap<String, String>, part: u32) -> Pin {
         angle: (flags & 0x03) as f64 * 90.0,
         kind: pin_kind(kind),
         hidden: flags & 0x04 != 0,
+        name_shown: flags & 0x08 != 0,
+        number_shown: flags & 0x10 != 0,
     }
 }
 
@@ -250,14 +255,14 @@ pub(super) fn text_pin(p: &HashMap<String, String>, part: u32) -> Pin {
 mod tests {
     use super::*;
 
-    fn lib(name: &str) -> Imported {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name);
-        read(&std::fs::read(path).unwrap(), name).unwrap()
+    fn lib(path: std::path::PathBuf) -> Imported {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        read(&std::fs::read(&path).unwrap(), &name).unwrap()
     }
 
     #[test]
     fn symbols_come_with_pins_and_footprints() {
-        let got = lib("DAL_LIB.SchLib");
+        let got = lib(altium_file!("DAL_LIB.SchLib"));
         assert!(got.symbols.len() >= 10, "{}", got.symbols.len());
         let conn = got.symbols.iter().find(|s| s.name == "10137238").expect("10137238");
         assert!(conn.description.contains("Connector"));

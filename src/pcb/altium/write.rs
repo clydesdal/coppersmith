@@ -384,7 +384,7 @@ pub(super) fn pin_rec(pin: &Pin) -> Rec {
     let mut r = Rec::new(2);
     r.owner(pin.part.max(1))
         .set("ELECTRICAL", pin_code(pin.kind))
-        .set("PINCONGLOMERATE", turn | if pin.hidden { 4 } else { 0 } | 0x18)
+        .set("PINCONGLOMERATE", turn | if pin.hidden { 4 } else { 0 } | if pin.name_shown { 0x08 } else { 0 } | if pin.number_shown { 0x10 } else { 0 })
         .set("NAME", &pin.name)
         .set("DESIGNATOR", &pin.number)
         .mm("PINLENGTH", pin.length)
@@ -453,7 +453,7 @@ mod symbol_tests {
     use crate::pcb::altium::{self, schlib as reader};
 
     fn sample() -> Symbol {
-        let pin = |part, num: &str, name: &str, x: f64, y: f64, angle, kind| reader::Pin { part, number: num.into(), name: name.into(), at: p(x, y), length: 7.62, angle, kind, hidden: false };
+        let pin = |part, num: &str, name: &str, x: f64, y: f64, angle, kind| reader::Pin { part, number: num.into(), name: name.into(), at: p(x, y), length: 7.62, angle, kind, hidden: false, name_shown: true, number_shown: true };
         Symbol {
             name: "OPAMP".into(),
             description: "Dual op amp".into(),
@@ -524,7 +524,7 @@ mod symbol_tests {
 
     #[test]
     fn real_symbols_survive_a_round_trip() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/DAL_LIB.SchLib");
+        let path = altium_file!("DAL_LIB.SchLib");
         let before = altium::read(&path).unwrap();
         let bytes = schlib(&before.symbols).unwrap();
         let after = reader::read(&bytes, "DAL_LIB").unwrap();
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn a_real_library_survives_a_round_trip() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/DAL_LIB.PcbLib");
+        let path = altium_file!("DAL_LIB.PcbLib");
         let before = altium::read(&path).unwrap();
         let bytes = pcblib(&before.footprints).unwrap();
         let after = reader::read(&bytes, "DAL_LIB").unwrap();

@@ -32,6 +32,8 @@ enum Kind {
     Polygons,
     Prims,
     Rules,
+    Classes,
+    Pairs,
     Ignore,
 }
 
@@ -42,6 +44,8 @@ fn kind_by_name(name: &str) -> Option<Kind> {
         "Components6" => Kind::Components,
         "Polygons6" => Kind::Polygons,
         "Rules6" => Kind::Rules,
+        "Classes6" => Kind::Classes,
+        "DifferentialPairs6" => Kind::Pairs,
         "Arcs6" | "Pads6" | "Vias6" | "Tracks6" | "Texts6" | "Fills6" | "Regions6" | "ShapeBasedRegions6" | "ComponentBodies6"
         | "ShapeBasedComponentBodies6" => Kind::Prims,
         _ => return None,
@@ -257,7 +261,217 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
     {
         rules.edge_clearance = nm(v);
     }
+
+    // The rest of what the rules ask. A limit no board could reach (Altium's "no maximum"
+    // is a huge number) is no limit.
+    let limit = |r: &HashMap<String, String>, k: &str, most: f64| len(r, k).map(nm).filter(|v| *v > 0.0 && *v < most).unwrap_or(0.0);
+    if let Some(r) = general("Width") {
+        rules.max_track = limit(r, "MAXLIMIT", 100.0);
+    }
+    if let Some(r) = general("HoleSize") {
+        rules.max_drill = limit(r, "MAXLIMIT", 100.0);
+    }
+    if let Some(r) = general("RoutingVias") {
+        rules.via_min_dia = limit(r, "MINWIDTH", 100.0);
+        rules.via_max_dia = limit(r, "MAXWIDTH", 100.0);
+        rules.via_min_drill = limit(r, "MINHOLEWIDTH", 100.0);
+        rules.via_max_drill = limit(r, "MAXHOLEWIDTH", 100.0);
+    }
+    if let Some(v) = general("HoleToHoleClearance").and_then(|r| len(r, "GAP")) {
+        rules.hole_gap = nm(v);
+    }
+    if let Some(v) = general("ComponentClearance").and_then(|r| len(r, "GAP")) {
+        rules.component_gap = nm(v);
+    }
+    if let Some(r) = general("Length") {
+        rules.min_net_length = limit(r, "MINLIMIT", 2000.0);
+        rules.max_net_length = limit(r, "MAXLIMIT", 2000.0);
+    }
+
+    // Which rules a file has on. Altium checks what its rules say and nothing else, so a
+    // rule the file doesn't have, or has switched off, is off here.
+    if !recs.is_empty() {
+        let enabled = |kind: &str| recs.iter().any(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case(kind)) && r.get("ENABLED").is_none_or(|e| e == "TRUE"));
+        // (The via style rule stays off: it's for through vias, and a board here can't say which of its vias are.)
+        for info in crate::pcb::rulebook::CATALOG.iter().filter(|i| i.support == crate::pcb::rulebook::Support::Checked && !i.altium.is_empty() && !i.altium.contains(' ') && i.id != crate::pcb::rulebook::RuleId::RoutingVias) {
+            rules.set_on(info.id, enabled(info.altium));
+        }
+    }
+
+    // What the file says of each rule, to show.
+    const BOOKKEEPING: [&str; 17] = ["NAME", "COMMENT", "UNIQUEID", "SELECTION", "LOCKED", "KEEPOUT", "USERROUTED", "POLYGONOUTLINE", "LAYER", "UNIONINDEX", "DRCENABLED", "DEFAULTRULE", "GATHERCONTROL", "RULEKIND", "NETSCOPE", "LAYERKIND", "DEFINEDBYLOGICALDOCUMENT"];
+    rules.seen = recs
+        .iter()
+        .filter_map(|r| {
+            let kind = r.get("RULEKIND")?.trim().to_string();
+            let mut params: Vec<(String, String)> = r
+                .iter()
+                .filter(|(k, _)| {
+                    !(k.starts_with("TOPLAYER_") || k.starts_with("BOTTOMLAYER_") || k.starts_with("MIDLAYER") || k.starts_with("SCOPE") || BOOKKEEPING.contains(&k.as_str()) || ["ENABLED", "PRIORITY"].contains(&k.as_str()) || k.ends_with("_V5"))
+                })
+                .map(|(k, v)| (k.clone(), v.trim_end_matches('\0').chars().take(80).collect::<String>()))
+                .collect();
+            params.sort();
+            params.truncate(16);
+            Some(crate::pcb::rulebook::SeenRule {
+                rule: crate::pcb::rulebook::RuleId::from_altium(&kind),
+                kind,
+                name: r.get("NAME").cloned().unwrap_or_default(),
+                scope: r.get("SCOPE1EXPRESSION").map(|s| s.trim_end_matches('\0').trim().to_string()).unwrap_or_default(),
+                enabled: r.get("ENABLED").is_none_or(|e| e == "TRUE"),
+                priority: r.get("PRIORITY").and_then(|p| p.trim().parse().ok()).unwrap_or(1),
+                params,
+            })
+        })
+        .collect();
     area
+}
+
+/// The class a rule's scope names, from `InNetClass('X')` or `InDifferentialPairClass('X')`;
+/// anything more complicated (`AND`, `OR`, other kinds of query) isn't taken.
+fn class_scope(expr: &str) -> Option<ClassScope> {
+    let e = expr.trim().trim_end_matches('\0').trim();
+    let (kind, rest) = if let Some(r) = e.strip_prefix("InNetClass(") {
+        (false, r)
+    } else if let Some(r) = e.strip_prefix("InDifferentialPairClass(") {
+        (true, r)
+    } else {
+        return None;
+    };
+    let name = rest.strip_suffix(')')?.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    if name.is_empty() || name.contains('\'') {
+        return None;
+    }
+    Some(if kind { ClassScope::PairClass(name.to_string()) } else { ClassScope::NetClass(name.to_string()) })
+}
+
+/// A layer as a rule names it in a key like `MIDLAYER3_MAXWIDTH`: the layer's
+/// number here, and what's left of the key.
+fn rule_layer_key(key: &str) -> Option<(u8, &str)> {
+    if let Some(r) = key.strip_prefix("TOPLAYER_") {
+        return Some((crate::pcb::model::TOP, r));
+    }
+    if let Some(r) = key.strip_prefix("BOTTOMLAYER_") {
+        return Some((crate::pcb::model::BOTTOM, r));
+    }
+    let r = key.strip_prefix("MIDLAYER")?;
+    let (n, what) = r.split_once('_')?;
+    let n: u8 = n.parse().ok()?;
+    (n >= 1 && n < crate::pcb::model::BOTTOM).then_some((n, what))
+}
+
+/// The widths and gaps a rule gives each copper layer (`TOPLAYER_MINWIDTH`,
+/// `MIDLAYER3_MAXGAP`…), by layer.
+fn layer_limits(r: &HashMap<String, String>) -> Vec<LayerLimit> {
+    let val = |k: &str| r.get(k).map(|v| nm(mil(Some(&v.trim_end_matches('\0').to_string()))));
+    let mut layers: Vec<LayerLimit> = Vec::new();
+    for k in r.keys() {
+        let Some((layer, what)) = rule_layer_key(k) else { continue };
+        let Some(v) = val(k) else { continue };
+        let i = match layers.iter().position(|l| l.layer == layer) {
+            Some(i) => i,
+            None => {
+                layers.push(LayerLimit { layer, ..LayerLimit::default() });
+                layers.len() - 1
+            }
+        };
+        match what {
+            "MINWIDTH" => layers[i].min_width = Some(v),
+            "PREFWIDTH" => layers[i].pref_width = Some(v),
+            "MAXWIDTH" => layers[i].max_width = Some(v),
+            "MINGAP" => layers[i].min_gap = Some(v),
+            "PREFGAP" => layers[i].pref_gap = Some(v),
+            "MAXGAP" => layers[i].max_gap = Some(v),
+            _ => {}
+        }
+    }
+    layers.sort_by_key(|l| l.layer);
+    layers
+}
+
+/// The classes of nets and of pairs, the pairs, and the rules asked of classes.
+fn read_classes(
+    classes: &[HashMap<String, String>],
+    pairs: &[HashMap<String, String>],
+    rules: &[HashMap<String, String>],
+    b: &mut Board,
+) {
+    let is = |r: &HashMap<String, String>, k: &str, v: &str| r.get(k).is_some_and(|x| x.trim().eq_ignore_ascii_case(v));
+    for r in pairs {
+        let name = r.get("NAME").cloned().unwrap_or_default();
+        let (Some(pos), Some(neg)) = (r.get("POSITIVENETNAME").and_then(|n| b.net_by_name(n)), r.get("NEGATIVENETNAME").and_then(|n| b.net_by_name(n))) else {
+            continue;
+        };
+        if !name.is_empty() && pos != neg {
+            b.diff_pairs.push(DiffPair { name, pos, neg });
+        }
+    }
+    for r in classes {
+        // "All Nets" and the like are built in; so are the classes made for the parts.
+        if is(r, "SUPERCLASS", "TRUE") || is(r, "AUTOGENERATEDCLASS", "TRUE") {
+            continue;
+        }
+        let name = r.get("NAME").cloned().unwrap_or_default();
+        let mut members: Vec<(usize, &String)> = r
+            .iter()
+            .filter_map(|(k, v)| k.strip_prefix('M').and_then(|n| n.parse::<usize>().ok()).map(|n| (n, v)))
+            .collect();
+        members.sort();
+        match r.get("KIND").map(|k| k.trim()) {
+            Some("0") => {
+                let nets: Vec<u32> = members.iter().filter_map(|(_, n)| b.net_by_name(n)).collect();
+                if !name.is_empty() {
+                    b.net_classes.push(NetClass { name, nets });
+                }
+            }
+            Some("6") => {
+                if !name.is_empty() {
+                    b.pair_classes.push(PairClass { name, pairs: members.iter().map(|(_, n)| (*n).clone()).collect() });
+                }
+            }
+            _ => {}
+        }
+    }
+    for r in rules {
+        if r.get("ENABLED").is_some_and(|e| e != "TRUE") {
+            continue;
+        }
+        let kind = match r.get("RULEKIND").map(|k| k.trim().to_ascii_lowercase()).as_deref() {
+            Some("width") => ClassRuleKind::Width,
+            Some("diffpairsrouting") => ClassRuleKind::PairRouting,
+            Some("matchedlengths") => ClassRuleKind::MatchedLengths,
+            _ => continue,
+        };
+        let Some(scope) = r.get("SCOPE1EXPRESSION").and_then(|s| class_scope(s)) else { continue };
+        let val = |k: &str| r.get(k).map(|v| nm(mil(Some(&v.trim_end_matches('\0').to_string()))));
+        let mut layers = layer_limits(r);
+        // Older files give one set of limits for every layer.
+        if layers.is_empty() && kind != ClassRuleKind::MatchedLengths {
+            let all = LayerLimit {
+                layer: u8::MAX,
+                min_width: val("MINLIMIT"),
+                pref_width: val("PREFEREDWIDTH"),
+                max_width: val("MAXLIMIT"),
+                min_gap: val("MINGAP"),
+                pref_gap: val("MOSTFREQGAP"),
+                max_gap: val("MAXGAP"),
+            };
+            if all != (LayerLimit { layer: u8::MAX, ..LayerLimit::default() }) {
+                layers.push(all);
+            }
+        }
+        layers.sort_by_key(|l| l.layer);
+        b.class_rules.push(ClassRule {
+            name: r.get("NAME").cloned().unwrap_or_default(),
+            kind,
+            scope,
+            layers,
+            tolerance: val("TOLERANCE").filter(|t| *t > 0.0),
+            max_uncoupled: val("MAXUNCOUPLEDLENGTH").filter(|t| *t > 0.0),
+            within_pairs: r.get("CHECKNETSINDIFFPAIR").is_none_or(|v| v.trim() != "FALSE"),
+            between_pairs: r.get("CHECKDIFFPAIRVSDIFFPAIR").is_some_and(|v| v.trim() == "TRUE"),
+        });
+    }
 }
 
 /// A ring from `VX0`, `VY0`, `KIND0`… (arcs given by `CX`, `CY`, `R`,
@@ -377,6 +591,8 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut prims: Vec<Prim> = Vec::new();
     let mut circuit_studio = false;
     let mut rule_recs = Vec::new();
+    let mut class_recs = Vec::new();
+    let mut pair_recs = Vec::new();
     for s in &storages {
         let Ok(data) = stream(&mut file, &format!("/{s}/Data")) else { continue };
         let kind = match kind_by_name(s) {
@@ -393,6 +609,8 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             Kind::Components => comp_recs = text_records(&data),
             Kind::Polygons => polygon_recs = text_records(&data),
             Kind::Rules => rule_recs = rule_records(&data),
+            Kind::Classes => class_recs = text_records(&data),
+            Kind::Pairs => pair_recs = text_records(&data),
             Kind::Prims => match prims::parse(&data) {
                 Ok(p) => prims.extend(p),
                 Err(e) => return Err(format!("{s}: {e}")),
@@ -461,6 +679,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
         net_ids.push(if name.is_empty() { 0 } else { b.net(&name) });
     }
     let net = |i: u16| if i == NONE { 0 } else { net_ids.get(i as usize).copied().unwrap_or(0) };
+    read_classes(&class_recs, &pair_recs, &rule_recs, &mut b);
 
     // Parts, each with its own primitives taken back to its own coordinates.
     let mut by_comp: HashMap<u16, Vec<Prim>> = HashMap::new();
@@ -802,10 +1021,7 @@ mod tests {
 
     #[test]
     fn a_circuit_studio_board_reads() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium/TestFixtureISSIPCB.CSPcbDoc");
-        if !path.exists() {
-            return;
-        }
+        let path = altium_file!("TestFixtureISSIPCB.CSPcbDoc");
         let got = read(&std::fs::read(&path).unwrap(), "fixture").unwrap();
         let b = &got.board;
         assert!(b.outline.len() >= 4, "{:?}", b.outline);
@@ -826,6 +1042,302 @@ mod tests {
         let c = crate::pcb::copper::analyse(b);
         let found = crate::pcb::drc::check(b, &c);
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    fn rec(kv: &[(&str, &str)]) -> HashMap<String, String> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_rules_scope_names_its_class() {
+        assert_eq!(class_scope("InNetClass('ANT50')"), Some(ClassScope::NetClass("ANT50".into())));
+        assert_eq!(class_scope(" InDifferentialPairClass('USB3') "), Some(ClassScope::PairClass("USB3".into())));
+        assert_eq!(class_scope("All"), None);
+        assert_eq!(class_scope("InNetClass('A') OR InNetClass('B')"), None);
+        assert_eq!(class_scope("InNet('GND')"), None);
+        assert_eq!(rule_layer_key("TOPLAYER_MINWIDTH"), Some((crate::pcb::model::TOP, "MINWIDTH")));
+        assert_eq!(rule_layer_key("BOTTOMLAYER_MAXGAP"), Some((crate::pcb::model::BOTTOM, "MAXGAP")));
+        assert_eq!(rule_layer_key("MIDLAYER3_PREFWIDTH"), Some((3, "PREFWIDTH")));
+        assert_eq!(rule_layer_key("PREFEREDWIDTH"), None);
+    }
+
+    #[test]
+    fn classes_pairs_and_their_rules_are_read() {
+        let mut b = Board::default();
+        for n in ["A_P", "A_N", "B_P", "B_N", "ANT", "ANT2", "OTHER"] {
+            b.net(n);
+        }
+        let classes = [
+            rec(&[("KIND", "0"), ("NAME", "RF"), ("M0", "ANT"), ("M1", "ANT2"), ("M2", "NOT_ON_BOARD")]),
+            rec(&[("KIND", "6"), ("NAME", "BUS"), ("M0", "A"), ("M1", "B")]),
+            rec(&[("KIND", "0"), ("NAME", "All Nets"), ("SUPERCLASS", "TRUE")]),
+            rec(&[("KIND", "1"), ("NAME", "Parts"), ("M0", "U1")]),
+        ];
+        let pairs = [
+            rec(&[("NAME", "A"), ("POSITIVENETNAME", "A_P"), ("NEGATIVENETNAME", "A_N")]),
+            rec(&[("NAME", "B"), ("POSITIVENETNAME", "B_P"), ("NEGATIVENETNAME", "B_N")]),
+            rec(&[("NAME", "C"), ("POSITIVENETNAME", "C_P"), ("NEGATIVENETNAME", "C_N")]),
+        ];
+        let rules = [
+            rec(&[("RULEKIND", "Width"), ("NAME", "W50"), ("SCOPE1EXPRESSION", "InNetClass('RF')"), ("TOPLAYER_MINWIDTH", "6.77mil"), ("TOPLAYER_MAXWIDTH", "7mil"), ("MIDLAYER2_PREFWIDTH", "5mil")]),
+            rec(&[("RULEKIND", "DiffPairsRouting"), ("NAME", "DP"), ("SCOPE1EXPRESSION", "InDifferentialPairClass('BUS')"), ("TOPLAYER_PREFGAP", "6mil"), ("MAXUNCOUPLEDLENGTH", "500mil")]),
+            rec(&[("RULEKIND", "MatchedLengths"), ("NAME", "ML"), ("SCOPE1EXPRESSION", "InDifferentialPairClass('BUS')"), ("TOLERANCE", "5mil")]),
+            rec(&[("RULEKIND", "Width"), ("NAME", "all"), ("SCOPE1EXPRESSION", "All"), ("PREFEREDWIDTH", "6mil")]),
+            rec(&[("RULEKIND", "Width"), ("NAME", "off"), ("ENABLED", "FALSE"), ("SCOPE1EXPRESSION", "InNetClass('RF')"), ("PREFEREDWIDTH", "9mil")]),
+        ];
+        read_classes(&classes, &pairs, &rules, &mut b);
+        assert_eq!(b.net_classes.len(), 1, "the built-in and part classes are left out");
+        assert_eq!(b.net_classes[0].nets.len(), 2, "a net the board lacks is dropped");
+        assert_eq!(b.pair_classes[0].pairs, vec!["A", "B"]);
+        assert_eq!(b.diff_pairs.len(), 2, "a pair of nets that aren't there is dropped");
+        let a = b.net_by_name("A_P").unwrap();
+        assert_eq!(b.diff_partner(a), b.net_by_name("A_N"));
+        assert_eq!(b.pair_classes_of(a)[0].name, "BUS");
+        assert_eq!(b.pair_class_nets("bus").len(), 4);
+        let ant = b.net_by_name("ANT").unwrap();
+        assert_eq!(b.net_classes_of(ant)[0].name, "RF");
+        let rf = b.class_rules_for(ant);
+        assert_eq!(rf.len(), 1, "only the RF rule: not the all-nets one, nor the disabled one");
+        let top = rf[0].on(crate::pcb::model::TOP).unwrap();
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-4);
+        assert!(close(top.min_width, 0.171958) && close(top.max_width, 0.1778), "{top:?}");
+        assert!(close(rf[0].on(2).unwrap().pref_width, 0.127));
+        assert!(rf[0].on(5).is_none());
+        let on_pair: Vec<_> = b.class_rules_for(a).iter().map(|r| r.kind).collect();
+        assert_eq!(on_pair, vec![ClassRuleKind::PairRouting, ClassRuleKind::MatchedLengths]);
+        let ml = b.class_rules_for(a)[1].tolerance;
+        assert!(close(ml, 0.127));
+        assert!(close(b.class_rules_for(a)[0].max_uncoupled, 12.7));
+        assert!(b.class_rules_for(b.net_by_name("OTHER").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn the_real_board_has_its_classes_and_pairs() {
+        let path = std::path::Path::new("/Users/dal/Layouts/EZDISP1V9_LAYOUTS/EZDisplay.PcbDoc");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let got = read(&bytes, "EZDisplay").unwrap().board;
+        assert_eq!(got.diff_pairs.len(), 28);
+        assert!(got.pair_classes.iter().any(|c| c.name == "DIFFMIPI" && c.pairs.len() == 13));
+        assert!(got.net_classes.iter().any(|c| c.name == "ANT50"));
+        let n = got.net_by_name("USB_SS2_TX_P").unwrap();
+        assert_eq!(got.net_name(got.diff_partner(n).unwrap()), "USB_SS2_TX_N");
+        let mipi = got.net_by_name("DSI0_P").unwrap();
+        let kinds: Vec<_> = got.class_rules_for(mipi).iter().map(|r| r.kind).collect();
+        assert!(kinds.contains(&ClassRuleKind::MatchedLengths) && kinds.contains(&ClassRuleKind::PairRouting), "{kinds:?}");
+    }
+
+    #[test]
+    fn the_real_boards_rules_are_read_with_their_settings_and_which_are_on() {
+        use crate::pcb::rulebook::RuleId;
+        let path = std::path::Path::new("/Users/dal/Layouts/EZDISP1V9_LAYOUTS/EZDisplay.PcbDoc");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let r = read(&bytes, "EZDisplay").unwrap().board.rules;
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        assert!(close(r.hole_gap, 9.8425 * 0.0254), "{}", r.hole_gap);
+        assert!(close(r.component_gap, 3.5 * 0.0254), "{}", r.component_gap);
+        assert!(close(r.max_drill, 248.0315 * 0.0254), "{}", r.max_drill);
+        assert!(close(r.via_max_dia, 24.0 * 0.0254) && close(r.via_min_dia, 17.7165 * 0.0254));
+        assert_eq!(r.max_track, 0.0, "a maximum of 1816 mm is no maximum");
+        assert_eq!(r.max_net_length, 0.0, "nor is 2540 m");
+        // The file's rules: those it has are on, the one it lacks (acute angle) is off, and the
+        // via style is held off for the reason given.
+        assert!(r.is_on(RuleId::Clearance) && r.is_on(RuleId::HoleToHoleClearance) && r.is_on(RuleId::MatchedLengths) && r.is_on(RuleId::Length));
+        assert!(!r.is_on(RuleId::AcuteAngle) && !r.is_on(RuleId::RoutingVias));
+        assert!(r.seen.len() > 40, "every rule in the file is kept: {}", r.seen.len());
+        assert!(r.seen.iter().any(|s| s.rule == Some(RuleId::HoleSize) && s.params.iter().any(|(k, _)| k == "MAXLIMIT")));
+        assert!(r.seen.iter().any(|s| s.kind == "SupplyNets"), "even the ones Coppersmith only lists");
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_classes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_classes() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let storages: Vec<String> = file.read_root_storage().filter(|e| e.is_storage()).map(|e| e.name().to_string()).collect();
+        println!("storages: {storages:?}");
+        for s in ["Classes6", "DifferentialPairs6"] {
+            let Ok(data) = stream(&mut file, &format!("/{s}/Data")) else {
+                println!("{s}: none");
+                continue;
+            };
+            let recs = text_records(&data);
+            println!("--- {s}: {} records", recs.len());
+            for r in recs.iter().take(40) {
+                let mut kv: Vec<String> = r.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                kv.sort();
+                println!("{}", kv.join(" | "));
+            }
+        }
+        if let Ok(data) = stream(&mut file, "/Rules6/Data") {
+            let recs = rule_records(&data);
+            for r in &recs {
+                let kind = r.get("RULEKIND").cloned().unwrap_or_default();
+                if ["Width", "DiffPairsRouting", "Length", "MatchedLengths", "RoutingLayers", "Impedance", "RoutingVias"].iter().any(|k| kind.eq_ignore_ascii_case(k)) {
+                    println!("RULE {} | {} | {} | {}", kind, r.get("NAME").cloned().unwrap_or_default(), r.get("SCOPE1EXPRESSION").cloned().unwrap_or_default(), r.iter().filter(|(k, _)| k.contains("WIDTH") || k.contains("GAP") || k.contains("LENGTH") || k.contains("TOLERANCE")).map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "));
+                }
+            }
+            // Every rule's own settings, bar the per-layer ones and the bookkeeping.
+            for r in &recs {
+                let mut kv: Vec<String> = r
+                    .iter()
+                    .filter(|(k, _)| !(k.starts_with("TOPLAYER_") || k.starts_with("BOTTOMLAYER_") || k.starts_with("MIDLAYER") || k.starts_with("SCOPE") || ["NAME", "COMMENT", "UNIQUEID", "SELECTION", "LOCKED", "KEEPOUT", "USERROUTED", "POLYGONOUTLINE", "LAYER", "UNIONINDEX", "DRCENABLED", "DEFAULTRULE", "GATHERCONTROL", "RULEKIND", "NETSCOPE", "LAYERKIND"].contains(&k.as_str())))
+                    .map(|(k, v)| format!("{k}={}", v.chars().take(60).collect::<String>()))
+                    .collect();
+                kv.sort();
+                println!("ALL {} | {} | {} | {}", r.get("RULEKIND").cloned().unwrap_or_default(), r.get("NAME").cloned().unwrap_or_default(), r.get("SCOPE1EXPRESSION").cloned().unwrap_or_default(), kv.join(" "));
+            }
+            let mut kinds: Vec<String> = recs.iter().filter_map(|r| r.get("RULEKIND").cloned()).collect();
+            kinds.sort();
+            kinds.dedup();
+            println!("rule kinds: {kinds:?}");
+        }
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_layout -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_layout() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let root: Vec<(String, bool)> = file.read_root_storage().map(|e| (e.name().to_string(), e.is_storage())).collect();
+        println!("root: {root:?}");
+        for (s, is_dir) in &root {
+            if !is_dir {
+                if let Ok(d) = stream(&mut file, &format!("/{s}")) {
+                    println!("FILE {s}: {} bytes: {:02x?}", d.len(), &d[..d.len().min(80)]);
+                }
+                continue;
+            }
+            let kids: Vec<String> = file.read_storage(format!("/{s}")).map(|it| it.map(|e| e.name().to_string()).collect()).unwrap_or_default();
+            println!("STORAGE {s}: {kids:?}");
+            for k in &kids {
+                if k == "Data" || k == "Header" {
+                    if let Ok(d) = stream(&mut file, &format!("/{s}/{k}")) {
+                        if k == "Header" {
+                            println!("  {s}/Header {:02x?}", d);
+                        } else {
+                            println!("  {s}/Data {} bytes", d.len());
+                        }
+                    }
+                }
+            }
+            if matches!(s.as_str(), "Vias6" | "Tracks6" | "Arcs6" | "Texts6" | "Regions6" | "Pads6" | "Fills6") {
+                let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+                let mut r = Reader::new(&d);
+                let mut shown = 0;
+                while !r.done() && shown < 2 {
+                    let kind = r.u8().unwrap();
+                    let nblocks = if kind == 2 { 6 } else if kind == 5 { 2 } else { 1 };
+                    print!("  {s} kind {kind}:");
+                    for _ in 0..nblocks {
+                        let b = r.block().unwrap();
+                        print!(" [{} bytes: {:02x?}]", b.len(), &b[..b.len().min(160)]);
+                    }
+                    println!();
+                    shown += 1;
+                }
+            }
+            if matches!(s.as_str(), "Board6" | "Nets6" | "Components6" | "Polygons6" | "Classes6" | "DifferentialPairs6") {
+                let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+                let recs = text_records(&d);
+                for r in recs.iter().take(if s == "Board6" { 1 } else { 2 }) {
+                    let mut kv: Vec<String> = r.iter().map(|(k, v)| format!("{k}={}", v.chars().take(40).collect::<String>())).collect();
+                    kv.sort();
+                    println!("  {s} rec: {}", kv.join("|"));
+                }
+            }
+        }
+        if let Ok(d) = stream(&mut file, "/Rules6/Data") {
+            let mut r = Reader::new(&d);
+            let mut n = 0;
+            while r.left() >= 6 && n < 2 {
+                let k = r.i16().unwrap();
+                let b = r.block().unwrap();
+                println!("  Rules6 kind {k}: {}", String::from_utf8_lossy(&b[..b.len().min(500)]));
+                n += 1;
+            }
+        }
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_full -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_full() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        for (s, kind, nblocks, pick) in [("Vias6", 3, 1, 0usize), ("Pads6", 2, 6, 0), ("Pads6", 2, 6, 1), ("Texts6", 5, 2, 0), ("Regions6", 11, 1, 0)] {
+            let d = stream(&mut file, &format!("/{s}/Data")).unwrap();
+            let mut r = Reader::new(&d);
+            let mut i = 0;
+            while !r.done() {
+                let k = r.u8().unwrap();
+                assert_eq!(k, kind);
+                let bl: Vec<&[u8]> = (0..nblocks).map(|_| r.block().unwrap()).collect();
+                if i == pick {
+                    for (j, b) in bl.iter().enumerate() {
+                        println!("FULL {s}[{pick}] block {j} ({} bytes): {}", b.len(), hex(b));
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        }
+        let d = stream(&mut file, "/Board6/Data").unwrap();
+        let rec = text_records(&d).into_iter().next().unwrap();
+        let mut keys: Vec<&String> = rec.keys().collect();
+        keys.sort();
+        let series = ["CX", "CY", "EA", "SA", "KIND", "VX", "VY", "R"];
+        for k in keys {
+            let digits_start = k.find(|c: char| c.is_ascii_digit());
+            let stem = digits_start.map(|i| &k[..i]).unwrap_or(k);
+            if digits_start.is_some() && series.contains(&stem) {
+                continue;
+            }
+            if k.starts_with("LAYER") && k.len() > 5 {
+                let n: String = k[5..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !["1", "2", "3", "32", "39", "57"].contains(&n.as_str()) {
+                    continue;
+                }
+            }
+            if k.starts_with("PLANE") || k.starts_with("MIDLAYER") || k.starts_with("MECHANICAL") || k.starts_with("V9") {
+                let n: String = k.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+                if !["1", "2"].contains(&n.as_str()) {
+                    continue;
+                }
+            }
+            println!("BOARD {k}={}", rec[k].chars().take(70).collect::<String>());
+        }
+        println!("BOARD vertex count: {}", rec.keys().filter(|k| k.starts_with("VX")).count());
+    }
+
+    /// COPPERSMITH_DUMP=board.PcbDoc cargo test dump_rules -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_rules() {
+        let Some(f) = std::env::var_os("COPPERSMITH_DUMP") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let mut file = open(&bytes).unwrap();
+        let d = stream(&mut file, "/Rules6/Data").unwrap();
+        println!("RULES first bytes {:02x?}", &d[..16]);
+        let mut r = Reader::new(&d);
+        let mut seen = std::collections::HashSet::new();
+        let mut n = 0;
+        while r.left() >= 6 {
+            let k = r.i16().unwrap();
+            let b = r.block().unwrap();
+            let text = String::from_utf8_lossy(b).to_string();
+            let kind = text.split("RULEKIND=").nth(1).and_then(|t| t.split('|').next()).unwrap_or("").to_string();
+            println!("RULES #{n} i16={k} len={} kind={kind}", b.len());
+            if ["Clearance", "Width", "PolygonConnect", "RoutingVias", "HoleSize", "ShortCircuit"].contains(&kind.as_str()) && seen.insert(kind.clone()) {
+                println!("RULETEXT {kind}: {}", text.chars().take(1800).collect::<String>());
+            }
+            n += 1;
+        }
     }
 
     #[test]

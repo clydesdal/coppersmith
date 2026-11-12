@@ -14,11 +14,13 @@
 //! follows it, checked against real Circuit Studio files in testdata/altium.
 
 pub mod pcbdoc;
+pub mod pcbdoc_write;
 pub mod pcblib;
 pub mod prims;
 pub mod schdoc;
 pub mod schlib;
 pub mod schsheet;
+pub mod templates;
 pub mod write;
 
 use std::collections::HashMap;
@@ -41,6 +43,10 @@ pub struct Imported {
 
 /// Reads any Altium library file: PcbLib, SchLib or IntLib.
 pub fn read(path: &Path) -> Result<Imported, String> {
+    // KiCad's footprints and symbols come in the same way.
+    if crate::pcb::kicad::is_library(path) {
+        return crate::pcb::kicad::read_library(path);
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
     let ext = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -78,17 +84,17 @@ pub fn with_cases(exts: &[&str]) -> Vec<String> {
 
 /// A library of footprints or symbols: PcbLib, SchLib or IntLib.
 pub fn is_library(path: &Path) -> bool {
-    path.extension().is_some_and(|e| ["pcblib", "schlib", "intlib"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+    path.extension().is_some_and(|e| ["pcblib", "schlib", "intlib"].iter().any(|x| e.eq_ignore_ascii_case(x))) || crate::pcb::kicad::is_library(path)
 }
 
 /// A schematic sheet: an Altium or Circuit Studio SchDoc, or Coppersmith's own.
 pub fn is_schematic(path: &Path) -> bool {
-    path.extension().is_some_and(|e| ["schdoc", "csschdoc", "cssch"].iter().any(|x| e.eq_ignore_ascii_case(x)))
+    path.extension().is_some_and(|e| ["schdoc", "csschdoc", "cssch"].iter().any(|x| e.eq_ignore_ascii_case(x))) || crate::pcb::kicad::is_sheet(path)
 }
 
 /// The kinds of Altium file there are readers for.
 pub fn is_board(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc"))
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc") || e.eq_ignore_ascii_case("cspcbdoc")) || crate::pcb::kicad::is_board(path) || crate::pcb::pads::is_board(path)
 }
 
 pub fn is_sheet(path: &Path) -> bool {
@@ -99,7 +105,14 @@ pub fn is_project(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("prjpcb") || e.eq_ignore_ascii_case("csprjpcb"))
 }
 
+/// A board from Altium or Circuit Studio, or from KiCad, which comes in the same way.
 pub fn read_board(path: &Path) -> Result<pcbdoc::ImportedBoard, String> {
+    if crate::pcb::kicad::is_board(path) {
+        return crate::pcb::kicad::read_board(path);
+    }
+    if crate::pcb::pads::is_board(path) {
+        return crate::pcb::pads::read_board(path);
+    }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
     pcbdoc::read(&bytes, &name).map_err(|e| format!("{}: {e}", path.display()))
@@ -293,14 +306,10 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
-    fn data(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join(name)
-    }
-
     #[test]
     fn reads_every_test_library() {
         for f in ["DAL_LIB.PcbLib", "fixturelib.PcbLib", "PcbLib1.PcbLib", "DAL_LIB.SchLib", "fixturelib.SchLib", "Schlib1.SchLib", "DAL_INTLIB.IntLib"] {
-            let got = read(&data(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
+            let got = read(&altium_file!(f)).unwrap_or_else(|e| panic!("{f}: {e}"));
             // PcbLib1 holds a single empty footprint.
             if f != "PcbLib1.PcbLib" {
                 assert!(!got.footprints.is_empty() || !got.symbols.is_empty(), "{f}: nothing read");
@@ -324,8 +333,8 @@ mod tests {
 
     #[test]
     fn the_intlib_holds_the_same_parts_as_its_libraries() {
-        let int = read(&data("DAL_INTLIB.IntLib")).unwrap();
-        let pcb = read(&data("DAL_LIB.PcbLib")).unwrap();
+        let int = read(&altium_file!("DAL_INTLIB.IntLib")).unwrap();
+        let pcb = read(&altium_file!("DAL_LIB.PcbLib")).unwrap();
         assert_eq!(int.footprints.len(), pcb.footprints.len());
         assert!(!int.symbols.is_empty());
     }

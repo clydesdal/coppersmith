@@ -10,6 +10,63 @@ use crate::pcb::geom::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// The size of the sheet's paper. Altium's sizes are the drawing area, in tenths
+/// of a mil, like 1150 by 760 for A4; here they're in millimetres.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub enum Paper {
+    #[default]
+    A4,
+    A3,
+    A2,
+    A1,
+    A0,
+    A,
+    B,
+    C,
+    D,
+    E,
+    /// Width and height.
+    Custom(f64, f64),
+}
+
+impl Paper {
+    pub const ALL: [Paper; 10] = [Paper::A4, Paper::A3, Paper::A2, Paper::A1, Paper::A0, Paper::A, Paper::B, Paper::C, Paper::D, Paper::E];
+
+    /// Width and height in millimetres.
+    pub fn size(self) -> (f64, f64) {
+        let units = |w: f64, h: f64| (w * 0.254, h * 0.254);
+        match self {
+            Paper::A4 => units(1150.0, 760.0),
+            Paper::A3 => units(1550.0, 1110.0),
+            Paper::A2 => units(2230.0, 1570.0),
+            Paper::A1 => units(3150.0, 2230.0),
+            Paper::A0 => units(4460.0, 3150.0),
+            Paper::A => units(950.0, 750.0),
+            Paper::B => units(1500.0, 950.0),
+            Paper::C => units(2000.0, 1500.0),
+            Paper::D => units(3200.0, 2000.0),
+            Paper::E => units(4200.0, 3200.0),
+            Paper::Custom(w, h) => (w, h),
+        }
+    }
+
+    pub fn name(self) -> String {
+        match self {
+            Paper::Custom(w, h) => format!("Custom {w:.0} × {h:.0} mm"),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Altium's `SHEETSTYLE` number.
+    pub fn style(self) -> u8 {
+        Paper::ALL.iter().position(|p| *p == self).unwrap_or(0) as u8
+    }
+
+    pub fn from_style(n: u8) -> Paper {
+        Paper::ALL.get(n as usize).copied().unwrap_or(Paper::A4)
+    }
+}
+
 /// A part on the sheet: a symbol, where it sits and how it's turned.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Placed {
@@ -44,6 +101,121 @@ pub enum LabelKind {
     Port,
 }
 
+/// How a power port is drawn, numbered as Altium's `STYLE` is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum PowerStyle {
+    Circle,
+    Arrow,
+    #[default]
+    Bar,
+    Wave,
+    /// Power ground: three bars, shortening.
+    Ground,
+    /// Signal ground: a triangle.
+    SignalGround,
+    Earth,
+}
+
+impl PowerStyle {
+    pub const ALL: [PowerStyle; 7] = [PowerStyle::Bar, PowerStyle::Circle, PowerStyle::Arrow, PowerStyle::Wave, PowerStyle::Ground, PowerStyle::SignalGround, PowerStyle::Earth];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PowerStyle::Circle => "Circle",
+            PowerStyle::Arrow => "Arrow",
+            PowerStyle::Bar => "Bar",
+            PowerStyle::Wave => "Wave",
+            PowerStyle::Ground => "Power ground",
+            PowerStyle::SignalGround => "Signal ground",
+            PowerStyle::Earth => "Earth",
+        }
+    }
+
+    /// The number Altium's `STYLE` holds for it.
+    pub fn altium(self) -> u8 {
+        match self {
+            PowerStyle::Circle => 0,
+            PowerStyle::Arrow => 1,
+            PowerStyle::Bar => 2,
+            PowerStyle::Wave => 3,
+            PowerStyle::Ground => 4,
+            PowerStyle::SignalGround => 5,
+            PowerStyle::Earth => 6,
+        }
+    }
+
+    /// From Altium's `STYLE`; styles this doesn't draw (the GOST ones) are a bar.
+    pub fn from_altium(n: u8) -> PowerStyle {
+        match n {
+            0 => PowerStyle::Circle,
+            1 => PowerStyle::Arrow,
+            3 => PowerStyle::Wave,
+            4 => PowerStyle::Ground,
+            5 => PowerStyle::SignalGround,
+            6 => PowerStyle::Earth,
+            _ => PowerStyle::Bar,
+        }
+    }
+
+    /// The style a supply of this name is usually drawn in: grounds as grounds, the rest as bars.
+    pub fn for_name(name: &str) -> PowerStyle {
+        let n = name.trim().to_uppercase();
+        if n == "PE" || n.contains("EARTH") || n.contains("CHASSIS") {
+            PowerStyle::Earth
+        } else if n.starts_with('A') && n.contains("GND") || n.starts_with("SGND") || n.starts_with("SIG") && n.contains("GND") {
+            PowerStyle::SignalGround
+        } else if n.contains("GND") || n.starts_with("VSS") || n == "0V" {
+            PowerStyle::Ground
+        } else {
+            PowerStyle::Bar
+        }
+    }
+
+    /// Whether the symbol hangs off its wire like a ground, with its name beyond it.
+    pub fn is_ground(self) -> bool {
+        matches!(self, PowerStyle::Ground | PowerStyle::SignalGround | PowerStyle::Earth)
+    }
+}
+
+/// Which way a port's signal goes, as Altium's `IOTYPE`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum PortIo {
+    Unspecified,
+    Output,
+    Input,
+    #[default]
+    Bidirectional,
+}
+
+impl PortIo {
+    pub fn name(self) -> &'static str {
+        match self {
+            PortIo::Unspecified => "Unspecified",
+            PortIo::Output => "Output",
+            PortIo::Input => "Input",
+            PortIo::Bidirectional => "Bidirectional",
+        }
+    }
+
+    pub fn altium(self) -> u8 {
+        match self {
+            PortIo::Unspecified => 0,
+            PortIo::Output => 1,
+            PortIo::Input => 2,
+            PortIo::Bidirectional => 3,
+        }
+    }
+
+    pub fn from_altium(n: u8) -> PortIo {
+        match n {
+            0 => PortIo::Unspecified,
+            1 => PortIo::Output,
+            2 => PortIo::Input,
+            _ => PortIo::Bidirectional,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Label {
     pub id: u32,
@@ -53,6 +225,12 @@ pub struct Label {
     /// Which way a power symbol or port points, in quarter turns.
     #[serde(default)]
     pub turns: u8,
+    /// How a power port is drawn.
+    #[serde(default)]
+    pub style: PowerStyle,
+    /// Which way a port's signal goes.
+    #[serde(default)]
+    pub io: PortIo,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,6 +243,8 @@ pub enum Sel {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Schematic {
     pub name: String,
+    #[serde(default)]
+    pub paper: Paper,
     pub parts: Vec<Placed>,
     pub wires: Vec<Wire>,
     pub labels: Vec<Label>,
@@ -77,7 +257,7 @@ pub struct Schematic {
 
 impl Default for Schematic {
     fn default() -> Self {
-        Schematic { name: "Sheet1".into(), parts: Vec::new(), wires: Vec::new(), labels: Vec::new(), junctions: Vec::new(), next_id: 1 }
+        Schematic { name: "Sheet1".into(), paper: Paper::A4, parts: Vec::new(), wires: Vec::new(), labels: Vec::new(), junctions: Vec::new(), next_id: 1 }
     }
 }
 
@@ -92,6 +272,8 @@ pub struct SheetPin {
     pub tip: P,
     pub angle: f64,
     pub hidden: bool,
+    pub name_shown: bool,
+    pub number_shown: bool,
 }
 
 /// What an electrical check found.
@@ -125,7 +307,7 @@ impl Placed {
         let angle = transform_angle(pin.angle, self.turns, self.mirror);
         let t = angle.to_radians();
         let tip = at.add(p(t.cos(), t.sin()).scale(pin.length)).rounded();
-        SheetPin { number: pin.number.clone(), name: pin.name.clone(), at, tip, angle, hidden: pin.hidden }
+        SheetPin { number: pin.number.clone(), name: pin.name.clone(), at, tip, angle, hidden: pin.hidden, name_shown: pin.name_shown, number_shown: pin.number_shown }
     }
 
     /// The pins of the part shown (a many-part symbol shows one part).
@@ -231,11 +413,17 @@ impl Schematic {
 
     /// Adds a label; one put on a pin points away from it, a power symbol
     /// so it doesn't sit on the part's body.
+    #[cfg(test)]
     pub fn add_label(&mut self, at: P, text: &str, kind: LabelKind) -> u32 {
+        self.add_marker(at, text, kind, PowerStyle::for_name(text), PortIo::default())
+    }
+
+    /// A label with its power style or port direction given.
+    pub fn add_marker(&mut self, at: P, text: &str, kind: LabelKind, style: PowerStyle, io: PortIo) -> u32 {
         let id = self.new_id();
         let at = at.rounded();
         let turns = self.pin_direction_at(at).map(|a| (((a - 90.0) / 90.0).round() as i32).rem_euclid(4) as u8).unwrap_or(0);
-        self.labels.push(Label { id, at, text: text.to_string(), kind, turns });
+        self.labels.push(Label { id, at, text: text.to_string(), kind, turns, style, io });
         id
     }
 
@@ -445,6 +633,8 @@ impl Schematic {
                         angle: s.angle,
                         kind: crate::pcb::altium::schlib::PinKind::Passive,
                         hidden: s.hidden,
+                        name_shown: s.name_shown,
+                        number_shown: s.number_shown,
                     })
                     .collect();
                 schdoc::Part { designator: p.designator.clone(), lib_ref: p.symbol.name.clone(), value: p.value.clone(), footprint: p.footprint.clone(), at: p.at, part: p.part, pins }
@@ -528,7 +718,7 @@ mod tests {
 
     /// A two-pin part along x: pin 1 at (-5.08, 0) pointing left, pin 2 at (5.08, 0) pointing right, 2.54 long.
     fn resistor() -> Symbol {
-        let pin = |n: &str, x: f64, a: f64| Pin { part: 1, number: n.into(), name: String::new(), at: p(x, 0.0), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false };
+        let pin = |n: &str, x: f64, a: f64| Pin { part: 1, number: n.into(), name: String::new(), at: p(x, 0.0), length: 2.54, angle: a, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
         Symbol {
             name: "Resistor".into(),
             description: String::new(),
@@ -685,6 +875,19 @@ mod tests {
         assert_eq!(turns(right), 3, "right is three quarter turns from up");
         assert_eq!(turns(left), 1, "left is one");
         assert_eq!(turns(free), 0);
+    }
+
+    #[test]
+    fn paper_sizes_are_altiums_and_numbered_as_its_sheet_styles_are() {
+        let (w, h) = Paper::A4.size();
+        assert!((w - 292.1).abs() < 0.01 && (h - 193.04).abs() < 0.01, "{w} {h}");
+        for (k, p) in Paper::ALL.iter().enumerate() {
+            assert_eq!(p.style() as usize, k);
+            assert_eq!(Paper::from_style(k as u8), *p);
+        }
+        assert_eq!(Paper::from_style(99), Paper::A4, "a style not known is A4");
+        assert_eq!(Paper::B.style(), 6);
+        assert_eq!(Paper::Custom(100.0, 50.0).size(), (100.0, 50.0));
     }
 
     #[test]

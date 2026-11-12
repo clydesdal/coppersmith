@@ -73,7 +73,7 @@ impl LibWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib"]));
+            let dialog = rfd::FileDialog::new().set_title("Open a library").add_filter("Altium and KiCad libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib", "kicad_mod", "kicad_sym"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();
@@ -84,8 +84,8 @@ impl LibWindow {
     fn ask_save_as(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         let (title, ext, file) = match self.ed.kind {
-            Kind::Footprints => ("Save the footprints as a PcbLib", "PcbLib", format!("{}.PcbLib", self.ed.name)),
-            Kind::Symbols => ("Save the symbols as a SchLib", "SchLib", format!("{}.SchLib", self.ed.name)),
+            Kind::Footprints => ("Save the footprints as a PcbLib", "PcbLib", format!("{}.PcbLib", crate::ui::app::copy_stem(&self.ed.name))),
+            Kind::Symbols => ("Save the symbols as a SchLib", "SchLib", format!("{}.SchLib", crate::ui::app::copy_stem(&self.ed.name))),
         };
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new().set_title(title).add_filter("Altium library", &[ext]).set_file_name(file);
@@ -186,7 +186,7 @@ impl LibWindow {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::right("lib_props").resizable(true).default_size(290.0).size_range(240.0..=440.0).frame(side).show(ui, |ui| {
+        Panel::right("lib_props").resizable(true).default_size(203.0).size_range(170.0..=310.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, elsewhere));
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::WELL)).show(ui, |ui| self.canvas(ui, &ctx, &mut out));

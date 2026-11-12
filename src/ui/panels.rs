@@ -36,7 +36,7 @@ pub(crate) fn heading(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-fn row(ui: &mut Ui, key: &str, value: &str) {
+pub(crate) fn row(ui: &mut Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(key).color(DIM));
@@ -173,7 +173,7 @@ pub(crate) fn chip(ui: &mut Ui, text: &str, on: bool) -> Response {
 }
 
 /// A length typed or dragged in the units on show; true when it changed.
-fn length(ui: &mut Ui, unit: Unit, mm: &mut f64) -> bool {
+pub(crate) fn length(ui: &mut Ui, unit: Unit, mm: &mut f64) -> bool {
     let mut v = unit.from_mm(*mm);
     let speed = match unit {
         Unit::Mm => 0.01,
@@ -234,6 +234,213 @@ fn preview(ui: &mut Ui, def: &FootprintDef, size: Vec2) {
     }
 }
 
+/// A turn in degrees as it's read: up to two decimals, none when it's whole.
+pub(crate) fn format_degrees(deg: f64) -> String {
+    let d = deg.rem_euclid(360.0);
+    let d = if (360.0 - d) < 0.005 { 0.0 } else { d };
+    let s = format!("{d:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The angle of the line from `a` to `b`, in degrees from the X axis, 0 up to 180.
+pub(crate) fn track_angle(a: P, b: P) -> f64 {
+    let d = b.sub(a);
+    d.y.atan2(d.x).to_degrees().rem_euclid(180.0)
+}
+
+/// How many tracks and vias are picked, and the total length of the tracks
+/// (an arc counts along its curve).
+pub fn picked_tracks(board: &Board, sel: &[Sel]) -> (usize, usize, f64) {
+    let ids: std::collections::HashSet<u32> = sel.iter().filter_map(|s| if let Sel::Track(id) = s { Some(*id) } else { None }).collect();
+    let vias = sel.iter().filter(|s| matches!(s, Sel::Via(_))).count();
+    let (mut tracks, mut length) = (0, 0.0);
+    for t in board.tracks.iter().filter(|t| ids.contains(&t.id)) {
+        tracks += 1;
+        length += t.length();
+    }
+    (tracks, vias, length)
+}
+
+/// "0.172 – 0.178 mm", or whichever end the rule gives.
+pub(crate) fn span(u: Unit, lo: Option<f64>, hi: Option<f64>) -> Option<String> {
+    match (lo, hi) {
+        (Some(a), Some(b)) if (a - b).abs() < 1e-6 => Some(u.len(a)),
+        (Some(a), Some(b)) => Some(format!("{} – {}", u.num(a), u.len(b))),
+        (Some(a), None) => Some(format!("from {}", u.len(a))),
+        (None, Some(b)) => Some(format!("up to {}", u.len(b))),
+        (None, None) => None,
+    }
+}
+
+/// The classes a net is in, the pair it's half of, and the rules asked of them:
+/// for a track, the widths and gaps on its layer, and whether its width keeps
+/// to them. Returns the nets of a class if its button is pressed.
+fn class_card(ui: &mut Ui, board: &Board, net: u32, track: Option<(u8, f64)>, u: Unit) -> Option<Vec<u32>> {
+    let mut pick = None;
+    if net == 0 {
+        return None;
+    }
+    if let Some(d) = board.pair_of(net) {
+        row(ui, "Pair", &d.name);
+    }
+    for c in board.net_classes_of(net) {
+        row(ui, "Net class", &c.name);
+        if ui.small_button(format!("Pick the {} nets of {}", c.nets.len(), c.name)).clicked() {
+            pick = Some(c.nets.clone());
+        }
+    }
+    for c in board.pair_classes_of(net) {
+        row(ui, "Pair class", &c.name);
+        let nets = board.pair_class_nets(&c.name);
+        if ui.small_button(format!("Pick the {} pairs of {}", c.pairs.len(), c.name)).clicked() {
+            pick = Some(nets);
+        }
+    }
+    for r in board.class_rules_for(net) {
+        ui.add_space(2.0);
+        ui.label(RichText::new(&r.name).size(12.0).color(FAINT));
+        match r.kind {
+            ClassRuleKind::Width | ClassRuleKind::PairRouting => {
+                let Some((layer, w)) = track else {
+                    if let Some(v) = r.max_uncoupled {
+                        row(ui, "Uncoupled at most", &u.len(v));
+                    }
+                    continue;
+                };
+                let Some(l) = r.on(layer) else { continue };
+                if let Some(s) = span(u, l.min_width, l.max_width) {
+                    row(ui, "Width allowed", &s);
+                    let (lo, hi) = (l.min_width.unwrap_or(0.0), l.max_width.unwrap_or(f64::MAX));
+                    if w < lo - 1e-6 || w > hi + 1e-6 {
+                        ui.label(RichText::new(format!("This track is {}: outside it", u.len(w))).size(12.0).color(theme::RED));
+                    }
+                }
+                if let Some(p) = l.pref_width {
+                    row(ui, "Preferred width", &u.len(p));
+                }
+                if let Some(s) = span(u, l.min_gap, l.max_gap) {
+                    row(ui, "Pair gap", &s);
+                }
+                if let Some(p) = l.pref_gap {
+                    row(ui, "Preferred gap", &u.len(p));
+                }
+                if let Some(v) = r.max_uncoupled {
+                    row(ui, "Uncoupled at most", &u.len(v));
+                }
+            }
+            ClassRuleKind::MatchedLengths => {
+                if let Some(t) = r.tolerance {
+                    row(ui, "Lengths match within", &u.len(t));
+                }
+            }
+        }
+    }
+    pick
+}
+
+/// What's picked of one net: its track length on each copper layer.
+pub struct NetLength {
+    pub net: u32,
+    /// Copper layers (top to bottom) with the length of the picked tracks on each.
+    pub layers: Vec<(u8, f64)>,
+    pub total: f64,
+    pub vias: usize,
+}
+
+/// The picked tracks and vias, net by net, in the order the nets are first met.
+/// Vias are counted, not measured: the board doesn't say how long a barrel is.
+pub fn net_lengths(board: &Board, sel: &[Sel]) -> Vec<NetLength> {
+    let mut out: Vec<NetLength> = Vec::new();
+    let order = board.copper_layers();
+    let entry = |net: u32, out: &mut Vec<NetLength>| -> usize {
+        if let Some(i) = out.iter().position(|n| n.net == net) {
+            return i;
+        }
+        out.push(NetLength { net, layers: Vec::new(), total: 0.0, vias: 0 });
+        out.len() - 1
+    };
+    for s in sel {
+        match s {
+            Sel::Track(id) => {
+                if let Some(t) = board.tracks.iter().find(|t| t.id == *id) {
+                    let i = entry(t.net, &mut out);
+                    let len = t.length();
+                    out[i].total += len;
+                    match out[i].layers.iter_mut().find(|(l, _)| *l == t.layer) {
+                        Some((_, sum)) => *sum += len,
+                        None => out[i].layers.push((t.layer, len)),
+                    }
+                }
+            }
+            Sel::Via(id) => {
+                if let Some(v) = board.vias.iter().find(|v| v.id == *id) {
+                    let i = entry(v.net, &mut out);
+                    out[i].vias += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    for n in &mut out {
+        n.layers.sort_by_key(|(l, _)| order.iter().position(|o| o == l).unwrap_or(usize::MAX));
+    }
+    out
+}
+
+/// Every track and via of a net.
+pub(crate) fn whole_net(board: &Board, net: u32) -> Vec<Sel> {
+    let tracks = board.tracks.iter().filter(|t| t.net == net).map(|t| Sel::Track(t.id));
+    let vias = board.vias.iter().filter(|v| v.net == net).map(|v| Sel::Via(v.id));
+    tracks.chain(vias).collect()
+}
+
+/// A selection with the other half of any differential pair joined in: where a
+/// picked track's net has a partner, both nets are picked whole, so the two
+/// can be measured against each other.
+pub fn with_partners(board: &Board, sel: &[Sel]) -> Vec<Sel> {
+    let mut nets: Vec<u32> = Vec::new();
+    for s in sel {
+        if let Sel::Track(id) = s {
+            if let Some(t) = board.tracks.iter().find(|t| t.id == *id) {
+                if let Some(p) = board.diff_partner(t.net) {
+                    for n in [t.net, p] {
+                        if !nets.contains(&n) {
+                            nets.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out = sel.to_vec();
+    for n in nets {
+        for s in whole_net(board, n) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Looking at inner layers only, the silkscreen is in the way: this hides it,
+/// remembering which layers it hid (not those already hidden). With any other
+/// pick it brings back just those.
+fn silk_for_pick(hidden: &mut std::collections::HashSet<Layer>, hid: &mut Vec<Layer>, inner_only: bool) {
+    if inner_only {
+        for side in [Side::Top, Side::Bottom] {
+            let silk = Layer::Silk(side);
+            if hidden.insert(silk) {
+                hid.push(silk);
+            }
+        }
+    } else {
+        for silk in std::mem::take(hid) {
+            hidden.remove(&silk);
+        }
+    }
+}
+
 impl App {
     pub fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
@@ -280,9 +487,78 @@ impl App {
     // -- Left: layers and library ----------------------------------------------
 
     /// The Layers tab: the layers, and what to show on them.
+    /// What the quick choices at the top of the layer list show: which of the
+    /// copper layers (the rest are left as they are). The first row is the outside
+    /// and all; the second has the inner layers worth a pick of their own: those
+    /// that carry signals, and planes that are cut up or have a trace on them (a
+    /// whole plane has nothing to look at).
+    fn quick_layer_sets(&mut self) -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>, &'static str)>) {
+        use crate::pcb::model::LayerRole;
+        if self.layer_roles.0 != self.rev {
+            self.layer_roles = (self.rev, self.doc.inner_layer_roles());
+        }
+        let first = vec![("All".to_string(), self.doc.copper_layers()), ("Top".to_string(), vec![TOP]), ("Bottom".to_string(), vec![BOTTOM])];
+        let inner = self
+            .layer_roles
+            .1
+            .iter()
+            .filter_map(|(l, role)| match role {
+                LayerRole::Signal => Some((format!("In {l}"), vec![*l], "Show just this inner signal layer")),
+                LayerRole::Split => Some((format!("In {l}"), vec![*l], "Show just this plane: it's cut into pieces or has a trace on it")),
+                LayerRole::Plane => None,
+            })
+            .collect();
+        (first, inner)
+    }
+
+    /// Shows only these copper layers, and works on the first if the one being
+    /// worked on has gone.
+    fn show_copper_only(&mut self, shown: &[u8]) {
+        for l in self.doc.copper_layers() {
+            if shown.contains(&l) {
+                self.hidden.remove(&Layer::Cu(l));
+            } else {
+                self.hidden.insert(Layer::Cu(l));
+            }
+        }
+        if (self.silk.is_some() || !shown.contains(&self.layer))
+            && let Some(&first) = shown.first()
+        {
+            self.switch_layer(first);
+        }
+        let inner_only = !shown.is_empty() && shown.iter().all(|l| *l != TOP && *l != BOTTOM);
+        silk_for_pick(&mut self.hidden, &mut self.silk_hid, inner_only);
+        // The courtyards are for placing, not for looking at copper: every pick turns them off.
+        self.hidden.insert(Layer::Court(Side::Top));
+        self.hidden.insert(Layer::Court(Side::Bottom));
+    }
+
     pub fn layers_page(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Layers").size(14.0).color(DIM));
         ui.add_space(2.0);
+        // Quick choices: all the copper, just the top, just the bottom, the planes; and under
+        // them each inner layer that carries signals, on its own.
+        let (first, inner) = self.quick_layer_sets();
+        let showing: Vec<u8> = self.doc.copper_layers().into_iter().filter(|l| !self.hidden.contains(&Layer::Cu(*l))).collect();
+        let mut chosen: Option<Vec<u8>> = None;
+        let rows: [Vec<(String, Vec<u8>, &str)>; 2] = [first.into_iter().map(|(n, s)| (n, s, "Show just these copper layers")).collect(), inner];
+        for row in &rows {
+            if row.is_empty() {
+                continue;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (name, set, tip) in row {
+                    if chip(ui, name, *set == showing).on_hover_text(*tip).clicked() {
+                        chosen = Some(set.clone());
+                    }
+                }
+            });
+        }
+        if let Some(set) = chosen {
+            self.show_copper_only(&set);
+        }
+        ui.add_space(4.0);
         for l in self.doc.copper_layers() {
             self.layer_row(ui, Layer::Cu(l), true);
         }
@@ -517,9 +793,14 @@ impl App {
             field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut self.doc.name).desired_width(150.0)));
             let b = self.doc.outline_bbox();
             if !b.is_empty() {
-                row(ui, "Size", &format!("{} × {} {}", u.num(b.w()), u.num(b.h()), u.name()));
+                // Without trailing zeros, so it fits a narrow panel.
+                let short = |v: f64| {
+                    let t = u.num(v);
+                    if t.contains('.') { t.trim_end_matches('0').trim_end_matches('.').to_string() } else { t }
+                };
+                row(ui, "Size", &format!("{} × {} {}", short(b.w()), short(b.h()), u.name()));
             }
-            field(ui, "Copper layers", |ui| {
+            field(ui, "Layers", |ui| {
                 let mut n = self.doc.copper;
                 if segmented(ui, &mut n, &[(6, "6"), (4, "4"), (2, "2")]) {
                     self.doc.copper = n;
@@ -529,7 +810,7 @@ impl App {
                 }
             });
             row(ui, "Parts", &self.doc.footprints.len().to_string());
-            row(ui, "Tracks · vias", &format!("{} · {}", self.doc.tracks.len(), self.doc.vias.len()));
+            row(ui, "Tracks/vias", &format!("{} · {}", self.doc.tracks.len(), self.doc.vias.len()));
             ui.add_space(6.0);
             ui.collapsing(RichText::new("Make it a rectangle").color(DIM), |ui| {
                 let id = ui.make_persistent_id("rect-size");
@@ -562,10 +843,10 @@ impl App {
             field(ui, "Track width", |ui| length(ui, u, &mut r.track));
             field(ui, "Via pad", |ui| length(ui, u, &mut r.via_dia));
             field(ui, "Via hole", |ui| length(ui, u, &mut r.via_drill));
-            field(ui, "Thinnest track", |ui| length(ui, u, &mut r.min_track));
-            field(ui, "Smallest hole", |ui| length(ui, u, &mut r.min_drill));
-            field(ui, "Thinnest ring", |ui| length(ui, u, &mut r.min_ring));
-            field(ui, "From the edge", |ui| length(ui, u, &mut r.edge_clearance));
+            field(ui, "Min track", |ui| length(ui, u, &mut r.min_track));
+            field(ui, "Min hole", |ui| length(ui, u, &mut r.min_drill));
+            field(ui, "Min ring", |ui| length(ui, u, &mut r.min_ring));
+            field(ui, "Edge gap", |ui| length(ui, u, &mut r.edge_clearance));
             field(ui, "Mask margin", |ui| length(ui, u, &mut r.mask_margin));
             field(ui, "Name height", |ui| length(ui, u, &mut r.text_height));
             if odd > 0
@@ -603,11 +884,25 @@ impl App {
             field(ui, "Value", |ui| ui.add(egui::TextEdit::singleline(&mut f.value).desired_width(140.0)));
             field(ui, "X", |ui| length(ui, u, &mut f.at.x));
             field(ui, "Y", |ui| length(ui, u, &mut f.at.y));
-            field(ui, "Turn", |ui| {
+            // The rotation in degrees: type or drag it to set it, or turn it a quarter. The
+            // part is turned when the edit ends, not at every step of a drag.
+            field(ui, "Rotation", |ui| {
                 if icon_button(ui, Icon::Rotate, false).on_hover_text("Turn 90° (R)").clicked() {
                     rotate = 90.0;
                 }
-                ui.label(RichText::new(format!("{:.1}°", f.rot)).font(theme::mono(12.5)));
+                let key = ui.make_persistent_id(("rotation", id));
+                let mut deg: f64 = ui.data(|d| d.get_temp(key)).unwrap_or(f.rot.rem_euclid(360.0));
+                let r = ui.add(egui::DragValue::new(&mut deg).speed(0.5).range(0.0..=360.0).suffix("°").max_decimals(2));
+                if r.dragged() || r.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(key, deg));
+                }
+                if r.drag_stopped() || r.lost_focus() {
+                    ui.data_mut(|d| d.remove_temp::<f64>(key));
+                    let turn = (deg - f.rot).rem_euclid(360.0);
+                    if turn > 1e-6 && (360.0 - turn) > 1e-6 {
+                        rotate = turn;
+                    }
+                }
             });
             field(ui, "Side", |ui| {
                 let mut side = f.side;
@@ -629,6 +924,10 @@ impl App {
                     } else {
                         format!("{}×{}", u.num(pad.size.x), u.num(pad.size.y))
                     };
+                    // Its turn on the board (the part's and its own together), when it has one: a
+                    // pad square to the board says nothing more than the size.
+                    let turn = format_degrees(f.rot + pad.rot);
+                    let kind = if pad.bare_hole() || turn == "0" { kind } else { format!("{kind} · {turn}°") };
                     ui.label(RichText::new(kind).size(11.5).color(FAINT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !pad.bare_hole() {
@@ -650,9 +949,13 @@ impl App {
         let u = self.unit;
         let layers = self.doc.copper_layers();
         let doc_nets = self.doc.clone();
+        let mut pick_pair = false;
+        let mut pick_class: Option<Vec<u32>> = None;
         let Some(t) = self.doc.tracks.iter_mut().find(|t| t.id == id) else { return };
+        let partner = doc_nets.diff_partner(t.net).map(|p| doc_nets.net_name(p).to_string());
         card(ui, |ui| {
             heading(ui, "Track");
+            ui.label(RichText::new(doc_nets.net_name(t.net)).strong());
             field(ui, "Width", |ui| length(ui, u, &mut t.w));
             field(ui, "Layer", |ui| {
                 egui::ComboBox::from_id_salt(("track-layer", id)).selected_text(Layer::Cu(t.layer).name()).show_ui(ui, |ui| {
@@ -662,16 +965,34 @@ impl App {
                 });
             });
             field(ui, "Net", |ui| App::net_picker(&doc_nets, ui, ("track-net", id), &mut t.net));
+            pick_class = class_card(ui, &doc_nets, t.net, Some((t.layer, t.w)), u);
             row(ui, "Length", &u.len(t.length()));
+            // A straight track's angle, as a line: 0° along X, up to 180°.
+            if t.mid.is_none() && !t.a.same(t.b) {
+                row(ui, "Angle", &format!("{}°", format_degrees(track_angle(t.a, t.b))));
+            }
             if t.mid.is_some() {
                 let r = arc_center(t.a, t.mid.unwrap_or_default(), t.b).map(|c| c.1).unwrap_or(0.0);
                 row(ui, "Arc radius", &u.len(r));
             }
             row(ui, "From", &format!("{}, {}", u.num(t.a.x), u.num(t.a.y)));
             row(ui, "To", &format!("{}, {}", u.num(t.b.x), u.num(t.b.y)));
+            if let Some(p) = &partner {
+                ui.add_space(4.0);
+                if ui.button(format!("Pick pair ({p})")).on_hover_text("Picks both nets of the differential pair, with their lengths").clicked() {
+                    pick_pair = true;
+                }
+            }
             ui.add_space(4.0);
             ui.label(RichText::new("Double-click a track to pick up everything joined to it.").size(12.0).color(FAINT));
         });
+        if pick_pair {
+            self.sel = with_partners(&self.doc, &[Sel::Track(id)]);
+        }
+        if let Some(nets) = pick_class {
+            self.sel = nets.into_iter().flat_map(|n| whole_net(&self.doc, n)).collect();
+            self.show_properties();
+        }
     }
 
     fn via_card(&mut self, ui: &mut Ui, id: u32) {
@@ -713,7 +1034,7 @@ impl App {
                 "Keeps clear of other nets' holes by the clearance, measured from the hole, and keeps every piece",
             );
             field(ui, if v.plane { "Clear of holes" } else { "Clearance" }, |ui| length(ui, u, &mut v.clearance));
-            field(ui, "From the edge", |ui| length(ui, u, &mut v.edge));
+            field(ui, "Edge gap", |ui| length(ui, u, &mut v.edge));
             field(ui, "Pads join", |ui| segmented(ui, &mut v.connect, &[(Connect::Direct, "Solid"), (Connect::Relief, "Relief")]));
             if v.connect == Connect::Relief {
                 field(ui, "Spoke width", |ui| length(ui, u, &mut v.spoke));
@@ -784,6 +1105,8 @@ impl App {
         card(ui, |ui| {
             heading(ui, &format!("Name of {}", f.refdes));
             field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut f.refdes).desired_width(140.0)));
+            // It turns with its part, and is kept readable: never upside down.
+            row(ui, "Rotation", &format!("{}°", format_degrees(f.label_rot())));
             field(ui, "Height", |ui| {
                 let mut h = f.label_height.unwrap_or(board_height);
                 if length(ui, u, &mut h) {
@@ -844,8 +1167,65 @@ impl App {
 
     fn many_card(&mut self, ui: &mut Ui, n: usize) {
         let mut act = None;
+        let (tracks, vias, total) = picked_tracks(&self.doc, &self.sel);
+        let u = self.unit;
         card(ui, |ui| {
             heading(ui, &format!("{n} things picked"));
+            if tracks > 0 {
+                row(ui, "Tracks", &tracks.to_string());
+                row(ui, "Track length", &u.len(total));
+            }
+            if vias > 0 {
+                row(ui, "Vias", &vias.to_string());
+            }
+            // Net by net, with the length on each layer: for two nets (a pair), how far apart they are.
+            let nets = net_lengths(&self.doc, &self.sel);
+            let shown: Vec<&NetLength> = nets.iter().filter(|n| n.total > 0.0 || n.vias > 0).collect();
+            let board = &self.doc;
+            for n in &shown {
+                ui.add_space(4.0);
+                let name = board.net_name(n.net);
+                let lines = |ui: &mut Ui| {
+                    for (l, len) in &n.layers {
+                        row(ui, &Layer::Cu(*l).name(), &u.len(*len));
+                    }
+                    row(ui, "Length", &u.len(n.total));
+                };
+                // A bus is many nets: fold each to its name and length.
+                if shown.len() <= 2 {
+                    ui.label(RichText::new(name).strong());
+                    lines(ui);
+                } else {
+                    egui::CollapsingHeader::new(RichText::new(format!("{name}   {}", u.len(n.total))).strong())
+                        .id_salt(("net-lengths", n.net))
+                        .show(ui, lines);
+                }
+            }
+            let measured: Vec<&NetLength> = nets.iter().filter(|n| n.total > 0.0).collect();
+            if measured.len() >= 2 {
+                ui.add_space(4.0);
+                let longest = measured.iter().max_by(|a, b| a.total.total_cmp(&b.total)).unwrap();
+                let shortest = measured.iter().min_by(|a, b| a.total.total_cmp(&b.total)).unwrap();
+                let spread = longest.total - shortest.total;
+                let pair = measured.len() == 2 && board.diff_partner(longest.net) == Some(shortest.net);
+                row(ui, if pair { "Pair mismatch" } else { "Longest − shortest" }, &u.len(spread));
+                // The match the rules ask of them, if any: the tightest asked of any picked net.
+                let tolerance = measured
+                    .iter()
+                    .flat_map(|n| board.class_rules_for(n.net))
+                    .filter(|r| r.kind == ClassRuleKind::MatchedLengths)
+                    .filter_map(|r| r.tolerance)
+                    .min_by(|a, b| a.total_cmp(b));
+                if let Some(t) = tolerance {
+                    row(ui, "Lengths match within", &u.len(t));
+                    let (text, colour) = if spread <= t + 1e-6 {
+                        ("Within the rule".to_string(), theme::GREEN)
+                    } else {
+                        (format!("Over by {}", u.len(spread - t)), theme::RED)
+                    };
+                    ui.label(RichText::new(text).size(12.0).color(colour));
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 if tool_button(ui, Icon::Rotate, "Turn", true).clicked() {
                     act = Some('r');
@@ -904,8 +1284,7 @@ impl App {
                         ui.painter().rect_filled(rect, 7.0, fill);
                         let dot = if prob.severity == Severity::Error { theme::RED } else { theme::YELLOW };
                         ui.painter().circle_filled(pos2(rect.left() + 10.0, rect.top() + 12.0), 3.5, dot);
-                        ui.painter().text(rect.left_top() + vec2(20.0, 4.0), Align2::LEFT_TOP, &prob.title, FontId::proportional(13.0), FG);
-                        let galley = ui.painter().layout_no_wrap(prob.detail.clone(), FontId::proportional(11.5), FAINT);
+                        ui.painter().text(rect.left_top() + vec2(20.0, 4.0), Align2::LEFT_TOP, &prob.title, FontId::proportional(13.0), FG);                        let galley = ui.painter().layout_no_wrap(prob.detail.clone(), FontId::proportional(11.5), FAINT);
                         ui.painter().with_clip_rect(rect.shrink(2.0)).galley(rect.left_top() + vec2(20.0, 21.0), galley, FAINT);
                         if response.on_hover_text(&prob.detail).clicked() {
                             go = Some(i);
@@ -919,6 +1298,8 @@ impl App {
             let at = self.problems[i].at;
             self.zoom_to(at, 8.0);
         }
+        // The rule the picked problem breaks, with its controls.
+        self.rule_card(ui);
     }
 
     fn nets_card(&mut self, ui: &mut Ui) {
@@ -975,5 +1356,91 @@ impl App {
             });
             self.new_net.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod quick_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn rotations_read_as_degrees_and_a_tracks_angle_is_its_lines() {
+        assert_eq!(format_degrees(0.0), "0");
+        assert_eq!(format_degrees(90.0), "90");
+        assert_eq!(format_degrees(-90.0), "270");
+        assert_eq!(format_degrees(360.0), "0");
+        assert_eq!(format_degrees(359.999), "0");
+        assert_eq!(format_degrees(45.5), "45.5");
+        assert_eq!(format_degrees(12.345), "12.35");
+        assert!((track_angle(p(0.0, 0.0), p(5.0, 5.0)) - 45.0).abs() < 1e-9);
+        assert!((track_angle(p(5.0, 5.0), p(0.0, 0.0)) - 45.0).abs() < 1e-9, "the line's angle, not which end is first");
+        assert!((track_angle(p(0.0, 0.0), p(0.0, 3.0)) - 90.0).abs() < 1e-9);
+        assert!((track_angle(p(0.0, 0.0), p(-4.0, 4.0)) - 135.0).abs() < 1e-9);
+        assert!(track_angle(p(0.0, 0.0), p(7.0, 0.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pair_is_measured_net_by_net_and_layer_by_layer() {
+        let mut b = Board::default();
+        b.copper = 4;
+        let (dp, dn) = (b.net("USB_DP"), b.net("USB_DN"));
+        let other = b.net("VCC");
+        // DP: 10 on top, 5 on layer 1. DN: 12 on top. A VCC track that must stay out.
+        b.tracks.push(Track { mid: None, id: 1, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.2, layer: TOP, net: dp });
+        b.tracks.push(Track { mid: None, id: 2, a: p(10.0, 0.0), b: p(10.0, 5.0), w: 0.2, layer: 1, net: dp });
+        b.tracks.push(Track { mid: None, id: 3, a: p(0.0, 1.0), b: p(12.0, 1.0), w: 0.2, layer: TOP, net: dn });
+        b.tracks.push(Track { mid: None, id: 4, a: p(0.0, 9.0), b: p(50.0, 9.0), w: 0.2, layer: TOP, net: other });
+        let sel = with_partners(&b, &[Sel::Track(1)]);
+        assert!(sel.contains(&Sel::Track(2)) && sel.contains(&Sel::Track(3)), "both whole nets are picked");
+        assert!(!sel.contains(&Sel::Track(4)));
+        let n = net_lengths(&b, &sel);
+        assert_eq!(n.len(), 2);
+        let dp_len = n.iter().find(|x| x.net == dp).unwrap();
+        assert_eq!(dp_len.layers, vec![(TOP, 10.0), (1, 5.0)]);
+        assert!((dp_len.total - 15.0).abs() < 1e-9);
+        let dn_len = n.iter().find(|x| x.net == dn).unwrap();
+        assert!((dn_len.total - 12.0).abs() < 1e-9);
+        // A track with no partner picks nothing more.
+        assert_eq!(with_partners(&b, &[Sel::Track(4)]), vec![Sel::Track(4)]);
+    }
+
+    #[test]
+    fn the_total_track_length_adds_up_what_is_picked() {
+        let mut b = Board::default();
+        let n = b.net("N");
+        for (id, a, e) in [(1, p(0.0, 0.0), p(3.0, 0.0)), (2, p(3.0, 0.0), p(3.0, 4.0)), (3, p(10.0, 10.0), p(20.0, 10.0))] {
+            b.tracks.push(Track { mid: None, id, a, b: e, w: 0.2, layer: TOP, net: n });
+        }
+        let (t, v, len) = picked_tracks(&b, &[Sel::Track(1), Sel::Track(2), Sel::Via(9)]);
+        assert_eq!((t, v), (2, 1));
+        assert!((len - 7.0).abs() < 1e-9, "3 + 4 = {len}");
+        assert_eq!(picked_tracks(&b, &[]), (0, 0, 0.0));
+        // An arc is measured along its curve, which is longer than its chord.
+        b.tracks.push(Track { mid: Some(p(5.0, 2.0)), id: 4, a: p(0.0, 0.0), b: p(10.0, 0.0), w: 0.2, layer: TOP, net: n });
+        let (_, _, arc) = picked_tracks(&b, &[Sel::Track(4)]);
+        assert!(arc > 10.0 && arc < 15.0, "{arc}");
+    }
+
+    #[test]
+    fn an_inner_pick_hides_the_silk_and_the_next_pick_brings_it_back() {
+        let (mut hidden, mut hid): (HashSet<Layer>, Vec<Layer>) = (HashSet::new(), Vec::new());
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert!(hidden.contains(&Layer::Silk(Side::Top)) && hidden.contains(&Layer::Silk(Side::Bottom)));
+        // Picking another inner layer doesn't hide anything twice or forget what was hidden.
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert_eq!(hid.len(), 2);
+        silk_for_pick(&mut hidden, &mut hid, false);
+        assert!(hidden.is_empty() && hid.is_empty());
+    }
+
+    #[test]
+    fn silk_the_user_had_hidden_stays_hidden() {
+        let mut hidden: HashSet<Layer> = [Layer::Silk(Side::Bottom)].into_iter().collect();
+        let mut hid = Vec::new();
+        silk_for_pick(&mut hidden, &mut hid, true);
+        assert_eq!(hid, vec![Layer::Silk(Side::Top)], "only the one that was showing is remembered");
+        silk_for_pick(&mut hidden, &mut hid, false);
+        assert!(hidden.contains(&Layer::Silk(Side::Bottom)) && !hidden.contains(&Layer::Silk(Side::Top)));
     }
 }

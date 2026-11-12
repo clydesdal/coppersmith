@@ -7,6 +7,20 @@
 // A release build on Windows opens no console window behind the app.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+/// Tests that read real Altium files: the path in testdata/altium, or skip the
+/// test when it isn't there. Those files are private, so they stay out of git.
+#[cfg(test)]
+macro_rules! altium_file {
+    ($name:expr) => {{
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/altium").join($name);
+        if !path.exists() {
+            eprintln!("skipped: no {}", path.display());
+            return;
+        }
+        path
+    }};
+}
+
 mod pcb;
 mod platform;
 mod ui;
@@ -215,6 +229,7 @@ fn run() -> Result<(), String> {
             "--layout" => launch.layout = Some(value("--layout")?),
             "--library" => launch.library = Some(PathBuf::from(value("--library")?)),
             "--schematic" => launch.schematic = Some(PathBuf::from(value("--schematic")?)),
+            "--3d" => launch.view3d = true,
             "--zoom" => {
                 let v = numbers(&value("--zoom")?, 3, "--zoom")?;
                 launch.zoom = Some((p(v[0], v[1]), v[2]));
@@ -263,7 +278,8 @@ fn run() -> Result<(), String> {
     if launch.screenshot.is_some() {
         platform::prefer_drawing_while_hidden();
     }
-    let mut options = eframe::NativeOptions { viewport, multisampling: 4, ..Default::default() };
+    // The depth buffer is for the 3D view.
+    let mut options = eframe::NativeOptions { viewport, multisampling: 4, depth_buffer: 24, ..Default::default() };
     options.glow_options.vsync = launch.screenshot.is_none();
     eframe::run_native("Coppersmith", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, launch)))))
         .map_err(|e| format!("The window couldn't open: {e}"))

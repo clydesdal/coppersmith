@@ -1,0 +1,236 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "76f755e1-6c79-565b-b7ad-e1f1436cc66f")
+	(paper "A3")
+	(title_block
+		(title "P4DEV - ESP32-P4 + ESP32-C5 dev board")
+		(date "2026-11-09")
+		(rev "A")
+		(company "ESP32-P4 + ESP32-C5 development board")
+	)
+	(lib_symbols)
+	(text "P4DEV  rev A   ESP32-P4NRW32X + ESP32-C5HF4, 40 pin RGB LCD, USB-C x2, microSD, 0.1 in headers"
+		(exclude_from_sim no)
+		(at 30 30 0)
+		(effects
+			(font
+				(size 3 3)
+			)
+			(justify left bottom)
+		)
+		(uuid "2969d09a-01bc-556d-a52a-14f1e254eedf")
+	)
+	(sheet
+		(at 30 50)
+		(size 55 25)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill
+			(color 255 255 220 1)
+		)
+		(uuid "3f8c1441-ae1f-587c-b9d7-3fb57861bf09")
+		(property "Sheetname" "Power and USB"
+			(at 30 49.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "power.kicad_sch"
+			(at 30 75.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "p4dev"
+				(path "/76f755e1-6c79-565b-b7ad-e1f1436cc66f"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 100 50)
+		(size 55 25)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill
+			(color 255 255 220 1)
+		)
+		(uuid "8ecfb5c2-c396-5d35-b32a-d78b9759e3f6")
+		(property "Sheetname" "ESP32-P4 core"
+			(at 100 49.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "p4.kicad_sch"
+			(at 100 75.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "p4dev"
+				(path "/76f755e1-6c79-565b-b7ad-e1f1436cc66f"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 170 50)
+		(size 55 25)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill
+			(color 255 255 220 1)
+		)
+		(uuid "2bb2ced5-5420-5c10-b434-7a4be4b70e1c")
+		(property "Sheetname" "ESP32-C5 radio"
+			(at 170 49.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "c5.kicad_sch"
+			(at 170 75.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "p4dev"
+				(path "/76f755e1-6c79-565b-b7ad-e1f1436cc66f"
+					(page "4")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 240 50)
+		(size 55 25)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill
+			(color 255 255 220 1)
+		)
+		(uuid "bb5a5780-e765-5d49-9131-c382cd9b0fb3")
+		(property "Sheetname" "LCD and touch"
+			(at 240 49.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "lcd.kicad_sch"
+			(at 240 75.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "p4dev"
+				(path "/76f755e1-6c79-565b-b7ad-e1f1436cc66f"
+					(page "5")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 310 50)
+		(size 55 25)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill
+			(color 255 255 220 1)
+		)
+		(uuid "7d980afe-3aad-5bd3-8169-1c24caa54a0d")
+		(property "Sheetname" "Headers and storage"
+			(at 310 49.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "io.kicad_sch"
+			(at 310 75.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "p4dev"
+				(path "/76f755e1-6c79-565b-b7ad-e1f1436cc66f"
+					(page "6")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+	(embedded_fonts no)
+)

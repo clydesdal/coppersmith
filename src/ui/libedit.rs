@@ -404,7 +404,7 @@ impl LibEditor {
                     return;
                 }
                 self.remember();
-                let pin = Pin { part: self.part, number: self.next_number(), name: String::new(), at: q, length: 7.62, angle: self.pin_angle, kind: PinKind::Passive, hidden: false };
+                let pin = Pin { part: self.part, number: self.next_number(), name: String::new(), at: q, length: 7.62, angle: self.pin_angle, kind: PinKind::Passive, hidden: false, name_shown: true, number_shown: true };
                 let s = &mut self.symbols[self.sym];
                 s.pins.push(pin);
                 self.sel = Some(Item::Pin(s.pins.len() - 1));

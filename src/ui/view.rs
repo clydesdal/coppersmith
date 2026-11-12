@@ -35,7 +35,7 @@ pub fn layer_color(layer: Layer) -> Color32 {
         Layer::Cu(BOTTOM) => rgb(0x4f8cff),
         Layer::Cu(n) => INNER[(n as usize + 3) % 4],
         Layer::Silk(Side::Top) => rgb(0xf2d24b),
-        Layer::Silk(Side::Bottom) => rgb(0xd9a24e),
+        Layer::Silk(Side::Bottom) => rgb(0xfdf2d0),
         Layer::Court(_) => rgb(0x8a6fb0),
         Layer::Fab(_) => rgb(0x8d8e8e),
         Layer::Mask(_) | Layer::Paste(_) => rgb(0xa8adb5),
@@ -106,7 +106,7 @@ pub fn stroke_blob(painter: &Painter, tr: &Tr, b: &Blob, stroke: Stroke) {
 fn ink(painter: &Painter, tr: &Tr, i: Ink, color: Color32) {
     match i {
         Ink::Line(a, b, w) => {
-            let w = tr.len(w).max(1.0);
+            let w = tr.len(w).max(1.3);
             painter.line_segment([tr.pt(a), tr.pt(b)], Stroke::new(w, color));
             if w > 2.5 {
                 painter.circle_filled(tr.pt(a), w / 2.0, color);
@@ -163,6 +163,49 @@ fn closed_line(painter: &Painter, tr: &Tr, ring: &[P], stroke: Stroke, dashed: b
     }
 }
 
+/// The layers from the far side to the near one: the far side's drawings, the
+/// copper, the near side's. Seen from the top the bottom is the far side, and its
+/// silkscreen would lie under all the copper; when it's the side being worked on
+/// it's drawn over the copper instead, so it can be read.
+fn stack(mirror: bool, copper: Vec<u8>, working: Option<Side>) -> Vec<Layer> {
+    let (far, near) = if mirror { (Side::Top, Side::Bottom) } else { (Side::Bottom, Side::Top) };
+    let lift = working == Some(far);
+    let mut v = vec![Layer::Fab(far), Layer::Court(far)];
+    if !lift {
+        v.push(Layer::Silk(far));
+    }
+    v.extend(copper.into_iter().map(Layer::Cu));
+    if lift {
+        v.push(Layer::Silk(far));
+    }
+    v.extend([Layer::Fab(near), Layer::Court(near), Layer::Silk(near), Layer::Edge]);
+    v
+}
+
+/// The part of the line `a`–`b` inside `rect`, if any.
+fn visible_part(a: Pos2, b: Pos2, rect: Rect) -> Option<(Pos2, Pos2)> {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-d.x, a.x - rect.min.x), (d.x, rect.max.x - a.x), (-d.y, a.y - rect.min.y), (d.y, rect.max.y - a.y)] {
+        if p.abs() < 1e-6 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                t0 = t0.max(r);
+            } else {
+                t1 = t1.min(r);
+            }
+            if t0 > t1 {
+                return None;
+            }
+        }
+    }
+    Some((a + d * t0, a + d * t1))
+}
+
 fn nice_step(grid: f64, scale: f64) -> f64 {
     let mut step = grid.max(0.01);
     for k in [2.0, 2.5, 2.0, 2.0, 2.5, 2.0, 2.0, 2.5, 2.0] {
@@ -181,17 +224,15 @@ impl App {
 
     /// The layers from the far side to the near one, the active copper last.
     fn draw_order(&self) -> Vec<Layer> {
-        let (far, near) = if self.mirror { (Side::Top, Side::Bottom) } else { (Side::Bottom, Side::Top) };
         let mut copper: Vec<u8> = self.doc.copper_layers();
         if self.mirror == false {
             copper.reverse();
         }
         copper.retain(|l| *l != self.layer);
         copper.push(self.layer);
-        let mut v = vec![Layer::Fab(far), Layer::Court(far), Layer::Silk(far)];
-        v.extend(copper.into_iter().map(Layer::Cu));
-        v.extend([Layer::Fab(near), Layer::Court(near), Layer::Silk(near), Layer::Edge]);
-        v
+        // The side being worked on: its copper, or its silkscreen.
+        let working = Layer::Cu(self.layer).side().or(self.silk);
+        stack(self.mirror, copper, working)
     }
 
     fn shows(&self, layer: Layer) -> bool {
@@ -453,7 +494,18 @@ impl App {
                 if response.drag_stopped() {
                     self.end_drag(&tr, at);
                 }
-                if response.clicked() {
+                // A rule marker, clicked: the Checks panel shows the problem, the rule it breaks
+                // and that rule's controls.
+                let marker = if response.clicked() && self.show_problems {
+                    self.problems.iter().position(|p| p.marked() && tr.pt(p.at).distance(at) <= 11.0)
+                } else {
+                    None
+                };
+                if let Some(i) = marker {
+                    self.focus = Some(i);
+                    self.right_tab = crate::ui::dock::RightTab::Checks;
+                    self.show_right = true;
+                } else if response.clicked() {
                     let hit = self.pick(q, tol);
                     match (hit, shift) {
                         (Some(h), true) => {
@@ -494,6 +546,24 @@ impl App {
                                 _ => None,
                             })
                             .collect();
+                        // A differential pair is picked as both nets, to be measured against each other.
+                        self.sel = crate::ui::panels::with_partners(&self.doc, &self.sel);
+                        // The totals are in the Properties panel, with the rest of what's picked.
+                        self.show_properties();
+                        let (tracks, vias, total) = crate::ui::panels::picked_tracks(&self.doc, &self.sel);
+                        let names: Vec<&str> = crate::ui::panels::net_lengths(&self.doc, &self.sel)
+                            .iter()
+                            .filter(|n| n.total > 0.0)
+                            .map(|n| self.doc.net_name(n.net))
+                            .collect();
+                        let net = if names.is_empty() { None } else { Some(names.join(" + ")) };
+                        self.notice = Some(format!(
+                            "{}: {tracks} track{} and {vias} via{} joined · total track length {}",
+                            net.unwrap_or_else(|| "Joined copper".into()),
+                            if tracks == 1 { "" } else { "s" },
+                            if vias == 1 { "" } else { "s" },
+                            self.unit.len(total)
+                        ));
                     }
                 }
                 if self.hover.is_some() && self.drag.is_none() {
@@ -793,7 +863,10 @@ impl App {
                 // Straight runs left in pieces by the move join up again; a name,
                 // a pour or a keepout moved has left no tracks in pieces.
                 if self.sel.iter().any(|s| matches!(s, Sel::Fp(_) | Sel::Via(_) | Sel::Track(_))) {
-                    crate::ui::app::merge_straight(&mut self.doc);
+                    // Tracks moved on top of others of the same net and width become one.
+                    let picked: std::collections::HashSet<u32> =
+                        self.sel.iter().filter_map(|s| if let Sel::Track(id) = s { Some(*id) } else { None }).collect();
+                    crate::ui::app::tidy_tracks(&mut self.doc, &picked);
                 }
                 let doc = &self.doc;
                 self.sel.retain(|s| match *s {
@@ -1000,6 +1073,46 @@ impl App {
             self.draw_through(painter, tr, &keep);
         }
         self.draw_pad_names(painter, tr);
+        self.draw_track_names(painter, tr);
+    }
+
+    /// The net's name along each straight track of the working layer that's long enough to
+    /// hold it, turned to follow the track and kept the right way up. Only once zoomed in
+    /// enough for the letters to be readable.
+    fn draw_track_names(&self, painter: &Painter, tr: &Tr) {
+        if !self.show_net_names || self.scale < 12.0 || !self.shows(Layer::Cu(self.layer)) {
+            return;
+        }
+        let doc = self.shown();
+        let view = painter.clip_rect().shrink(6.0);
+        for t in doc.tracks.iter().filter(|t| t.layer == self.layer && t.net != 0 && t.mid.is_none()) {
+            // The part of the track that's on the screen, so a long one is named where it can be read.
+            let Some((a, b)) = visible_part(tr.pt(t.a), tr.pt(t.b), view) else { continue };
+            let (d, len) = (b - a, (b - a).length());
+            // Too short to hold anything.
+            if len < 40.0 {
+                continue;
+            }
+            // The text is as tall as the track is wide, but never too small to read nor so big it crowds.
+            let size = (tr.len(t.w) * 0.85).clamp(9.0, 15.0);
+            let name = doc.net_name(t.net);
+            let galley = painter.layout_no_wrap(name.to_string(), theme::mono(size), Color32::from_rgba_unmultiplied(255, 255, 255, 235));
+            if galley.size().x + 12.0 > len {
+                continue;
+            }
+            let mut angle = d.y.atan2(d.x);
+            // Never upside down.
+            if angle > std::f32::consts::FRAC_PI_2 || angle < -std::f32::consts::FRAC_PI_2 {
+                angle += std::f32::consts::PI;
+            }
+            let rot = egui::emath::Rot2::from_angle(angle);
+            let mid = a.lerp(b, 0.5);
+            let corner = mid - rot * (galley.size() / 2.0);
+            // A dark edge under the letters so they read over any copper.
+            let shadow = egui::epaint::TextShape::new(corner + vec2(1.0, 1.0), galley.clone(), Color32::from_black_alpha(150)).with_angle(angle).with_override_text_color(Color32::from_black_alpha(150));
+            painter.add(shadow);
+            painter.add(egui::epaint::TextShape::new(corner, galley, Color32::WHITE).with_angle(angle));
+        }
     }
 
     fn draw_through(&self, painter: &Painter, tr: &Tr, keep: &dyn Fn(u32) -> f32) {
@@ -1146,7 +1259,7 @@ impl App {
         // The rule checks.
         if self.show_problems {
             for (i, prob) in self.problems.iter().enumerate() {
-                if prob.title == "Not connected" || prob.items.is_empty() && prob.title != "Parts overlap" {
+                if !prob.marked() {
                     continue;
                 }
                 let c = if prob.severity == Severity::Error { theme::RED } else { theme::YELLOW };
@@ -1631,4 +1744,48 @@ pub fn save_png(picture: &egui::ColorImage, path: &std::path::Path) -> Result<()
     let mut writer = enc.write_header().map_err(|e| e.to_string())?;
     let bytes: Vec<u8> = picture.pixels.iter().flat_map(|c| c.to_array()).collect();
     writer.write_image_data(&bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    fn at(v: &[Layer], l: Layer) -> usize {
+        v.iter().position(|x| *x == l).unwrap()
+    }
+
+    #[test]
+    fn only_the_part_of_a_track_on_the_screen_is_named() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0));
+        // Wholly inside: all of it.
+        assert_eq!(visible_part(pos2(10.0, 10.0), pos2(90.0, 10.0), rect), Some((pos2(10.0, 10.0), pos2(90.0, 10.0))));
+        // Running off both ends: the part between the edges.
+        let (a, b) = visible_part(pos2(-50.0, 20.0), pos2(250.0, 20.0), rect).unwrap();
+        assert!((a.x - 0.0).abs() < 1e-3 && (b.x - 100.0).abs() < 1e-3);
+        // Off one side only.
+        let (a, b) = visible_part(pos2(40.0, 25.0), pos2(40.0, 500.0), rect).unwrap();
+        assert!((a.y - 25.0).abs() < 1e-3 && (b.y - 50.0).abs() < 1e-3);
+        // Nowhere near, or alongside it.
+        assert_eq!(visible_part(pos2(-10.0, -10.0), pos2(-5.0, 200.0), rect), None);
+        assert_eq!(visible_part(pos2(-10.0, 60.0), pos2(200.0, 60.0), rect), None);
+    }
+
+    #[test]
+    fn the_working_sides_silk_is_over_its_copper_even_when_that_side_is_far() {
+        let copper = vec![31, 1, 0];
+        // From the top, working on the bottom: bottom silk goes over all the copper.
+        let v = stack(false, copper.clone(), Some(Side::Bottom));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(31)) && at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(0)));
+        assert!(at(&v, Layer::Silk(Side::Top)) > at(&v, Layer::Silk(Side::Bottom)), "the near side's silk is still on top of it");
+        // Working on the top: the bottom silk stays underneath, as it is.
+        let v = stack(false, copper.clone(), Some(Side::Top));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) < at(&v, Layer::Cu(31)));
+        // An inner layer works on neither side.
+        let v = stack(false, copper.clone(), None);
+        assert!(at(&v, Layer::Silk(Side::Bottom)) < at(&v, Layer::Cu(31)));
+        // From underneath the bottom is the near side: nothing to lift.
+        let v = stack(true, vec![0, 1, 31], Some(Side::Bottom));
+        assert!(at(&v, Layer::Silk(Side::Bottom)) > at(&v, Layer::Cu(31)));
+        assert_eq!(v.len(), 10, "every layer is there once: fab, courtyard and silk on each side, three copper, the edge");
+    }
 }
