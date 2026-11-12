@@ -8,6 +8,7 @@ pub mod dock;
 pub mod icons;
 pub mod libedit;
 pub mod libview;
+pub mod schview;
 pub mod panels;
 pub mod play;
 pub mod routing;

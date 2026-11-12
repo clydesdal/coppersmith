@@ -3,11 +3,12 @@
 //! bottoms, and the controls for what can be picked.
 
 use crate::pcb::model::*;
-use crate::ui::app::{App, GRIDS, Tool, Unit, WIDTHS};
-use crate::ui::dock::{Filter, LeftTab, Pick, RightTab};
+use crate::pcb::project::FileKind;
+use crate::ui::app::{App, Asked, Doc, GRIDS, Mode, Tool, Unit, WIDTHS};
+use crate::ui::dock::{EditorCmd, EditorLeft, Filter, LeftTab, Pick, RightTab};
 use crate::ui::icons::Icon;
 use crate::ui::panels::{chip, icon_button, segmented, small_icon, tool_button};
-use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, semibold};
+use crate::ui::theme::{self, ACCENT, ACCENT_SOFT, DIM, FAINT, FG, LINE, RAISED, SELECTION, semibold};
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
 // -- Menu pieces -----------------------------------------------------------
@@ -231,12 +232,30 @@ impl App {
             ui.label(RichText::new("Coppersmith").font(semibold(14.5)));
             ui.add_space(10.0);
             ui.spacing_mut().button_padding = vec2(9.0, 4.0);
-            ui.menu_button("File", |ui| self.file_menu(ui, &ctx));
-            ui.menu_button("Edit", |ui| self.edit_menu(ui));
-            ui.menu_button("View", |ui| self.view_menu(ui));
-            ui.menu_button("Place", |ui| self.place_menu(ui));
-            ui.menu_button("Route", |ui| self.route_menu(ui));
-            ui.menu_button("Tools", |ui| self.tools_menu(ui));
+            // Each window has the menus that mean something in it.
+            let mode = self.mode();
+            ui.menu_button("File", |ui| match mode {
+                Mode::Board => self.file_menu(ui, &ctx),
+                _ => self.editor_file_menu(ui, &ctx),
+            });
+            ui.menu_button("Edit", |ui| match mode {
+                Mode::Board => self.edit_menu(ui),
+                _ => self.editor_edit_menu(ui, &ctx),
+            });
+            ui.menu_button("View", |ui| match mode {
+                Mode::Board => self.view_menu(ui),
+                _ => self.editor_view_menu(ui, &ctx),
+            });
+            match mode {
+                Mode::Board => {
+                    ui.menu_button("Place", |ui| self.place_menu(ui));
+                    ui.menu_button("Route", |ui| self.route_menu(ui));
+                    ui.menu_button("Tools", |ui| self.tools_menu(ui));
+                }
+                _ => {
+                    ui.menu_button("Place", |ui| self.editor_place_menu(ui, &ctx));
+                }
+            }
             ui.menu_button("Help", |ui| self.help_menu(ui));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(2.0);
@@ -267,16 +286,18 @@ impl App {
         if item(ui, "Open…", "Ctrl+O", true) {
             self.ask_open(ctx);
         }
-        if item(ui, "Add a footprint library…", "", true) {
-            self.ask_add_library(ctx);
+        if item(ui, "Open project…", "", true) {
+            self.ask_open_project(ctx);
         }
-        let editing = self.libwin.is_some();
-        if item(ui, if editing { "Back to the board" } else { "Library editor…" }, "", true) {
-            if editing {
-                self.libwin = None;
-            } else {
-                self.open_library_editor(None);
-            }
+        ui.separator();
+        if item(ui, "New library", "", true) {
+            self.open_library_editor(None);
+        }
+        if item(ui, "New schematic", "", true) {
+            self.open_schematic_editor(None);
+        }
+        if item(ui, "Add footprints to the Parts list…", "", true) {
+            self.ask_add_library(ctx);
         }
         ui.separator();
         if item(ui, "Save", "Ctrl+S", true) {
@@ -296,6 +317,92 @@ impl App {
         ui.separator();
         if item(ui, "Quit", "", true) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// File menu of the library and schematic editors: what they open and save.
+    fn editor_file_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let mode = self.mode();
+        let symbols = self.lib_active().is_some_and(|w| w.ed.kind == crate::ui::libedit::Kind::Symbols);
+        let footprints = mode == Mode::Library && !symbols;
+        let (new, open, save, save_as) = match (mode, symbols) {
+            (Mode::Library, true) => ("New symbol", "Open library…", "Save library", "Save library as…"),
+            (Mode::Library, false) => ("New footprint", "Open library…", "Save library", "Save library as…"),
+            _ => ("New sheet", "Open sheet…", "Save", "Save as…"),
+        };
+        for (text, key, cmd) in [(new, "", EditorCmd::New), (open, "", EditorCmd::Open)] {
+            if item(ui, text, key, true) {
+                self.editor_command(ctx, cmd);
+            }
+        }
+        ui.separator();
+        for (text, key, cmd) in [(save, "Ctrl+S", EditorCmd::Save), (save_as, "", EditorCmd::SaveAs)] {
+            if item(ui, text, key, true) {
+                self.editor_command(ctx, cmd);
+            }
+        }
+        if footprints && item(ui, "Save to my footprints", "", true) {
+            self.editor_command(ctx, EditorCmd::SaveToParts);
+        }
+        ui.separator();
+        if item(ui, "Open project…", "", true) {
+            self.ask_open_project(ctx);
+        }
+        if item(ui, "Close this tab", "Ctrl+W", self.active.is_some()) {
+            if let Some(i) = self.active {
+                self.close_doc(i);
+            }
+        }
+        ui.separator();
+        if item(ui, "Quit", "", true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn editor_edit_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let (undo, redo, picked, sheet) = match (self.lib_active(), self.sch_active()) {
+            (Some(w), _) => (w.ed.can_undo(), w.ed.can_redo(), w.has_selection(), false),
+            (_, Some(w)) => (w.can_undo(), w.can_redo(), w.has_selection(), true),
+            _ => (false, false, false, false),
+        };
+        for (text, key, ok, cmd) in [("Undo", "Ctrl+Z", undo, EditorCmd::Undo), ("Redo", "Ctrl+Shift+Z", redo, EditorCmd::Redo)] {
+            if item(ui, text, key, ok) {
+                self.editor_command(ctx, cmd);
+            }
+        }
+        ui.separator();
+        if item(ui, "Delete", "Delete", picked) {
+            self.editor_command(ctx, EditorCmd::Delete);
+        }
+        if item(ui, "Turn 90°", "R", picked) {
+            self.editor_command(ctx, EditorCmd::Turn);
+        }
+        if sheet && item(ui, "Mirror", "X", picked) {
+            self.editor_command(ctx, EditorCmd::Mirror);
+        }
+    }
+
+    fn editor_view_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        if item(ui, "Fit to the window", "", true) {
+            self.editor_command(ctx, EditorCmd::Fit);
+        }
+        ui.separator();
+        if check(ui, "Left panel", "Ctrl+[", self.show_left, false) {
+            self.show_left = !self.show_left;
+        }
+    }
+
+    /// The drawing tools of the editor that's open.
+    fn editor_place_menu(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let tools: Vec<&str> = match (self.lib_active(), self.sch_active()) {
+            (_, Some(_)) => vec!["Select and move", "Part", "Wire", "Net label", "Power port"],
+            (Some(w), _) if w.ed.kind == crate::ui::libedit::Kind::Symbols => vec!["Select and move", "Pin", "Line", "Rectangle"],
+            _ => vec!["Select and move", "Pad", "Line", "Circle"],
+        };
+        for (n, name) in tools.into_iter().enumerate() {
+            if item(ui, name, "", true) {
+                self.editor_command(ctx, EditorCmd::Tool(n as u8));
+            }
         }
     }
 
@@ -582,6 +689,192 @@ impl App {
 
     // -- The panels ----------------------------------------------------------
 
+    /// The tabs of what's open: the board, then each schematic and library.
+    pub fn tab_bar(&mut self, ui: &mut Ui) {
+        enum Act {
+            Show(Option<usize>),
+            Close(usize),
+        }
+        let ctx = ui.ctx().clone();
+        let tabs: Vec<(String, Mode, bool)> = std::iter::once((self.title(), Mode::Board, false)).chain(self.docs.iter().map(|d| (d.title(), d.mode(), d.dirty()))).collect();
+        let mut act: Option<Act> = None;
+        ScrollArea::horizontal().id_salt("doc_tabs_scroll").auto_shrink([false, true]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for (k, (title, mode, dirty)) in tabs.iter().enumerate() {
+                    let tab = k.checked_sub(1);
+                    let on = self.active == tab;
+                    let (kind, color) = match mode {
+                        Mode::Board => ("PCB", ACCENT),
+                        Mode::Schematic => ("SCH", theme::GREEN),
+                        Mode::Library => ("LIB", theme::YELLOW),
+                    };
+                    let closable = tab.is_some();
+                    let kind_galley = ui.painter().layout_no_wrap(kind.to_string(), FontId::proportional(10.5), color);
+                    let title_galley = ui.painter().layout_no_wrap(format!("{title}{}", if *dirty { "  •" } else { "" }), FontId::proportional(13.0), if on { FG } else { DIM });
+                    let width = 12.0 + kind_galley.size().x + 8.0 + title_galley.size().x + if closable { 28.0 } else { 12.0 };
+                    let (rect, resp) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
+                    let fill = if on { ACCENT_SOFT } else if resp.hovered() { RAISED } else { Color32::TRANSPARENT };
+                    ui.painter().rect_filled(rect, 7.0, fill);
+                    let mid = rect.center().y;
+                    let mut x = rect.left() + 12.0;
+                    ui.painter().galley(pos2(x, mid - kind_galley.size().y / 2.0), kind_galley.clone(), color);
+                    x += kind_galley.size().x + 8.0;
+                    ui.painter().galley(pos2(x, mid - title_galley.size().y / 2.0), title_galley, FG);
+                    let close = Rect::from_center_size(pos2(rect.right() - 14.0, mid), Vec2::splat(18.0));
+                    let over_close = closable && resp.hover_pos().is_some_and(|q| close.contains(q));
+                    if closable && (on || resp.hovered()) {
+                        if over_close {
+                            ui.painter().rect_filled(close, 5.0, SELECTION);
+                        }
+                        let c = close.center();
+                        let ink = Stroke::new(1.3, if over_close { FG } else { FAINT });
+                        ui.painter().line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], ink);
+                        ui.painter().line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], ink);
+                    }
+                    let resp = resp.on_hover_text(if closable { "Click to show; × or Ctrl+W closes it" } else { "The board" });
+                    if resp.clicked() {
+                        let in_close = resp.interact_pointer_pos().is_some_and(|q| close.contains(q));
+                        act = Some(match tab {
+                            Some(i) if in_close => Act::Close(i),
+                            other => Act::Show(other),
+                        });
+                    }
+                    if resp.middle_clicked()
+                        && let Some(i) = tab
+                    {
+                        act = Some(Act::Close(i));
+                    }
+                }
+                ui.menu_button("+", |ui| {
+                    if item(ui, "New schematic", "", true) {
+                        self.open_schematic_editor(None);
+                    }
+                    if item(ui, "New library", "", true) {
+                        self.open_library_editor(None);
+                    }
+                    ui.separator();
+                    if item(ui, "Open…", "Ctrl+O", true) {
+                        self.ask_open(&ctx);
+                    }
+                });
+            });
+        });
+        match act {
+            Some(Act::Show(t)) => self.activate(t),
+            Some(Act::Close(i)) => self.close_doc(i),
+            None => {}
+        }
+    }
+
+    /// The project's files, to open by double-clicking.
+    pub fn project_page(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Project").size(14.0).color(DIM));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if small_icon(ui, Icon::Folder, "Open a project file (.PrjPcb or .CSPrjPcb)", true).clicked() {
+                    self.ask_open_project(&ctx);
+                }
+                if small_icon(ui, Icon::Undo, "Read the project's files again", self.project.is_some()).clicked()
+                    && let Some(p) = &self.project
+                {
+                    self.project = match &p.file {
+                        Some(f) => crate::pcb::project::Project::from_file(f).ok(),
+                        None => Some(crate::pcb::project::Project::from_folder(&p.dir)),
+                    };
+                }
+            });
+        });
+        let Some(project) = self.project.clone() else {
+            ui.add_space(4.0);
+            ui.label(RichText::new("No project yet.").size(13.0).color(DIM));
+            ui.label(RichText::new("Open a board, schematic or library, or a project file with the folder button, and the files that go with it are listed here.").size(12.0).color(FAINT));
+            return;
+        };
+        ui.label(RichText::new(&project.name).font(semibold(13.5)));
+        ui.label(RichText::new(project.dir.display().to_string()).size(11.0).color(FAINT));
+        ui.label(RichText::new("Double-click a file to open it").size(11.5).color(FAINT));
+        ui.add_space(6.0);
+        let open_now = self.open_paths();
+        let mut open: Option<std::path::PathBuf> = None;
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for kind in [FileKind::Schematic, FileKind::Board, FileKind::Library] {
+                let files: Vec<_> = project.of_kind(kind).collect();
+                if files.is_empty() {
+                    continue;
+                }
+                ui.label(RichText::new(format!("{} · {}", kind.name(), files.len())).size(12.5).color(DIM));
+                for f in files {
+                    let name = f.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    // Open in a tab; brighter if it's the one on show.
+                    let tab = open_now.iter().find(|(p, _)| crate::pcb::project::same_file(p, &f.path));
+                    let here = tab.is_some_and(|(_, on)| *on);
+                    let open_elsewhere = tab.is_some() && !here;
+                    let picked = self.project_sel.as_deref() == Some(f.path.as_path());
+                    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                    let fill = if here { ACCENT_SOFT } else if picked || r.hovered() { RAISED } else { Color32::TRANSPARENT };
+                    ui.painter().rect_filled(rect, 6.0, fill);
+                    let color = if f.missing { FAINT } else if here { ACCENT } else { FG };
+                    let label = if f.missing { format!("{name} (missing)") } else if open_elsewhere { format!("{name}  ·  open") } else { name };
+                    ui.painter().with_clip_rect(rect.shrink2(vec2(6.0, 0.0))).text(rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.0), color);
+                    let r = r.on_hover_text(f.path.display().to_string());
+                    if r.clicked() {
+                        self.project_sel = Some(f.path.clone());
+                    }
+                    if r.double_clicked() {
+                        open = Some(f.path.clone());
+                    }
+                    r.context_menu(|ui| {
+                        if ui.button("Open").clicked() {
+                            open = Some(f.path.clone());
+                            ui.close();
+                        }
+                        if ui.button("Show in its folder").clicked() {
+                            if let Some(dir) = f.path.parent() {
+                                let _ = crate::platform::open_folder(dir);
+                            }
+                            ui.close();
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+            }
+        });
+        if let Some(path) = open {
+            if path.exists() {
+                let _ = self.asked_tx.send(Asked::Open(path));
+                ctx.request_repaint();
+            } else {
+                self.notice = Some(format!("{} isn't there", path.display()));
+            }
+        }
+    }
+
+    /// The left dock of a schematic or library tab: the project's files, or the
+    /// editor's own list, by the tabs along its bottom.
+    pub fn editor_left_dock(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let items = match self.lib_active() {
+            Some(w) if w.ed.kind == crate::ui::libedit::Kind::Footprints => "Footprints",
+            _ => "Symbols",
+        };
+        egui::Panel::bottom("editor-left-tabs").resizable(false).show_separator_line(false).frame(Frame::new().fill(theme::WELL)).show(ui, |ui| {
+            let tabs: Vec<(EditorLeft, &str, Badge)> = vec![(EditorLeft::Project, "Project", None), (EditorLeft::Items, items, None)];
+            let mut tab = self.editor_tab;
+            tab_strip(ui, &mut tab, &tabs);
+            self.editor_tab = tab;
+        });
+        egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| match self.editor_tab {
+            EditorLeft::Project => self.project_page(ui),
+            EditorLeft::Items => match self.active.and_then(|i| self.docs.get_mut(i)) {
+                Some(Doc::Library(w)) => w.list(ui),
+                Some(Doc::Schematic(w)) => w.symbol_list(ui, &ctx),
+                None => {}
+            },
+        });
+    }
+
     pub fn left_dock(&mut self, ui: &mut Ui) {
         egui::Panel::bottom("left-tabs").resizable(false).show_separator_line(false).frame(Frame::new().fill(theme::WELL)).show(ui, |ui| {
             let tabs: Vec<(LeftTab, &str, Badge)> = LeftTab::ALL
@@ -593,7 +886,13 @@ impl App {
             self.left_tab = tab;
         });
         egui::CentralPanel::default().frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::symmetric(10, 10))).show(ui, |ui| {
+            // The project page scrolls itself.
+            if self.left_tab == LeftTab::Project {
+                self.project_page(ui);
+                return;
+            }
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.left_tab {
+                LeftTab::Project => {}
                 LeftTab::Layers => self.layers_page(ui),
                 LeftTab::Parts => self.library_list(ui),
                 LeftTab::Select => self.select_page(ui),

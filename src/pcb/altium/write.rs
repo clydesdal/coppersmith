@@ -278,27 +278,27 @@ pub fn pcblib(footprints: &[FootprintDef]) -> Result<Vec<u8>, String> {
 
 // -- Symbols ----------------------------------------------------------------
 
-use super::schlib::{Drawing, PinKind, Symbol};
+use super::schlib::{Drawing, Pin, PinKind, Symbol};
 
 /// One schematic unit, 10 mil, in millimetres.
 const SCH: f64 = 0.254;
 
 /// A record's fields, written in the order they're added.
 #[derive(Default)]
-struct Rec(Vec<(String, String)>);
+pub(super) struct Rec(pub Vec<(String, String)>);
 
 impl Rec {
-    fn new(kind: u32) -> Rec {
+    pub(super) fn new(kind: u32) -> Rec {
         let mut r = Rec::default();
         r.set("RECORD", kind);
         r
     }
-    fn set(&mut self, key: &str, v: impl ToString) -> &mut Self {
+    pub(super) fn set(&mut self, key: &str, v: impl ToString) -> &mut Self {
         self.0.push((key.to_string(), v.to_string()));
         self
     }
     /// A position or length in millimetres, as whole units and a fraction of one.
-    fn mm(&mut self, key: &str, v: f64) -> &mut Self {
+    pub(super) fn mm(&mut self, key: &str, v: f64) -> &mut Self {
         let u = v / SCH;
         let mut whole = u.trunc();
         let mut frac = ((u - whole) * 100_000.0).round();
@@ -312,15 +312,15 @@ impl Rec {
         }
         self
     }
-    fn at(&mut self, x: &str, y: &str, q: P) -> &mut Self {
+    pub(super) fn at(&mut self, x: &str, y: &str, q: P) -> &mut Self {
         self.mm(x, q.x).mm(y, q.y)
     }
     /// Which part of the symbol it's on: -1 for all of them.
-    fn owner(&mut self, part: u32) -> &mut Self {
+    pub(super) fn owner(&mut self, part: u32) -> &mut Self {
         self.set("OWNERPARTID", if part == 0 { -1 } else { part as i64 })
     }
     /// The record with its four-byte head (length, then 0 for text).
-    fn bytes(&self) -> Vec<u8> {
+    pub(super) fn bytes(&self) -> Vec<u8> {
         let body = param_text(&self.0);
         let mut o = Out::default();
         o.u32(body.len() as u32);
@@ -342,6 +342,56 @@ fn pin_code(k: PinKind) -> u8 {
     }
 }
 
+/// A drawing as a record, for the part it belongs to (0 for all of them).
+pub(super) fn drawing_rec(d: &Drawing, part: u32) -> Rec {
+    let mut r;
+    match d {
+        Drawing::Line(a, b) => {
+            r = Rec::new(13);
+            r.at("LOCATION.X", "LOCATION.Y", *a).at("CORNER.X", "CORNER.Y", *b);
+        }
+        Drawing::Rect(a, b) => {
+            r = Rec::new(14);
+            r.at("LOCATION.X", "LOCATION.Y", *a).at("CORNER.X", "CORNER.Y", *b);
+        }
+        Drawing::Polyline(pts) | Drawing::Polygon(pts) => {
+            r = Rec::new(if matches!(d, Drawing::Polyline(_)) { 6 } else { 7 });
+            r.set("LOCATIONCOUNT", pts.len());
+            for (i, q) in pts.iter().enumerate() {
+                r.at(&format!("X{}", i + 1), &format!("Y{}", i + 1), *q);
+            }
+        }
+        Drawing::Arc { c, r: radius, start, end } => {
+            r = Rec::new(12);
+            r.at("LOCATION.X", "LOCATION.Y", *c).mm("RADIUS", *radius).set("STARTANGLE", start).set("ENDANGLE", end);
+        }
+        Drawing::Ellipse { c, rx, ry } => {
+            r = Rec::new(8);
+            r.at("LOCATION.X", "LOCATION.Y", *c).mm("RADIUS", *rx).mm("SECONDARYRADIUS", *ry);
+        }
+        Drawing::Text { at, text } => {
+            r = Rec::new(4);
+            r.at("LOCATION.X", "LOCATION.Y", *at).set("TEXT", text);
+        }
+    }
+    r.owner(part);
+    r
+}
+
+/// A pin as a record.
+pub(super) fn pin_rec(pin: &Pin) -> Rec {
+    let turn = (pin.angle / 90.0).round() as u32 & 3;
+    let mut r = Rec::new(2);
+    r.owner(pin.part.max(1))
+        .set("ELECTRICAL", pin_code(pin.kind))
+        .set("PINCONGLOMERATE", turn | if pin.hidden { 4 } else { 0 } | 0x18)
+        .set("NAME", &pin.name)
+        .set("DESIGNATOR", &pin.number)
+        .mm("PINLENGTH", pin.length)
+        .at("LOCATION.X", "LOCATION.Y", pin.at);
+    r
+}
+
 /// A symbol's records: the component, its pins and drawings, designator and
 /// footprint links.
 fn symbol_records(s: &Symbol) -> Vec<u8> {
@@ -351,50 +401,10 @@ fn symbol_records(s: &Symbol) -> Vec<u8> {
     c.set("LIBREFERENCE", &s.name).set("COMPONENTDESCRIPTION", &s.description).set("PARTCOUNT", s.parts + 1).set("DISPLAYMODECOUNT", 1).set("CURRENTPARTID", 1);
     add(&c);
     for (part, d) in &s.drawings {
-        let mut r;
-        match d {
-            Drawing::Line(a, b) => {
-                r = Rec::new(13);
-                r.at("LOCATION.X", "LOCATION.Y", *a).at("CORNER.X", "CORNER.Y", *b);
-            }
-            Drawing::Rect(a, b) => {
-                r = Rec::new(14);
-                r.at("LOCATION.X", "LOCATION.Y", *a).at("CORNER.X", "CORNER.Y", *b);
-            }
-            Drawing::Polyline(pts) | Drawing::Polygon(pts) => {
-                r = Rec::new(if matches!(d, Drawing::Polyline(_)) { 6 } else { 7 });
-                r.set("LOCATIONCOUNT", pts.len());
-                for (i, q) in pts.iter().enumerate() {
-                    r.at(&format!("X{}", i + 1), &format!("Y{}", i + 1), *q);
-                }
-            }
-            Drawing::Arc { c, r: radius, start, end } => {
-                r = Rec::new(12);
-                r.at("LOCATION.X", "LOCATION.Y", *c).mm("RADIUS", *radius).set("STARTANGLE", start).set("ENDANGLE", end);
-            }
-            Drawing::Ellipse { c, rx, ry } => {
-                r = Rec::new(8);
-                r.at("LOCATION.X", "LOCATION.Y", *c).mm("RADIUS", *rx).mm("SECONDARYRADIUS", *ry);
-            }
-            Drawing::Text { at, text } => {
-                r = Rec::new(4);
-                r.at("LOCATION.X", "LOCATION.Y", *at).set("TEXT", text);
-            }
-        }
-        r.owner(*part);
-        add(&r);
+        add(&drawing_rec(d, *part));
     }
     for pin in &s.pins {
-        let turn = (pin.angle / 90.0).round() as u32 & 3;
-        let mut r = Rec::new(2);
-        r.owner(pin.part.max(1))
-            .set("ELECTRICAL", pin_code(pin.kind))
-            .set("PINCONGLOMERATE", turn | if pin.hidden { 4 } else { 0 } | 0x18)
-            .set("NAME", &pin.name)
-            .set("DESIGNATOR", &pin.number)
-            .mm("PINLENGTH", pin.length)
-            .at("LOCATION.X", "LOCATION.Y", pin.at);
-        add(&r);
+        add(&pin_rec(pin));
     }
     let mut d = Rec::new(34);
     d.owner(0).set("TEXT", format!("{}?", s.prefix)).set("NAME", "Designator");

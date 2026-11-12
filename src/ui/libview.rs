@@ -5,6 +5,7 @@
 use crate::pcb::altium::schlib::{Drawing, PinKind};
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
+use crate::ui::dock::EditorCmd;
 use crate::ui::icons::Icon;
 use crate::ui::libedit::{FOOTPRINT_GRIDS, Item, Kind, LibEditor, SYMBOL_GRIDS, Tool};
 use crate::ui::panels::{card, chip, field, segmented, small_icon};
@@ -23,7 +24,6 @@ enum Dialog {
 /// What the window asks of the app around it.
 #[derive(Default)]
 pub struct Outcome {
-    pub close: bool,
     /// Footprints were saved where the board's library reads them from.
     pub reload_parts: bool,
     pub notice: Option<String>,
@@ -73,7 +73,7 @@ impl LibWindow {
     fn ask_open(&self, ctx: &egui::Context) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &["PcbLib", "pcblib", "SchLib", "schlib", "IntLib", "intlib"]);
+            let dialog = rfd::FileDialog::new().set_title("Open an Altium library").add_filter("Altium libraries", &crate::pcb::altium::with_cases(&["PcbLib", "SchLib", "IntLib"]));
             if let Some(path) = dialog.pick_file() {
                 let _ = tx.send(Dialog::Open(path));
                 ctx.request_repaint();
@@ -130,6 +130,39 @@ impl LibWindow {
         self.ed.kind = was;
     }
 
+    /// What a menu item asks of the editor.
+    pub fn command(&mut self, cmd: EditorCmd, ctx: &egui::Context, out: &mut Outcome) {
+        match cmd {
+            EditorCmd::New => self.ed.new_item(),
+            EditorCmd::Open => self.ask_open(ctx),
+            EditorCmd::Save => self.save(ctx, out),
+            EditorCmd::SaveAs => self.ask_save_as(ctx),
+            EditorCmd::SaveToParts => self.save_to_parts(out),
+            EditorCmd::Undo => self.ed.undo(),
+            EditorCmd::Redo => self.ed.redo(),
+            EditorCmd::Delete => {
+                if let Some(item) = self.ed.sel {
+                    self.ed.delete(item);
+                }
+            }
+            EditorCmd::Turn => {
+                if let Some(item) = self.ed.sel {
+                    self.ed.rotate(item);
+                }
+            }
+            EditorCmd::Mirror => {}
+            EditorCmd::Fit => self.fit = true,
+            EditorCmd::Tool(n) => {
+                self.ed.tool = [Tool::Select, Tool::Pad, Tool::Line, Tool::Shape][(n as usize).min(3)];
+                self.ed.pending = None;
+            }
+        }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.ed.sel.is_some()
+    }
+
     fn pump(&mut self, out: &mut Outcome) {
         while let Ok(d) = self.rx.try_recv() {
             match d {
@@ -152,8 +185,6 @@ impl LibWindow {
         Panel::top("lib_tools").resizable(false).frame(bar).show(ui, |ui| {
             ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| self.toolbar(ui, &ctx, &mut out));
         });
-        let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
-        Panel::left("lib_list").resizable(true).default_size(250.0).size_range(200.0..=400.0).frame(side).show(ui, |ui| self.list(ui));
         let side = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10));
         Panel::right("lib_props").resizable(true).default_size(290.0).size_range(240.0..=440.0).frame(side).show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.details(ui, elsewhere));
@@ -225,13 +256,7 @@ impl LibWindow {
             if chip(ui, "Save as…", false).clicked() {
                 self.ask_save_as(ctx);
             }
-            if !symbols && chip(ui, "Save to my footprints", false).on_hover_text("Write a PcbLib into the folder the Parts list reads, so they can be placed on a board").clicked() {
-                self.save_to_parts(out);
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if chip(ui, "Back to the board", false).clicked() {
-                    out.close = true;
-                }
                 if self.ed.dirty {
                     ui.label(RichText::new("unsaved").size(12.0).color(YELLOW));
                 }
@@ -241,7 +266,7 @@ impl LibWindow {
 
     // -- Left: what's in the library ----------------------------------------------------
 
-    fn list(&mut self, ui: &mut Ui) {
+    pub fn list(&mut self, ui: &mut Ui) {
         let symbols = self.ed.kind == Kind::Symbols;
         ui.horizontal(|ui| {
             ui.label(RichText::new(if symbols { "Symbols" } else { "Footprints" }).size(14.0).color(DIM));
@@ -266,6 +291,16 @@ impl LibWindow {
         ui.add_space(6.0);
         let words = self.ed.filter.to_lowercase();
         let names = self.ed.names();
+        if names.is_empty() {
+            // Say why the list is empty and what to do, rather than leave it blank.
+            let (here, other, other_count, other_name) = if symbols { ("symbols", "footprints", self.ed.footprints.len(), "Footprints") } else { ("footprints", "symbols", self.ed.symbols.len(), "Symbols") };
+            ui.label(RichText::new(format!("No {here} here yet.")).size(13.0).color(DIM));
+            if other_count > 0 {
+                ui.label(RichText::new(format!("This library has {other_count} {other}: switch to {other_name} at the top.")).size(12.0).color(YELLOW));
+            }
+            let open = if symbols { "Open a SchLib or IntLib with the folder button, or press + to draw one." } else { "Open a PcbLib or IntLib with the folder button, press + to draw one, or double-click a part in the board's Parts list to edit its library." };
+            ui.label(RichText::new(open).size(12.0).color(FAINT));
+        }
         let mut pick = None;
         let room = if self.wizard_room() { 215.0 } else { 0.0 };
         ScrollArea::vertical().max_height((ui.available_height() - room).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {
