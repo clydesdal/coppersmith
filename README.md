@@ -637,7 +637,7 @@ What each computer needs besides Rust:
 |---|---|---|
 | Linux | a C linker; on Debian/Ubuntu also `libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev` | `sh packaging/linux/install.sh` adds it to ~/Applications and the launcher |
 | macOS | Xcode command line tools (`xcode-select --install`) | `sh packaging/macos/make-app.sh` makes `target/Coppersmith.app` (`--universal` for Apple Silicon + Intel) |
-| Windows | Visual Studio Build Tools, "Desktop development with C++" | `packaging\windows\make-zip.ps1` makes a zip with `coppersmith.exe` |
+| Windows | Visual Studio Build Tools, "Desktop development with C++" | `packaging\windows\make-installer.ps1` makes `target\coppersmith-VERSION-setup.exe`, which adds it to the Start menu and opens .cspcb boards (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`); `make-zip.ps1` makes a zip with just `coppersmith.exe` |
 
 `.github/workflows/build.yml` builds, tests and packages all three on GitHub.
 

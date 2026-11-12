@@ -57,6 +57,11 @@ jobs:
       - name: Mac app
         if: runner.os == 'macOS'
         run: sh packaging/macos/make-app.sh
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          powershell -ExecutionPolicy Bypass -File packaging\windows\make-installer.ps1
       - name: Gerbers from the sample board
         shell: bash
         run: |
@@ -67,3 +72,8 @@ jobs:
         with:
           name: coppersmith-${{ runner.os }}
           path: ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: coppersmith-Windows-setup
+          path: target/coppersmith-*-setup.exe

@@ -132,7 +132,7 @@ pub fn install() -> Result<String, String> {
     }
     #[cfg(windows)]
     {
-        Err("On Windows, run packaging\\windows\\make-zip.ps1 and unzip it where you keep programs.".into())
+        Err("On Windows, run coppersmith-VERSION-setup.exe; packaging\\windows\\make-installer.ps1 makes it.".into())
     }
 }
 
