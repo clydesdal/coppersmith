@@ -54,9 +54,9 @@ jobs:
       # The tests in the release profile, so the build after them reuses what they compiled.
       - run: cargo test --release
       - run: cargo build --release
-      - name: Mac app
+      - name: Mac app and disk image
         if: runner.os == 'macOS'
-        run: sh packaging/macos/make-app.sh
+        run: sh packaging/macos/make-dmg.sh
       - name: Windows installer
         if: runner.os == 'Windows'
         run: |
@@ -77,3 +77,8 @@ jobs:
         with:
           name: coppersmith-Windows-setup
           path: target/coppersmith-*-setup.exe
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: coppersmith-macOS-dmg
+          path: target/coppersmith-*.dmg
