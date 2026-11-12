@@ -9,7 +9,9 @@
 
 use crate::pcb::geom::*;
 use crate::pcb::model::*;
-use crate::pcb::copper::{Item, analyse};
+use crate::pcb::copper::Item;
+#[cfg(test)]
+use crate::pcb::copper::{analyse, push_copper, scene_copper};
 use crate::pcb::router::{Corner, Obstacle, Scene, apply_pushed, chamfer, legs, shove_from};
 use std::collections::HashSet;
 
@@ -63,9 +65,17 @@ fn add_track(board: &mut Board, like: &Track, a: P, b: P) {
     board.tracks.push(Track { mid: None, id, a, b, w: like.w, layer: like.layer, net: like.net });
 }
 
-/// Takes out tracks with no length left.
-pub fn tidy(board: &mut Board) {
-    board.tracks.retain(|t| !t.a.same(t.b));
+/// The tracks that have no length: round dots of copper, which a board from
+/// Altium has plenty of.
+pub fn dots(board: &Board) -> HashSet<u32> {
+    board.tracks.iter().filter(|t| t.a.same(t.b)).map(|t| t.id).collect()
+}
+
+/// Takes out tracks that have no length left after a move. A track that had
+/// none to begin with (`dots`, taken before the move) is a dot of copper, not
+/// something left over, and stays.
+pub fn tidy(board: &mut Board, dots: &HashSet<u32>) {
+    board.tracks.retain(|t| !t.a.same(t.b) || dots.contains(&t.id));
 }
 
 /// Slides a straight track sideways by `delta` (only the part square to it
@@ -143,7 +153,7 @@ pub fn slide(board: &mut Board, id: u32, delta: P) -> bool {
         s.a = ends[0];
         s.b = ends[1];
     }
-    tidy(&mut work);
+    tidy(&mut work, &dots(board));
     *board = work;
     true
 }
@@ -166,6 +176,16 @@ pub fn slide_push(board: &Board, id: u32, delta: P, via_push: bool) -> Option<Bo
 /// the clearance of what can't be pushed (other parts' pads, holes, the edge,
 /// or a via with via pushing off), or what's in the way can't give way.
 pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<Board> {
+    push_after_move_with(before, after, via_push, &push_scene)
+}
+
+/// What a push reads of the board on one layer.
+fn push_scene(board: &Board, layer: u8) -> Scene {
+    Scene::for_push(board, layer)
+}
+
+/// As `push_after_move`, with the scene for each layer made by `build`.
+fn push_after_move_with(before: &Board, after: Board, via_push: bool, build: &dyn Fn(&Board, u8) -> Scene) -> Option<Board> {
     let mut b = after;
     // Pushing on one layer can move vias, whose tracks and selves then push
     // on the other layers, and so on: go round the layers until it settles.
@@ -174,7 +194,7 @@ pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<B
             return None;
         }
         let start = b.clone();
-        b = push_layers(before, b, via_push)?;
+        b = push_layers(before, b, via_push, build)?;
         if b == start {
             break;
         }
@@ -184,14 +204,16 @@ pub fn push_after_move(before: &Board, after: Board, via_push: bool) -> Option<B
 
 /// One go round the copper layers, pushing out of the way of everything
 /// that differs from `before`.
-fn push_layers(before: &Board, after: Board, via_push: bool) -> Option<Board> {
-    let changed: HashSet<u32> = after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect();
+fn push_layers(before: &Board, after: Board, via_push: bool, build: &dyn Fn(&Board, u8) -> Scene) -> Option<Board> {
+    let changed = changed_tracks(before, &after);
+    let vias_was: std::collections::HashMap<u32, &Via> = before.vias.iter().map(|v| (v.id, v)).collect();
     let moved_vias: HashSet<u32> =
-        after.vias.iter().filter(|v| before.via(v.id).is_none_or(|old| !old.at.same(v.at))).map(|v| v.id).collect();
+        after.vias.iter().filter(|v| vias_was.get(&v.id).is_none_or(|old| !old.at.same(v.at))).map(|v| v.id).collect();
+    let fps_was: std::collections::HashMap<u32, &Footprint> = before.footprints.iter().map(|f| (f.id, f)).collect();
     let moved_fps: HashSet<u32> = after
         .footprints
         .iter()
-        .filter(|f| before.fp(f.id).is_none_or(|old| !old.at.same(f.at) || old.rot != f.rot || old.side != f.side))
+        .filter(|f| fps_was.get(&f.id).is_none_or(|old| !old.at.same(f.at) || old.rot != f.rot || old.side != f.side))
         .map(|f| f.id)
         .collect();
     if changed.is_empty() && moved_vias.is_empty() && moved_fps.is_empty() {
@@ -224,7 +246,7 @@ fn push_layers(before: &Board, after: Board, via_push: bool) -> Option<Board> {
         if push.is_empty() {
             continue;
         }
-        let mut scene = Scene::new(&b, &analyse(&b), layer, 0);
+        let mut scene = build(&b, layer);
         scene.via_push = via_push;
         scene.lines.retain(|l| !l.ids.iter().any(|i| changed.contains(i)));
         scene.vias.retain(|v| !moved_vias.contains(&v.0));
@@ -323,7 +345,10 @@ pub fn fix_corners(board: &mut Board, changed: &HashSet<u32>, min: f64) -> bool 
 
 /// The tracks that differ between two boards.
 pub fn changed_tracks(before: &Board, after: &Board) -> HashSet<u32> {
-    after.tracks.iter().filter(|t| before.track(t.id) != Some(*t)).map(|t| t.id).collect()
+    // Looked up by id in a map: `Board::track` searches the whole list, which
+    // for every track of a big board is slow.
+    let was: std::collections::HashMap<u32, &Track> = before.tracks.iter().map(|t| (t.id, t)).collect();
+    after.tracks.iter().filter(|t| was.get(&t.id).copied() != Some(*t)).map(|t| t.id).collect()
 }
 
 /// Puts a refitted arc corner on the board: the arc where it now goes, and
@@ -483,6 +508,11 @@ fn relay_keeping(board: &mut Board, i: usize, from: P, to: P, last: bool) {
 /// point that moved), brings the ends of the other tracks along without
 /// bending 45° work out of shape. `skip` are tracks that moved bodily.
 pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
+    // Nothing moved that tracks are joined to (a name, a keepout…): nothing to do.
+    if moves.is_empty() {
+        return;
+    }
+    let was_dots = dots(board);
     // Points that have moved, and whether a track arriving there has to stay
     // tangent to an arc that moved with them.
     let mut moves: Vec<(P, P, bool)> = moves.iter().map(|m| (m.0, m.1, false)).collect();
@@ -573,12 +603,13 @@ pub fn follow_moves(board: &mut Board, moves: &[(P, P)], skip: &HashSet<u32>) {
         // meets it keeps the old direction.
         relay_keeping(board, i, other, new, tangent);
     }
-    tidy(board);
+    tidy(board, &was_dots);
 }
 
 /// Drags the point where tracks meet from `from` to `to`, keeping 45° work
 /// at 45°: each track there is re-laid from its far end.
 pub fn drag_joint(board: &mut Board, from: P, to: P) {
+    let was_dots = dots(board);
     let at: Vec<u32> = board.tracks.iter().filter(|t| t.a.same(from) || t.b.same(from)).map(|t| t.id).collect();
     for id in at {
         let Some(i) = board.tracks.iter().position(|t| t.id == id) else { continue };
@@ -595,12 +626,443 @@ pub fn drag_joint(board: &mut Board, from: P, to: P) {
             v.at = to;
         }
     }
-    tidy(board);
+    tidy(board, &was_dots);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pcb::drc;
+
+    #[test]
+    fn a_scene_reads_the_same_from_the_quick_listing_as_from_the_full_analysis() {
+        let mut b = crate::pcb::sample::board();
+        let id = b.new_id();
+        let net = b.pours.first().map(|p| p.net).unwrap_or(0);
+        b.pours.push(Pour::new(id, TOP, net, Vec::new(), &b.rules));
+        b.repour();
+        assert!(b.pours.iter().any(|p| !p.fill.is_empty()), "something poured");
+        let shape = |s: &Scene| {
+            let all: Vec<_> = s.all.iter().map(|o| (o.item, o.net, o.movable, o.blob.core.clone(), o.blob.r)).collect();
+            let lines: Vec<_> = s.lines.iter().map(|l| l.ids.clone()).collect();
+            let others: Vec<_> = s.others.iter().map(|(l, all, runs)| (*l, all.len(), runs.len())).collect();
+            (all, lines, others, s.vias.len())
+        };
+        for layer in b.copper_layers() {
+            let full = Scene::new(&b, &analyse(&b), layer, 0);
+            let quick = Scene::new(&b, &scene_copper(&b), layer, 0);
+            assert_eq!(shape(&full), shape(&quick), "layer {layer}");
+        }
+    }
+
+    /// Parallel tracks close together, several nets, vias and pads among them,
+    /// and an arc: a board where sliding one track pushes others.
+    fn crowded() -> Board {
+        let mut b = Board::default();
+        let nets = [b.net("A"), b.net("B"), b.net("C")];
+        let add = |b: &mut Board, a: P, e: P, mid: Option<P>, layer: u8, net: u32| {
+            let id = b.new_id();
+            b.tracks.push(Track { mid, id, a, b: e, w: 0.25, layer, net });
+        };
+        let pad = |b: &mut Board, at: P, net: u32, drill: f64| {
+            let id = b.new_id();
+            b.footprints.push(Footprint {
+                id,
+                def: "TP".into(),
+                refdes: format!("TP{id}"),
+                value: String::new(),
+                at,
+                rot: 0.0,
+                side: Side::Top,
+                pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill, net }],
+                graphics: vec![],
+                label_at: P::default(),
+                label_height: None,
+                locked: false,
+                keepouts: vec![],
+            });
+        };
+        // Tracks from pad to pad, side by side, of three nets in turn.
+        for k in 0..8 {
+            let y = 8.0 + 1.6 * k as f64;
+            pad(&mut b, p(5.0, y), nets[k % 3], 0.0);
+            pad(&mut b, p(40.0, y), nets[k % 3], 0.0);
+            add(&mut b, p(5.0, y), p(40.0, y), None, TOP, nets[k % 3]);
+        }
+        // Some on the other side, joined to through-hole pads, with a bend.
+        for k in 0..4 {
+            let y = 25.0 + 1.6 * k as f64;
+            let net = nets[(k + 1) % 3];
+            pad(&mut b, p(8.0, y), net, 0.5);
+            pad(&mut b, p(26.0, y + 2.0), net, 0.5);
+            add(&mut b, p(8.0, y), p(20.0, y), None, BOTTOM, net);
+            add(&mut b, p(20.0, y), p(26.0, y + 2.0), None, BOTTOM, net);
+        }
+        // Half circles of a third net between stack tracks: an arc of half a
+        // circle or more is in no run, so it can't be bent and is a wall.
+        add(&mut b, p(21.7, 13.6), p(22.3, 13.6), Some(p(22.0, 13.9)), TOP, nets[2]);
+        add(&mut b, p(29.7, 16.8), p(30.3, 16.8), Some(p(30.0, 17.1)), TOP, nets[2]);
+        // An arc with a track close beside it.
+        add(&mut b, p(40.0, 25.0), p(45.0, 30.0), Some(p(43.5355, 26.4645)), TOP, nets[0]);
+        add(&mut b, p(36.0, 24.0), p(44.0, 24.0), None, TOP, nets[1]);
+        // Vias beside the stack and pads clear of it.
+        for (i, (x, y)) in [(12.0, 7.0), (25.0, 6.5), (33.0, 5.5), (22.0, 4.0)].into_iter().enumerate() {
+            let id = b.new_id();
+            b.vias.push(Via { id, at: p(x, y), dia: 0.6, drill: 0.3, net: nets[i % 3] });
+        }
+        for (i, (x, y)) in [(3.0, 36.0), (6.0, 36.0), (43.0, 33.0), (46.0, 35.0)].into_iter().enumerate() {
+            pad(&mut b, p(x, y), nets[i % 3], if i % 2 == 0 { 0.0 } else { 0.5 });
+        }
+        b
+    }
+
+    /// The crowded board with dots of copper (tracks of no length) scattered
+    /// about it, as an Altium board has.
+    fn crowded_with_dots() -> (Board, Vec<u32>) {
+        let mut b = crowded();
+        let n = b.net("A");
+        let mut ids = Vec::new();
+        for (x, y) in [(2.0, 2.0), (44.0, 3.0), (30.0, 36.0)] {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: p(x, y), b: p(x, y), w: 0.5, layer: TOP, net: n });
+            ids.push(id);
+        }
+        (b, ids)
+    }
+
+    #[test]
+    fn following_nothing_changes_nothing() {
+        let (mut b, _) = crowded_with_dots();
+        let was = b.clone();
+        follow_moves(&mut b, &[], &HashSet::new());
+        assert_eq!(b, was);
+    }
+
+    #[test]
+    fn dots_of_copper_survive_moves_that_have_nothing_to_do_with_them() {
+        let (b, dots_were) = crowded_with_dots();
+        let kept = |b: &Board| dots_were.iter().all(|id| b.track(*id).is_some_and(|t| t.a.same(t.b)));
+        // A real move: a track's end, with its neighbours following.
+        let mut moved = b.clone();
+        follow_moves(&mut moved, &[(p(5.0, 8.0), p(5.0, 8.5))], &HashSet::new());
+        assert!(moved != b, "something followed");
+        assert!(kept(&moved), "the dots stand");
+        // Sliding a track.
+        let id = b.tracks.iter().find(|t| t.mid.is_none() && t.a.dist(t.b) > 10.0).unwrap().id;
+        let mut slid = b.clone();
+        assert!(slide(&mut slid, id, p(0.0, 0.2)));
+        assert!(kept(&slid));
+        // Dragging a corner.
+        let mut joint = b.clone();
+        drag_joint(&mut joint, p(5.0, 9.6), p(5.0, 9.9));
+        assert!(kept(&joint));
+    }
+
+    #[test]
+    fn a_track_a_move_leaves_with_no_length_still_goes() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let (dot, track) = (b.new_id(), b.new_id());
+        b.tracks.push(Track { mid: None, id: dot, a: p(30.0, 30.0), b: p(30.0, 30.0), w: 0.4, layer: TOP, net: n });
+        b.tracks.push(Track { mid: None, id: track, a: p(10.0, 10.0), b: p(13.0, 10.0), w: 0.25, layer: TOP, net: n });
+        // One end moves on to the other: nothing's left of it.
+        follow_moves(&mut b, &[(p(10.0, 10.0), p(13.0, 10.0))], &HashSet::new());
+        assert!(b.track(track).is_none_or(|t| !t.a.same(t.b)), "no track of no length was left by the move");
+        assert!(b.tracks.iter().all(|t| t.id == dot || !t.a.same(t.b)));
+        assert!(b.track(dot).is_some(), "the dot that was always there stays");
+    }
+
+    /// The push scene must push exactly as the full one did.
+    #[test]
+    fn a_push_scene_pushes_what_the_full_scene_does() {
+        let legacy = |b: &Board, layer: u8| Scene::new(b, &scene_copper(b), layer, 0);
+        let base = crowded();
+        let (mut tried, mut pushed, mut refused) = (0, 0, 0);
+        for t in base.tracks.iter().filter(|t| t.mid.is_none()) {
+            for d in [p(0.0, 0.1), p(0.0, -0.5), p(0.0, 1.5), p(0.0, -1.8), p(0.0, 2.6), p(0.7, 0.0), p(0.0, 0.3)] {
+                let mut moved = base.clone();
+                if !slide(&mut moved, t.id, d) {
+                    continue;
+                }
+                for via_push in [true, false] {
+                    let new = push_after_move(&base, moved.clone(), via_push);
+                    let old = push_after_move_with(&base, moved.clone(), via_push, &legacy);
+                    assert_eq!(new, old, "track {} by {d:?}, via pushing {via_push}", t.id);
+                    tried += 1;
+                    if new.is_none() {
+                        refused += 1;
+                    }
+                    if new.as_ref().is_some_and(|n| *n != moved) {
+                        pushed += 1;
+                    }
+                }
+            }
+        }
+        assert!(tried > 40, "{tried} tried");
+        assert!(pushed > 10, "something was pushed in {pushed} of {tried} ({refused} refused)");
+    }
+
+    /// The crowded board, and versions of it with something changed that a
+    /// push scene is made from: a via, a part, a rule, the outline, a wall.
+    fn changed_boards() -> Vec<(&'static str, Board)> {
+        let base = crowded();
+        let mut variants: Vec<(&str, Board)> = vec![("as it was", base.clone())];
+        let mut b = base.clone();
+        b.vias[0].at = p(12.0, 9.0);
+        variants.push(("a via moved", b));
+        let mut b = base.clone();
+        b.vias.pop();
+        variants.push(("a via gone", b));
+        let mut b = base.clone();
+        b.footprints[3].at = b.footprints[3].at.add(p(0.0, 0.4));
+        variants.push(("a part moved", b));
+        let mut b = base.clone();
+        b.rules.clearance = 0.4;
+        variants.push(("a wider clearance", b));
+        let mut b = base.clone();
+        b.outline = rect_outline(p(0.0, 0.0), p(50.0, 19.0));
+        variants.push(("a smaller board", b));
+        let mut b = base.clone();
+        b.footprints[5].pads[0].net = 2;
+        variants.push(("a pad of another net", b));
+        // Walls (half circles) that move or aren't there any more, and nothing
+        // else different: put together, and next to the board as it was, so
+        // each change of walls follows another with the rest the same.
+        let walls: Vec<usize> = base.tracks.iter().enumerate().filter(|(_, t)| t.mid.is_some() && t.a.dist(t.b) < 1.0).map(|(i, _)| i).collect();
+        assert_eq!(walls.len(), 2);
+        let mut wall_variants: Vec<(&str, Board)> = Vec::new();
+        let mut b = base.clone();
+        b.tracks[walls[0]].a = b.tracks[walls[0]].a.add(p(0.0, 0.2));
+        wall_variants.push(("the first wall moved", b));
+        let mut b = base.clone();
+        b.tracks[walls[1]].a = b.tracks[walls[1]].a.add(p(0.0, 0.2));
+        wall_variants.push(("the second wall moved", b));
+        let mut b = base.clone();
+        b.tracks.remove(walls[0]);
+        wall_variants.push(("the first wall gone", b));
+        let mut b = base.clone();
+        b.tracks.remove(walls[1]);
+        wall_variants.push(("the second wall gone", b));
+        let mut b = base.clone();
+        b.tracks.remove(walls[1]);
+        b.tracks.remove(walls[0]);
+        wall_variants.push(("both walls gone", b));
+        variants.splice(1..1, wall_variants);
+        let mut b = base.clone();
+        let id = b.new_id();
+        b.fills.push(Fill { id, layer: TOP, net: 1, pts: rect_outline(p(44.0, 2.0), p(48.0, 6.0)) });
+        variants.push(("a fill", b));
+        let mut b = base.clone();
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer: Some(TOP), pts: rect_outline(p(1.0, 1.0), p(4.0, 4.0)), restrict: Restrict::default() });
+        variants.push(("a keepout", b));
+        let mut b = base.clone();
+        b.footprints[0].keepouts.push(Keepout { id: 0, layer: None, pts: rect_outline(p(-1.0, -1.0), p(1.0, 1.0)), restrict: Restrict::default() });
+        variants.push(("a keepout on a part", b));
+        let mut b = base.clone();
+        b.copper = 4;
+        variants.push(("four copper layers", b));
+        variants
+    }
+
+    /// The scene a push is made from, from a base left by an earlier board,
+    /// is exactly what it is made from scratch: for every change, in turn,
+    /// there and back. (The scenes are compared in full, so it doesn't depend
+    /// on a push happening to go near what changed.)
+    #[test]
+    fn a_reused_push_scene_is_the_one_made_from_scratch() {
+        let variants = changed_boards();
+        let said = |s: &Scene| format!("{:?} {:?} {:?} {:?} {:?}", s.all, s.lines, s.others, s.vias, s.clearance);
+        let mut reused = 0;
+        // The original between each pair, so each change is met straight after
+        // a base made from a board that differs from it in that one thing.
+        let original = &variants[0];
+        let mut order: Vec<&(&str, Board)> = Vec::new();
+        for v in &variants[1..] {
+            order.push(original);
+            order.push(v);
+        }
+        order.push(original);
+        for (what, b) in order {
+            for layer in b.copper_layers() {
+                // From whatever the last board left.
+                let cached = Scene::for_push(b, layer);
+                let before = said(&cached);
+                crate::pcb::router::forget_push_base();
+                let fresh = Scene::for_push(b, layer);
+                assert_eq!(before, said(&fresh), "{what}, layer {layer}");
+                // And again, now the base is this board's: handed on as it is.
+                let again = Scene::for_push(b, layer);
+                assert!(std::sync::Arc::ptr_eq(&fresh.all, &again.all), "{what}, layer {layer}: reused, not rebuilt");
+                reused += 1;
+            }
+        }
+        assert!(reused >= 40, "{reused} scenes compared");
+    }
+
+    /// The push scene reuses what hasn't changed, and only that: pushing on a
+    /// board, then on versions with a via, a part, a rule or the outline
+    /// changed, and back again, always gives what the full scene gives.
+    #[test]
+    fn the_push_scene_is_not_stale_when_the_board_changes_under_it() {
+        let legacy = |b: &Board, layer: u8| Scene::new(b, &scene_copper(b), layer, 0);
+        let variants = changed_boards();
+        let mut pushed = 0;
+        // There and back, so every change comes after and before every other.
+        {
+            for (what, b) in variants.iter().chain(variants.iter().rev()) {
+                for t in b.tracks.iter().filter(|t| t.mid.is_none() && t.layer == TOP) {
+                    for d in [p(0.0, 0.3), p(0.0, -1.5), p(0.0, 2.2)] {
+                        let mut moved = b.clone();
+                        if !slide(&mut moved, t.id, d) {
+                            continue;
+                        }
+                        let new = push_after_move(b, moved.clone(), true);
+                        let old = push_after_move_with(b, moved.clone(), true, &legacy);
+                        assert_eq!(new, old, "{what}: track {} by {d:?}", t.id);
+                        if new.as_ref().is_some_and(|n| *n != moved) {
+                            pushed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(pushed > 20, "{pushed} pushes");
+    }
+
+    /// Times the pieces of one drag step on a real board:
+    /// COPPERSMITH_BENCH_BOARD=/path/to/board cargo test --release bench_drag -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_drag_step() {
+        let Ok(path) = std::env::var("COPPERSMITH_BENCH_BOARD") else { return };
+        let b = crate::pcb::altium::read_board(std::path::Path::new(&path)).unwrap().board;
+        // How many tracks are in no run, and so are walls that can't move?
+        {
+            let c = push_copper(&b);
+            let mut outside = 0;
+            let mut arcs = 0;
+            for l in b.copper_layers() {
+                let runs = crate::pcb::router::lines(&b, &c, l, 0);
+                let in_runs: HashSet<u32> = runs.iter().flat_map(|r| r.ids.iter().copied()).collect();
+                outside += b.tracks.iter().filter(|t| t.layer == l && !in_runs.contains(&t.id)).count();
+            }
+            arcs += b.tracks.iter().filter(|t| t.mid.is_some()).count();
+            eprintln!("tracks in no run: {outside} of {} ({arcs} arcs)", b.tracks.len());
+        }
+        let t = |what: &str, f: &mut dyn FnMut()| {
+            let s = std::time::Instant::now();
+            f();
+            eprintln!("{what:<40} {:?}", s.elapsed());
+        };
+        let mut c = b.clone();
+        t("Board::clone", &mut || c = b.clone());
+        t("Board == Board", &mut || assert!(c == b));
+        // A straight track on a layer with no pours.
+        let pour_layers: Vec<u8> = b.pours.iter().map(|p| p.layer).collect();
+        let id = b.tracks.iter().find(|t| t.mid.is_none() && !pour_layers.contains(&t.layer) && t.a.dist(t.b) > 3.0).map(|t| t.id).unwrap();
+        eprintln!("sliding track {id} on layer {}", b.track(id).unwrap().layer);
+        let before = b.clone();
+        let mut moved = b.clone();
+        t("slide()", &mut || assert!(slide(&mut moved, id, p(0.0, 0.1))));
+        let mut pushed = None;
+        t("push_after_move()", &mut || pushed = push_after_move(&before, moved.clone(), true));
+        eprintln!("pushed ok: {}", pushed.is_some());
+        // The same on layer 1 (the second copper layer), which here carries a pour.
+        for (name, layer) in [("layer 1", 1u8), ("layer 0", 0u8)] {
+            let Some(id) = b.tracks.iter().find(|t| t.layer == layer && t.mid.is_none() && t.a.dist(t.b) > 3.0).map(|t| t.id) else { continue };
+            for d in [0.1, 1.0] {
+                let mut moved = b.clone();
+                if !slide(&mut moved, id, p(0.0, d)) {
+                    eprintln!("{name}: slide {d} refused");
+                    continue;
+                }
+                let s0 = std::time::Instant::now();
+                let r = push_after_move(&b, moved.clone(), true);
+                eprintln!("{name}: slide {d} mm, push_after_move {:?} -> {}", s0.elapsed(), if r.is_some() { "ok" } else { "None" });
+            }
+            let cu = analyse(&b);
+            let s0 = std::time::Instant::now();
+            let sc = Scene::new(&b, &cu, layer, 0);
+            eprintln!("{name}: Scene::new {:?} ({} obstacles here, {} other layers)", s0.elapsed(), sc.all.len(), sc.others.len());
+            let s0 = std::time::Instant::now();
+            let ps = push_scene(&b, layer);
+            eprintln!("{name}: push scene (copper + for_push) {:?} ({} obstacles here)", s0.elapsed(), ps.all.len());
+        }
+        // What running the straight-run join over the whole board costs, as at the end of a drag.
+        {
+            let (mut c, mut slow) = (b.clone(), b.clone());
+            let s0 = std::time::Instant::now();
+            crate::ui::app::merge_straight(&mut c);
+            let quick_took = s0.elapsed();
+            let s0 = std::time::Instant::now();
+            crate::ui::app::merge_straight_slow(&mut slow);
+            let k = |v: f64| (v * 10_000.0).round() as i64;
+            let shape = |b: &Board| {
+                let mut v: Vec<_> = b.tracks.iter().map(|t| (t.layer, t.net, k(t.w), [k(t.a.x), k(t.a.y), k(t.b.x), k(t.b.y)], t.mid.is_some())).collect();
+                v.sort();
+                v
+            };
+            assert_eq!(shape(&c), shape(&slow), "the quick join differs from the slow one on the real board");
+            eprintln!(
+                "merge_straight on the whole board: quick {:?}, was {:?}; same {} tracks left ({} joined)",
+                quick_took,
+                s0.elapsed(),
+                c.tracks.len(),
+                b.tracks.len() - c.tracks.len()
+            );
+        }
+        // The push scene against the full one, on real copper, in all places.
+        {
+            let legacy = |b: &Board, layer: u8| Scene::new(b, &scene_copper(b), layer, 0);
+            let (mut same, mut pushed) = (0, 0);
+            let straight: Vec<u32> = b.tracks.iter().filter(|t| t.mid.is_none() && t.a.dist(t.b) > 2.0).map(|t| t.id).collect();
+            for &tid in straight.iter().step_by((straight.len() / 12).max(1)) {
+                for d in [p(0.0, 0.15), p(-0.3, 0.3)] {
+                    let mut moved = b.clone();
+                    if !slide(&mut moved, tid, d) {
+                        continue;
+                    }
+                    let s0 = std::time::Instant::now();
+                    let new = push_after_move(&b, moved.clone(), true);
+                    let t_new = s0.elapsed();
+                    let s0 = std::time::Instant::now();
+                    let old = push_after_move_with(&b, moved.clone(), true, &legacy);
+                    eprintln!("  track {tid} by {d:?}: new {t_new:?}, full {:?}", s0.elapsed());
+                    assert_eq!(new, old, "track {tid} by {d:?}");
+                    same += 1;
+                    if new.as_ref().is_some_and(|n| *n != moved) {
+                        pushed += 1;
+                    }
+                }
+            }
+            eprintln!("push scene == full scene on {same} real slides ({pushed} of them pushed something)");
+        }
+        // One drag step as the app now does it: analyse, then check what changed.
+        {
+            let cu0 = analyse(&b);
+            let (_, cache) = drc::check_again(&b, &cu0, None);
+            let mut moved = b.clone();
+            assert!(slide(&mut moved, id, p(0.0, 0.1)));
+            let mut cu1 = None;
+            t("step: analyse after a slide (from scratch)", &mut || cu1 = Some(analyse(&moved)));
+            t("step: analyse_again after a slide", &mut || drop(crate::pcb::copper::analyse_again(&moved, &cu0)));
+            let cu1 = cu1.unwrap();
+            let mut again = None;
+            t("step: drc::check_again", &mut || again = Some(drc::check_again(&moved, &cu1, Some(&cache))));
+            let scratch = drc::check(&moved, &cu1);
+            assert_eq!(again.unwrap().0.len(), scratch.len());
+        }
+        t("analyse (with pours)",&mut || drop(analyse(&b)));
+        let cu = analyse(&b);
+        t("drc::check", &mut || drop(drc::check(&b, &cu)));
+        t("analyse_fixed (no pours)", &mut || drop(crate::pcb::copper::analyse_fixed(&b)));
+        let cf = crate::pcb::copper::analyse_fixed(&b);
+        t("drc::check on fixed", &mut || drop(drc::check(&b, &cf)));
+        let mut nopour = b.clone();
+        nopour.pours.clear();
+        t("analyse+drc with pours removed", &mut || drop(drc::check(&nopour, &analyse(&nopour))));
+    }
 
     fn track(b: &mut Board, a: (f64, f64), e: (f64, f64)) -> u32 {
         let id = b.new_id();
@@ -710,7 +1172,9 @@ mod pushing_while_sliding {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -803,7 +1267,9 @@ mod pushing_while_moving {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
         id
     }
@@ -1093,7 +1559,9 @@ mod vias_push_on_other_layers {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.5, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -1169,7 +1637,9 @@ mod timing {
                     pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(0.6, 0.6), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
                     graphics: vec![],
                     label_at: P::default(),
+                    label_height: None,
                     locked: false,
+                    keepouts: vec![],
                 });
             }
             let pts = [p(0.0, y), p(20.0, y), p(22.0, y + 2.0), p(45.0, y + 2.0), p(47.0, y), p(70.0, y)];

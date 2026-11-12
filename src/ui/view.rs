@@ -22,6 +22,8 @@ pub const BOARD: Color32 = rgb(0x15181f);
 pub const THROUGH: Color32 = rgb(0xd6b25e);
 pub const VIA: Color32 = rgb(0xb4b8bf);
 pub const EDGE: Color32 = rgb(0xf07ac2);
+/// Areas kept free of copper, marked off.
+pub const KEEPOUT: Color32 = rgb(0xe8585f);
 pub const RATS: Color32 = rgb(0xdedcd6);
 
 const INNER: [Color32; 4] = [rgb(0x5dc091), rgb(0xe09b3f), rgb(0x7fd1e6), rgb(0xc58fe0)];
@@ -209,6 +211,16 @@ impl App {
     /// the pour (a click does; a drag there draws a box instead).
     pub fn pick_with(&self, q: P, tol: f64, inside_pours: bool) -> Option<Sel> {
         let mut hits: Vec<(u8, f64, Sel)> = Vec::new();
+        // On a silkscreen layer, the names on it come first.
+        if let Some(side) = self.silk
+            && self.shows(Layer::Silk(side))
+        {
+            for f in self.doc.footprints.iter().filter(|f| f.side == side && !f.refdes.is_empty()) {
+                if f.label_bbox(&self.doc.rules).grown(tol).contains(q) {
+                    hits.push((0, f.label_pos().dist(q), Sel::Name(f.id)));
+                }
+            }
+        }
         for fl in &self.doc.fills {
             if !self.shows(Layer::Cu(fl.layer)) {
                 continue;
@@ -229,6 +241,17 @@ impl App {
                 hits.push((if near { 1 } else { 4 }, edge_dist(q, &po.outline), Sel::Pour(po.id)));
             } else if inside_pours && near && po.fill.iter().any(|i| in_island(q, i)) {
                 hits.push((7, 0.0, Sel::Pour(po.id)));
+            }
+        }
+        for k in &self.doc.keepouts {
+            if !self.shows_keepout(k) {
+                continue;
+            }
+            let near = k.layer.is_none_or(|l| l == self.layer);
+            if point_in_ring(q, &k.pts) {
+                hits.push((if near { 2 } else { 5 }, 0.0, Sel::Keepout(k.id)));
+            } else if edge_dist(q, &k.pts) <= tol {
+                hits.push((if near { 2 } else { 5 }, edge_dist(q, &k.pts), Sel::Keepout(k.id)));
             }
         }
         let any_copper = self.doc.copper_layers().iter().any(|l| self.shows(Layer::Cu(*l)));
@@ -267,6 +290,14 @@ impl App {
         hits.first().map(|h| h.2)
     }
 
+    /// Is a keepout's layer showing (for one on every layer, any copper layer)?
+    fn shows_keepout(&self, k: &Keepout) -> bool {
+        match k.layer {
+            Some(l) => self.shows(Layer::Cu(l)),
+            None => self.doc.copper_layers().iter().any(|l| self.shows(Layer::Cu(*l))),
+        }
+    }
+
     fn describe_hover(&self, q: P) -> Option<String> {
         let net = |n: u32| self.doc.net_name(n).to_string();
         match self.hover? {
@@ -294,6 +325,20 @@ impl App {
             Sel::Fill(id) => {
                 let v = self.doc.fill(id)?;
                 Some(format!("Fill {} on {}", net(v.net), Layer::Cu(v.layer).name().to_lowercase()))
+            }
+            Sel::Name(id) => {
+                let f = self.doc.fp(id)?;
+                Some(format!("Name of {} · {} tall · drag to move it", f.refdes, self.unit.len(f.label_height(&self.doc.rules))))
+            }
+            Sel::Keepout(id) => {
+                let v = self.doc.keepout(id)?;
+                let r = v.restrict;
+                let kept: Vec<&str> = [(r.pours, "pours"), (r.tracks, "tracks"), (r.vias, "vias"), (r.smd_pads, "surface pads"), (r.th_pads, "through-hole pads")]
+                    .into_iter()
+                    .filter_map(|(on, name)| on.then_some(name))
+                    .collect();
+                let layer = v.layer.map(|l| Layer::Cu(l).name().to_lowercase()).unwrap_or_else(|| "every layer".into());
+                Some(format!("Keepout on {layer}: keeps out {}", if kept.is_empty() { "nothing".into() } else { kept.join(", ") }))
             }
             Sel::Fp(id) => {
                 let f = self.doc.fp(id)?;
@@ -504,6 +549,27 @@ impl App {
                     }
                 }
             }
+            Tool::Keepout => {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                let near_first = self.outline.len() >= 3 && tr.pt(self.outline[0]).distance(at) < 9.0;
+                if response.double_clicked() {
+                    self.close_keepout();
+                } else if response.clicked() {
+                    if near_first {
+                        self.close_keepout();
+                    } else {
+                        let c = q.snap(self.grid);
+                        if !self.outline.last().is_some_and(|l| l.same(c)) {
+                            self.outline.push(c);
+                        }
+                    }
+                }
+                if response.secondary_clicked() {
+                    if self.outline.pop().is_none() {
+                        self.set_tool(Tool::Select);
+                    }
+                }
+            }
             Tool::Place => {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
                 if let Some((f, _)) = &mut self.placing {
@@ -562,6 +628,8 @@ impl App {
             Sel::Track(id) => self.doc.track(id).map(|t| if t.a.dist(q0) < t.b.dist(q0) { t.a } else { t.b }),
             Sel::Pour(id) => self.doc.pour(id).and_then(|v| v.outline.first().copied()),
             Sel::Fill(id) => self.doc.fill(id).and_then(|v| v.pts.first().copied()),
+            Sel::Keepout(id) => self.doc.keepout(id).and_then(|v| v.pts.first().copied()),
+            Sel::Name(id) => self.doc.fp(id).map(|f| f.label_pos()),
         }
         .unwrap_or(q0);
         self.drag = Some(Drag {
@@ -698,8 +766,11 @@ impl App {
                 return;
             }
             if drag.moved {
-                // Straight runs left in pieces by the move join up again.
-                crate::ui::app::merge_straight(&mut self.doc);
+                // Straight runs left in pieces by the move join up again; a name,
+                // a pour or a keepout moved has left no tracks in pieces.
+                if self.sel.iter().any(|s| matches!(s, Sel::Fp(_) | Sel::Via(_) | Sel::Track(_))) {
+                    crate::ui::app::merge_straight(&mut self.doc);
+                }
                 let doc = &self.doc;
                 self.sel.retain(|s| match *s {
                     Sel::Fp(id) => doc.fp(id).is_some(),
@@ -707,6 +778,8 @@ impl App {
                     Sel::Via(id) => doc.via(id).is_some(),
                     Sel::Pour(id) => doc.pour(id).is_some(),
                     Sel::Fill(id) => doc.fill(id).is_some(),
+                    Sel::Keepout(id) => doc.keepout(id).is_some(),
+                    Sel::Name(id) => doc.fp(id).is_some(),
                 });
                 self.remember(drag.before);
             } else {
@@ -740,6 +813,11 @@ impl App {
             for v in self.doc.fills.iter().filter(|v| self.shows(Layer::Cu(v.layer))) {
                 if take(BBox::of(&v.pts)) {
                     sel.push(Sel::Fill(v.id));
+                }
+            }
+            for v in self.doc.keepouts.iter().filter(|v| self.shows_keepout(v)) {
+                if take(BBox::of(&v.pts)) {
+                    sel.push(Sel::Keepout(v.id));
                 }
             }
             // A pour only when wholly inside, either way round: touching
@@ -807,6 +885,8 @@ impl App {
         let pushed: std::collections::HashSet<u32> =
             self.plan.iter().flat_map(|c| c.plan.pushed.iter().flat_map(|m| m.ids.iter().copied())).collect();
 
+        // Keepouts as they sit: a part's too, with the part.
+        let keepouts = doc.placed_keepouts();
         for layer in self.draw_order() {
             if !self.shows(layer) {
                 continue;
@@ -815,7 +895,7 @@ impl App {
             let strength = match layer {
                 Layer::Cu(_) if layer == active => 1.0,
                 Layer::Cu(_) => 0.42,
-                Layer::Silk(s) if Some(s) == active.side() || active.side().is_none() => 1.0,
+                Layer::Silk(s) if Some(s) == active.side() || active.side().is_none() || self.silk == Some(s) => 1.0,
                 Layer::Silk(_) => 0.5,
                 _ => 0.8,
             };
@@ -827,14 +907,23 @@ impl App {
                         for island in &v.fill {
                             tri_mesh(painter, tr, &island.tris, c);
                         }
-                        if layer == active && v.outline.len() >= 3 {
-                            closed_line(painter, tr, &v.outline, Stroke::new(1.0, fade(base, 0.8)), true);
+                        // A pour without copper still shows where it is, planes too.
+                        let area = if self.flood { &v.outline[..] } else { v.area(doc) };
+                        if layer == active && area.len() >= 3 {
+                            closed_line(painter, tr, area, Stroke::new(1.0, fade(base, 0.8)), true);
                         }
                     }
                     for v in doc.fills.iter().filter(|v| v.layer == l) {
                         let c = fade(base, strength * keep(v.net));
                         let tris: Vec<[P; 3]> = v.pieces().iter().flat_map(|piece| (1..piece.len() - 1).map(move |k| [piece[0], piece[k], piece[k + 1]])).collect();
                         tri_mesh(painter, tr, &tris, c);
+                    }
+                    // Keepouts on this layer, marked off; one on every layer, once, on the one in use.
+                    for k in keepouts.iter().filter(|k| k.layer == Some(l) || (k.layer.is_none() && layer == active)) {
+                        let on = layer == active;
+                        let tris: Vec<[P; 3]> = k.pieces().iter().flat_map(|piece| (1..piece.len() - 1).map(move |i| [piece[0], piece[i], piece[i + 1]])).collect();
+                        tri_mesh(painter, tr, &tris, KEEPOUT.gamma_multiply(if on { 0.26 } else { 0.1 }));
+                        closed_line(painter, tr, &k.pts, Stroke::new(1.0, KEEPOUT.gamma_multiply(if on { 0.95 } else { 0.45 })), true);
                     }
                     for t in doc.tracks.iter().filter(|t| t.layer == l && !pushed.contains(&t.id)) {
                         for part in t.blobs() {
@@ -988,6 +1077,22 @@ impl App {
                     closed_line(painter, tr, &v.pts, stroke, false);
                 }
             }
+            Sel::Name(id) => {
+                if let Some(f) = doc.fp(id) {
+                    let bb = f.label_bbox(&doc.rules).grown(0.1);
+                    closed_line(painter, tr, &[bb.min, p(bb.max.x, bb.min.y), bb.max, p(bb.min.x, bb.max.y)], stroke, false);
+                }
+            }
+            Sel::Keepout(id) => {
+                if let Some(v) = doc.keepout(id) {
+                    closed_line(painter, tr, &v.pts, stroke, false);
+                    if fill.is_some() {
+                        for q in &v.pts {
+                            painter.circle_filled(tr.pt(*q), 3.0, stroke.color);
+                        }
+                    }
+                }
+            }
         };
         for s in &self.sel {
             mark(*s, Stroke::new(1.6, ACCENT), Some(Color32::from_rgba_unmultiplied(117, 171, 255, 22)));
@@ -1043,9 +1148,9 @@ impl App {
             }
         }
 
-        // A pour being drawn.
-        if self.tool == Tool::Pour && (!self.outline.is_empty() || self.cursor.is_some()) {
-            let c = layer_color(Layer::Cu(self.layer));
+        // A pour or a keepout being drawn.
+        if matches!(self.tool, Tool::Pour | Tool::Keepout) && (!self.outline.is_empty() || self.cursor.is_some()) {
+            let c = if self.tool == Tool::Keepout { KEEPOUT } else { layer_color(Layer::Cu(self.layer)) };
             let mut pts: Vec<Pos2> = self.outline.iter().map(|q| tr.pt(*q)).collect();
             if let Some(q) = self.cursor {
                 pts.push(tr.pt(q));
@@ -1168,7 +1273,7 @@ impl App {
             }
             for item in &c.plan.hits {
                 if let Some(&k) = self.copper.index.get(item) {
-                    for part in &self.copper.items[k].parts {
+                    for part in self.copper.items[k].parts.iter() {
                         stroke_blob(painter, tr, part, Stroke::new(2.0, theme::RED));
                     }
                 }
@@ -1219,7 +1324,7 @@ impl App {
             ui.painter().galley(pos2(rect.left() + 23.0, rect.center().y - galley.size().y / 2.0), galley, FG);
             response
         };
-        let layer = Layer::Cu(self.layer);
+        let layer = self.working();
         if chip(ui, &layer.name(), layer_color(layer), "layer-chip").on_hover_text("Click for the next copper layer (+)").clicked() {
             self.next_layer(1);
         }
@@ -1280,6 +1385,7 @@ impl App {
                             (Tool::Via, Icon::Via, "Via", "Click to drop a via (V)"),
                             (Tool::Outline, Icon::Outline, "Outline", "Click the board's corners; click the first one to close (O)"),
                             (Tool::Pour, Icon::Pour, "Pour", "Click a copper pour's corners on the layer in use; click the first one to close (P)"),
+                            (Tool::Keepout, Icon::Keepout, "Keepout", "Click an area's corners to keep pours out of it; its card says what else to keep out (K)"),
                         ];
                         for (tool, icon, label, tip) in tools {
                             if segmented_tool(ui, icon, label, self.tool == tool).on_hover_text(tip).clicked() {
@@ -1290,16 +1396,22 @@ impl App {
                         ui.separator();
                         ui.add_space(2.0);
 
-                        let layer = Layer::Cu(self.layer);
-                        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The copper layer you're working on (1–6, +, −)");
+                        let layer = self.working();
+                        let pick = layer_pill(ui, &layer.name(), layer_color(layer)).on_hover_text("The layer you're working on (copper 1–6, +, −; silkscreen to move names)");
                         egui::Popup::from_toggle_button_response(&pick)
                             .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                             .align(egui::RectAlign::TOP_START)
                             .show(|ui| {
                                 for l in self.doc.copper_layers() {
                                     let name = Layer::Cu(l).name();
-                                    if ui.selectable_label(l == self.layer, name).clicked() {
+                                    if ui.selectable_label(self.silk.is_none() && l == self.layer, name).clicked() {
                                         self.switch_layer(l);
+                                    }
+                                }
+                                ui.separator();
+                                for side in [Side::Top, Side::Bottom] {
+                                    if ui.selectable_label(self.silk == Some(side), Layer::Silk(side).name()).clicked() {
+                                        self.work_on_silk(side);
                                     }
                                 }
                             });

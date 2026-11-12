@@ -324,6 +324,7 @@ impl App {
                         Tool::Select if !self.sel.is_empty() => {
                             "Drag to move, pushing what's in the way (Ctrl: don't push) · R turn · L other side · Delete removes · Ctrl+D copies"
                         }
+                        Tool::Select if self.silk.is_some() => "Drag a part's name to move it · Pick a copper layer (or + −) to work on copper again",
                         Tool::Select => "Click to pick · Drag to move or box · Right-drag to pan · Scroll to zoom",
                         Tool::Route if self.route.is_some() => {
                             "Click places all but the hollow segment · Space flips · Shift+Space corners · Shift+R walk/stop/ignore · V via · Ctrl+click finishes · Esc ends"
@@ -332,6 +333,7 @@ impl App {
                         Tool::Via => "Click to drop a via; it joins the net under it · Right-click stops",
                         Tool::Outline => "Click each corner · Click the first one or Enter to close · Backspace takes one back",
                         Tool::Pour => "Click each corner of the pour · Click the first one or Enter to close · It takes the lit-up net, or the net under its first corner",
+                        Tool::Keepout => "Click each corner of the keepout · Click the first one or Enter to close · Pours keep out of it; its card says what else",
                         Tool::Place => "Click to place · R turn · L other side · Esc or right-click stops",
                     };
                     ui.add(egui::Label::new(RichText::new(hint).size(12.5).color(FAINT)).truncate());
@@ -369,6 +371,18 @@ impl App {
                     self.show_problems = !self.show_problems;
                 }
             });
+            if !self.doc.pours.is_empty() {
+                ui.horizontal(|ui| {
+                    if chip(ui, "Pour fills", self.flood)
+                        .on_hover_text(
+                            "Off: pours keep their areas and settings but lose their copper, so routing and moving run freely and fast. On: they pour again.",
+                        )
+                        .clicked()
+                    {
+                        self.set_flood(!self.flood);
+                    }
+                });
+            }
             ui.add_space(14.0);
             ui.separator();
             ui.add_space(6.0);
@@ -378,7 +392,7 @@ impl App {
 
     fn layer_row(&mut self, ui: &mut Ui, layer: Layer, copper: bool) {
         let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
-        let active = copper && layer == Layer::Cu(self.layer);
+        let active = if copper { self.silk.is_none() && layer == Layer::Cu(self.layer) } else { matches!(layer, Layer::Silk(s) if self.silk == Some(s)) };
         let fill = if active {
             ACCENT_SOFT
         } else if response.hovered() {
@@ -412,6 +426,8 @@ impl App {
         } else if response.clicked() {
             if copper && let Layer::Cu(l) = layer {
                 self.switch_layer(l);
+            } else if let Layer::Silk(side) = layer {
+                self.work_on_silk(side);
             } else if shown {
                 self.hidden.insert(layer);
             } else {
@@ -516,6 +532,8 @@ impl App {
                 [Sel::Via(id)] => self.via_card(ui, *id),
                 [Sel::Pour(id)] => self.pour_card(ui, *id),
                 [Sel::Fill(id)] => self.fill_card(ui, *id),
+                [Sel::Keepout(id)] => self.keepout_card(ui, *id),
+                [Sel::Name(id)] => self.name_card(ui, *id),
                 many => self.many_card(ui, many.len()),
             }
             self.checks_card(ui);
@@ -582,10 +600,21 @@ impl App {
                 }
             });
         });
+        // Names that were given their own height, as Altium boards have them.
+        let odd = self.doc.footprints.iter().filter(|f| f.label_height.is_some_and(|h| (h - self.doc.rules.text_height).abs() > 1e-6)).count();
+        let mut same_size = false;
         card(ui, |ui| {
             heading(ui, "Rules");
             let r = &mut self.doc.rules;
             field(ui, "Clearance", |ui| length(ui, u, &mut r.clearance));
+            // Altium's table of gaps for pairs of kinds of copper, where they differ from this.
+            if !r.gaps.is_empty() {
+                let table: Vec<String> = r.gaps.iter().map(|g| format!("{} – {}: {}", g.a.name(), g.b.name(), u.len(g.mm))).collect();
+                ui.label(RichText::new(format!("and {} pairs with their own gap", r.gaps.len())).size(11.5).color(FAINT)).on_hover_text(format!(
+                    "Gaps asked of particular kinds of copper (from Altium); any other pair is the clearance above.\n\n{}",
+                    table.join("\n")
+                ));
+            }
             field(ui, "Track width", |ui| length(ui, u, &mut r.track));
             field(ui, "Via pad", |ui| length(ui, u, &mut r.via_dia));
             field(ui, "Via hole", |ui| length(ui, u, &mut r.via_drill));
@@ -595,10 +624,23 @@ impl App {
             field(ui, "From the edge", |ui| length(ui, u, &mut r.edge_clearance));
             field(ui, "Mask margin", |ui| length(ui, u, &mut r.mask_margin));
             field(ui, "Name height", |ui| length(ui, u, &mut r.text_height));
+            if odd > 0
+                && ui
+                    .button(format!("Make the {odd} odd-sized {} {} tall", if odd == 1 { "name" } else { "names" }, u.len(r.text_height)))
+                    .on_hover_text("Parts imported from Altium keep a name's own height where it wasn't the usual; this gives them the board's")
+                    .clicked()
+            {
+                same_size = true;
+            }
             // Where a 45° track turns, the 45° step is never shorter than this,
             // so corners never close up into right angles.
             field(ui, "Shortest 45°", |ui| length(ui, u, &mut r.min_diag));
         });
+        if same_size {
+            for f in &mut self.doc.footprints {
+                f.label_height = None;
+            }
+        }
     }
 
     fn footprint_card(&mut self, ui: &mut Ui, id: u32) {
@@ -778,6 +820,72 @@ impl App {
                     }
                 });
             });
+            row(ui, "Area", &format!("{:.2} mm²", ring_area(&v.pts).abs()));
+            row(ui, "Corners", &v.pts.len().to_string());
+            ui.add_space(4.0);
+            if tool_button(ui, Icon::Trash, "Remove", true).clicked() {
+                remove = true;
+            }
+        });
+        if remove {
+            self.delete_selection();
+        }
+    }
+
+    fn name_card(&mut self, ui: &mut Ui, id: u32) {
+        let u = self.unit;
+        let board_height = self.doc.rules.text_height;
+        let Some(f) = self.doc.fp_mut(id) else { return };
+        let mut usual = false;
+        card(ui, |ui| {
+            heading(ui, &format!("Name of {}", f.refdes));
+            field(ui, "Name", |ui| ui.add(egui::TextEdit::singleline(&mut f.refdes).desired_width(140.0)));
+            field(ui, "Height", |ui| {
+                let mut h = f.label_height.unwrap_or(board_height);
+                if length(ui, u, &mut h) {
+                    f.label_height = Some(h.max(0.1));
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                if f.label_height.is_some() && ui.button("Board's height").on_hover_text("Draw it the height the rules give names").clicked() {
+                    f.label_height = None;
+                }
+                if ui.button("Usual place").on_hover_text("Above the part, where a new part's name goes").clicked() {
+                    usual = true;
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("Drag it on the silkscreen layer to move it").size(11.5).color(FAINT));
+        });
+        if usual {
+            f.label_at = f.usual_label_spot();
+        }
+    }
+
+    fn keepout_card(&mut self, ui: &mut Ui, id: u32) {
+        let layers = self.doc.copper_layers();
+        let mut remove = false;
+        let Some(v) = self.doc.keepouts.iter_mut().find(|v| v.id == id) else { return };
+        card(ui, |ui| {
+            heading(ui, "Keepout");
+            field(ui, "Layer", |ui| {
+                let shown = v.layer.map(|l| Layer::Cu(l).name()).unwrap_or_else(|| "Every layer".into());
+                egui::ComboBox::from_id_salt(("keepout-layer", id)).selected_text(shown).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut v.layer, None, "Every layer");
+                    for l in layers {
+                        ui.selectable_value(&mut v.layer, Some(l), Layer::Cu(l).name());
+                    }
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new("Keeps out").size(12.5).color(DIM));
+            ui.checkbox(&mut v.restrict.pours, "Copper pours").on_hover_text("Pours stop short of it by their clearance");
+            ui.checkbox(&mut v.restrict.tracks, "Tracks").on_hover_text("The router goes round it, and the rule check flags a track in it");
+            ui.checkbox(&mut v.restrict.vias, "Vias");
+            ui.checkbox(&mut v.restrict.smd_pads, "Surface pads");
+            ui.checkbox(&mut v.restrict.th_pads, "Through-hole pads");
+            ui.add_space(2.0);
             row(ui, "Area", &format!("{:.2} mm²", ring_area(&v.pts).abs()));
             row(ui, "Corners", &v.pts.len().to_string());
             ui.add_space(4.0);

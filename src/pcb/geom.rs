@@ -418,6 +418,97 @@ pub fn is_convex(ring: &[P]) -> bool {
     sign != 0.0
 }
 
+/// A uniform grid over many small boxes, so the ones near a place can be
+/// found without looking at them all. Boxes too big for the grid to help
+/// are kept in a short list that every search includes.
+#[derive(Clone, Debug)]
+pub struct BoxGrid {
+    origin: P,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    cells: Vec<Vec<u32>>,
+    big: Vec<u32>,
+}
+
+impl BoxGrid {
+    pub fn new(boxes: &[BBox]) -> BoxGrid {
+        let mut all = BBox::default();
+        for b in boxes {
+            all.union(b);
+        }
+        let n = boxes.len().max(1);
+        let (w, h) = (all.w().max(1e-6), all.h().max(1e-6));
+        let mut cell = (w * h / (n as f64 / 2.0)).sqrt().max(1e-3);
+        let dims = |cell: f64| (((w / cell).ceil() as usize).max(1), ((h / cell).ceil() as usize).max(1));
+        let (mut nx, mut ny) = dims(cell);
+        while nx * ny > 4 * n + 16 {
+            cell *= 1.5;
+            (nx, ny) = dims(cell);
+        }
+        let mut g = BoxGrid { origin: all.min, cell, nx, ny, cells: vec![Vec::new(); nx * ny], big: Vec::new() };
+        for (i, b) in boxes.iter().enumerate() {
+            let ((x0, y0), (x1, y1)) = g.span(b);
+            if (x1 - x0 + 1) * (y1 - y0 + 1) > 64 {
+                g.big.push(i as u32);
+                continue;
+            }
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    g.cells[y * nx + x].push(i as u32);
+                }
+            }
+        }
+        g
+    }
+
+    /// The cells a box covers, clamped to the grid.
+    fn span(&self, b: &BBox) -> ((usize, usize), (usize, usize)) {
+        let at = |v: f64, o: f64, n: usize| (((v - o) / self.cell).floor().max(0.0) as usize).min(n - 1);
+        ((at(b.min.x, self.origin.x, self.nx), at(b.min.y, self.origin.y, self.ny)), (at(b.max.x, self.origin.x, self.nx), at(b.max.y, self.origin.y, self.ny)))
+    }
+
+    /// Puts into `out` (cleared first), in order and once each, every box
+    /// that may touch `area`: it can hold others, never miss one.
+    pub fn near(&self, area: &BBox, out: &mut Vec<u32>) {
+        out.clear();
+        out.extend_from_slice(&self.big);
+        let ((x0, y0), (x1, y1)) = self.span(area);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                out.extend_from_slice(&self.cells[y * self.nx + x]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+}
+
+/// The pieces a lump of copper is made of, with their boxes and, where there
+/// are many, a grid to find the near ones. Shared, never changed once made, so
+/// a pour's pieces are worked out once when it's poured and then only handed
+/// round.
+#[derive(Clone, Debug, Default)]
+pub struct Parts {
+    pub blobs: std::sync::Arc<Vec<Blob>>,
+    pub boxes: std::sync::Arc<Vec<BBox>>,
+    pub grid: Option<std::sync::Arc<BoxGrid>>,
+    /// The box round them all.
+    pub bbox: BBox,
+}
+
+impl Parts {
+    pub fn new(blobs: Vec<Blob>) -> Parts {
+        let boxes: Vec<BBox> = blobs.iter().map(|b| b.bbox()).collect();
+        let mut bbox = BBox::default();
+        for b in &boxes {
+            bbox.union(b);
+        }
+        let grid = (boxes.len() > 12).then(|| std::sync::Arc::new(BoxGrid::new(&boxes)));
+        Parts { blobs: std::sync::Arc::new(blobs), boxes: std::sync::Arc::new(boxes), grid, bbox }
+    }
+}
+
 /// The gap between two boxes, 0 where they overlap.
 pub fn box_gap(a: &BBox, b: &BBox) -> f64 {
     let dx = (a.min.x - b.max.x).max(b.min.x - a.max.x).max(0.0);
@@ -484,6 +575,35 @@ mod tests {
         // Moving an end keeps the bulge.
         let m2 = refit_mid(a, m, b, p(2.0, 0.0), p(0.0, 2.0));
         assert!(m2.dist(p(2.0f64.sqrt(), 2.0f64.sqrt())) < 1e-6);
+    }
+
+    #[test]
+    fn box_grid_finds_every_box_that_touches() {
+        // A scatter of small boxes, a few long ones, and a deterministic spread of queries.
+        let mut seed = 12345u64;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let mut boxes = Vec::new();
+        for i in 0..400 {
+            let (x, y) = (rnd() * 100.0, rnd() * 60.0);
+            let (w, h) = if i % 50 == 0 { (90.0, 0.2) } else { (rnd() * 2.0, rnd() * 2.0) };
+            boxes.push(BBox { min: p(x, y), max: p(x + w, y + h) });
+        }
+        let grid = BoxGrid::new(&boxes);
+        let mut found = Vec::new();
+        for _ in 0..200 {
+            let (x, y) = (rnd() * 120.0 - 10.0, rnd() * 80.0 - 10.0);
+            let q = BBox { min: p(x, y), max: p(x + rnd() * 5.0, y + rnd() * 5.0) };
+            grid.near(&q, &mut found);
+            assert!(found.windows(2).all(|w| w[0] < w[1]), "in order, once each");
+            for (i, b) in boxes.iter().enumerate() {
+                if b.touches(&q) {
+                    assert!(found.contains(&(i as u32)), "missed box {i}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -89,6 +89,45 @@ struct AreaRules {
     plane_connect: Connect,
     plane_spoke: f64,
     plane_gap: f64,
+    /// Clearance rules that apply to particular objects rather than to all,
+    /// which aren't taken.
+    scoped_clearances: usize,
+}
+
+/// Altium's table of gaps between kinds of object, `ClearanceObj_A-ClearanceObj_B:units;…`.
+/// It lists only the pairs that differ from the general gap. Where two of
+/// its names stand for one of ours (a track and an arc, a fill and a region),
+/// the track's and the region's gap is the one kept.
+fn parse_gaps(table: &str) -> Vec<Gap> {
+    // Not this file's own `Kind`, which is for the storages in it.
+    use crate::pcb::model::Kind;
+    let kind =|name: &str| -> Option<(Kind, u8)> {
+        Some(match name.trim().trim_start_matches("ClearanceObj_") {
+            "Track" => (Kind::Track, 0),
+            "Arc" => (Kind::Track, 1),
+            "SMDPad" => (Kind::SmdPad, 0),
+            "THPad" => (Kind::ThPad, 0),
+            "Via" => (Kind::Via, 0),
+            "Region" => (Kind::Region, 0),
+            "Fill" => (Kind::Region, 1),
+            "Poly" => (Kind::Pour, 0),
+            _ => return None,
+        })
+    };
+    // (kind, kind, gap, how far from the first choice it is)
+    let mut found: Vec<(Kind, Kind, f64, u8)> = Vec::new();
+    for entry in table.trim_end_matches('\0').split(';') {
+        let Some((pair, units)) = entry.split_once(':') else { continue };
+        let Some((a, b)) = pair.split_once('-') else { continue };
+        let (Some((ka, ra)), Some((kb, rb)), Ok(v)) = (kind(a), kind(b), units.trim().parse::<f64>()) else { continue };
+        let (mm, rank) = (nm(v * super::UNIT), ra + rb);
+        match found.iter_mut().find(|e| (e.0 == ka && e.1 == kb) || (e.0 == kb && e.1 == ka)) {
+            Some(e) if rank < e.3 => *e = (ka, kb, mm, rank),
+            Some(_) => {}
+            None => found.push((ka, kb, mm, rank)),
+        }
+    }
+    found.into_iter().map(|(a, b, mm, _)| Gap { a, b, mm }).collect()
 }
 
 /// The board's design rules that Coppersmith has a place for. Each comes
@@ -105,7 +144,14 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
         plane_connect: Connect::Relief,
         plane_spoke: 0.254,
         plane_gap: 0.254,
+        scoped_clearances: 0,
     };
+    area.scoped_clearances = recs
+        .iter()
+        .filter(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case("Clearance")))
+        .filter(|r| r.get("ENABLED").is_none_or(|e| e == "TRUE"))
+        .filter(|r| r.get("SCOPE1EXPRESSION").is_some_and(|s| s.trim() != "All") || r.get("SCOPE2EXPRESSION").is_some_and(|s| s.trim() != "All"))
+        .count();
     let general = |kind: &str| -> Option<&HashMap<String, String>> {
         recs.iter()
             .filter(|r| r.get("RULEKIND").is_some_and(|k| k.eq_ignore_ascii_case(kind)))
@@ -128,10 +174,15 @@ fn read_rules(recs: &[HashMap<String, String>], rules: &mut Rules) -> AreaRules 
                 .map(|v| v * super::UNIT)
                 .fold(f64::MAX, f64::min)
         });
+        // The general gap is for every pair the table doesn't list; the table's
+        // gaps are kept as they are, pair by pair.
         match (table, len(r, "GAP")) {
-            (Some(t), _) if t < f64::MAX && t > 0.0 => rules.clearance = nm(t),
             (_, Some(v)) => rules.clearance = nm(v),
+            (Some(t), None) if t < f64::MAX && t > 0.0 => rules.clearance = nm(t),
             _ => {}
+        }
+        if let Some(t) = r.get("OBJECTCLEARANCES") {
+            rules.gaps = parse_gaps(t);
         }
         // Pours keep the table's polygon gaps, or where it has none, the
         // general gap.
@@ -297,6 +348,25 @@ fn mil(v: Option<&String>) -> f64 {
     num.trim().parse::<f64>().map(|x| x * scale).unwrap_or(0.0)
 }
 
+/// A part's name as Altium drew it: how tall, and where its middle is (as
+/// Altium has it, not yet moved to the board's origin). It's the text on an
+/// overlay layer that says the part's designator, spelt out or as the special
+/// string `.Designator`; Altium starts it at its lower left, and turns it.
+fn designator(prims: &[Prim], refdes: &str) -> Option<(f64, P)> {
+    prims.iter().find_map(|pr| match pr {
+        Prim::Text { head, at, height, rot, mirror, text }
+            if (head.layer == prims::TOP_OVERLAY || head.layer == prims::BOTTOM_OVERLAY)
+                && *height > 0.0
+                && (text == refdes || text.eq_ignore_ascii_case(".Designator")) =>
+        {
+            let w = crate::pcb::font::width(refdes, *height);
+            let across = if *mirror { -w / 2.0 } else { w / 2.0 };
+            Some((*height, at.add(p(across, height / 2.0).rot(*rot))))
+        }
+        _ => None,
+    })
+}
+
 pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut file = open(bytes)?;
     let storages: Vec<String> = file.read_root_storage().filter(|e| e.is_storage()).map(|e| e.name().to_string()).collect();
@@ -336,7 +406,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     // Regions are kept twice, plainly and shape-based (with their arcs): one of each.
     let mut seen = std::collections::HashSet::new();
     prims.retain(|pr| match pr {
-        Prim::Region { head, pts, kind, cutout } => {
+        Prim::Region { head, pts, kind, cutout, .. } => {
             let bb = BBox::of(pts);
             let k = |v: f64| (v * 1000.0).round() as i64;
             seen.insert((head.layer, head.net, head.component, head.polygon, *kind, *cutout, k(bb.min.x), k(bb.min.y), k(bb.max.x), k(bb.max.y)))
@@ -350,6 +420,13 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
 
     let mut b = Board { name: name.to_string(), footprints: Vec::new(), outline: Vec::new(), ..Board::default() };
     let area_rules = read_rules(&rule_recs, &mut b.rules);
+    if area_rules.scoped_clearances > 0 {
+        notes.push(format!(
+            "{} clearance rule{} for particular objects wasn't taken",
+            area_rules.scoped_clearances,
+            if area_rules.scoped_clearances == 1 { "" } else { "s" }
+        ));
+    }
 
     // The outline: corners, and arcs between them.
     b.outline = vertex_ring(&board_rec, &at);
@@ -390,7 +467,12 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
     let mut free: Vec<Prim> = Vec::new();
     for prim in prims {
         let comp = match &prim {
-            Prim::Pad { head, .. } | Prim::Track { head, .. } | Prim::Arc { head, .. } | Prim::Region { head, .. } | Prim::Fill { head, .. } => head.component,
+            Prim::Pad { head, .. }
+            | Prim::Track { head, .. }
+            | Prim::Arc { head, .. }
+            | Prim::Region { head, .. }
+            | Prim::Fill { head, .. }
+            | Prim::Text { head, .. } => head.component,
             Prim::Via { .. } => NONE,
             Prim::Other { head, .. } => head.map(|h| h.component).unwrap_or(NONE),
         };
@@ -408,13 +490,27 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             let d = at(q).sub(pos).rot(-rot);
             if bottom { p(-d.x, d.y) } else { d }
         };
-        let (mut pads, graphics) = footprint(&mine, &names, &mut skipped, local, rot, bottom);
+        let (mut pads, graphics, raw_keepouts) = footprint(&mine, &names, &mut skipped, local, rot, bottom);
+        // Its keepouts, in its own terms: layers swap for a part underneath.
+        let keepouts: Vec<Keepout> = raw_keepouts
+            .into_iter()
+            .filter_map(|k| {
+                let mut k = prims::to_keepout(k, &copper_of, bottom)?;
+                k.id = 0;
+                Some(k)
+            })
+            .collect();
         // Nets go on the pads.
         let pad_nets: Vec<u32> = mine.iter().filter_map(|pr| if let Prim::Pad { head, pad, .. } = pr { (pad.size.x > 0.0 && pad.size.y > 0.0).then(|| net(head.net)) } else { None }).collect();
         for (pad, n) in pads.iter_mut().zip(pad_nets) {
             pad.net = n;
         }
         let refdes = rec.get("SOURCEDESIGNATOR").cloned().unwrap_or_else(|| format!("U{}", i + 1));
+        // The name as Altium had it: its height and where its middle is.
+        let (label_at, label_height) = match designator(&mine, &refdes) {
+            Some((height, middle)) => (local(middle).rounded(), Some(nm(height))),
+            None => (label_spot(&pads), None),
+        };
         b.footprints.push(Footprint {
             id,
             def: rec.get("PATTERN").cloned().unwrap_or_default(),
@@ -423,18 +519,59 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
             at: pos,
             rot: nm(rot),
             side: if bottom { Side::Bottom } else { Side::Top },
-            label_at: label_spot(&pads),
+            label_at,
+            label_height,
             pads,
             graphics,
             locked: rec.get("LOCKED").is_some_and(|v| v == "TRUE"),
+            keepouts,
         });
     }
     skipped.note(&mut notes, "Parts");
+    // Most names are one height: that's the board's, and only the odd ones
+    // (a bigger name on a big part) keep a height of their own.
+    let micron = |h: f64| (h * 1000.0).round() as i64;
+    let mut heights: HashMap<i64, usize> = HashMap::new();
+    for f in &b.footprints {
+        if let Some(h) = f.label_height {
+            *heights.entry(micron(h)).or_default() += 1;
+        }
+    }
+    if let Some((&common, _)) = heights.iter().max_by_key(|(k, n)| (**n, std::cmp::Reverse(**k))) {
+        b.rules.text_height = common as f64 / 1000.0;
+        for f in &mut b.footprints {
+            if f.label_height.is_some_and(|h| micron(h) == common) {
+                f.label_height = None;
+            }
+        }
+    }
 
     // Free copper: tracks, arcs and vias. Pour fill (tracks and regions
     // belonging to polygons) is left out with the pours.
     let (mut pour_bits, mut free_pads, mut copper_fills, mut blind) = (0usize, 0usize, 0usize, 0usize);
+    let (mut keepout_arcs, mut keepout_outlines) = (0usize, 0usize);
     for prim in free {
+        // Areas kept free of copper, not copper: tracks, fills and regions
+        // flagged as keepouts, and what's drawn on the Keep-Out layer.
+        if let Some(raw) = prims::keepout_of(&prim) {
+            let raw = prims::RawKeepout { pts: raw.pts.iter().map(|q| at(*q)).collect(), ..raw };
+            // Altium boards often draw the board's shape on the Keep-Out layer, to
+            // mark where copper may go: a shape on it that covers most of the board
+            // is that boundary, not an area to keep out of.
+            if raw.layer == prims::KEEPOUT_LAYER && ring_area(&raw.pts).abs() >= 0.8 * ring_area(&b.outline).abs() {
+                keepout_outlines += 1;
+                continue;
+            }
+            if let Some(mut k) = prims::to_keepout(raw, copper_of, false) {
+                k.id = b.new_id();
+                b.keepouts.push(k);
+            }
+            continue;
+        }
+        if prims::is_keepout_arc(&prim) {
+            keepout_arcs += 1;
+            continue;
+        }
         match prim {
             Prim::Track { head, a, b: e, w } => {
                 if head.polygon != NONE {
@@ -458,7 +595,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
                 b.vias.push(Via { id, at: at(v), dia: nm(dia), drill: nm(hole), net: net(head.net) });
                 let _ = head;
             }
-            Prim::Region { head, pts, kind, cutout } if prims::is_copper(head.layer) => {
+            Prim::Region { head, pts, kind, cutout, .. } if prims::is_copper(head.layer) => {
                 if head.polygon != NONE {
                     // Poured copper: poured again from the pour's outline.
                     pour_bits += 1;
@@ -488,6 +625,12 @@ pub fn read(bytes: &[u8], name: &str) -> Result<ImportedBoard, String> {
         }
     }
     let _ = (&mut blind, pour_bits);
+    if keepout_arcs > 0 {
+        notes.push(format!("{keepout_arcs} keepout arcs weren't taken"));
+    }
+    if keepout_outlines > 0 {
+        notes.push(format!("{keepout_outlines} shapes on the Keep-Out layer outline the board, so aren't keepouts"));
+    }
 
     // Pours and split planes, poured again here from their outlines.
     let (mut pours, mut hatched, mut shelved) = (0usize, 0usize, 0usize);
@@ -597,6 +740,65 @@ fn dedup_ring(mut ring: Vec<P>) -> Vec<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text(layer: u8, at: P, height: f64, rot: f64, mirror: bool, s: &str) -> Prim {
+        Prim::Text { head: prims::Head { layer, flags: 0x000c, net: NONE, polygon: NONE, component: 0 }, at, height, rot, mirror, text: s.into() }
+    }
+
+    #[test]
+    fn altiums_gap_table_is_read_pair_by_pair() {
+        let table = "ClearanceObj_Arc-ClearanceObj_Fill:100000;ClearanceObj_Track-ClearanceObj_Fill:60000;\
+                     ClearanceObj_Track-ClearanceObj_Region:60000;ClearanceObj_Arc-ClearanceObj_Region:86614;\
+                     ClearanceObj_Fill-ClearanceObj_Region:252000;ClearanceObj_Via-ClearanceObj_Hole:250000;\
+                     ClearanceObj_SMDPad-ClearanceObj_Poly:200000;ClearanceObj_Poly-ClearanceObj_Poly:350000;\
+                     ClearanceObj_Track-ClearanceObj_Via:50000;ClearanceObj_Via-ClearanceObj_Text:50000";
+        let gaps = parse_gaps(table);
+        use crate::pcb::model::Kind as K;
+        let rules = Rules { gaps, ..Rules::default() };
+        let mil = |m: f64| (m / 0.0254 * 1000.0).round() / 1000.0;
+        // The track's own figures, not the arc's, where both are given.
+        assert_eq!(mil(rules.pair(K::Track, K::Region).unwrap()), 6.0);
+        assert_eq!(mil(rules.pair(K::Region, K::Track).unwrap()), 6.0, "either way round");
+        assert_eq!(mil(rules.pair(K::SmdPad, K::Pour).unwrap()), 20.0);
+        assert_eq!(mil(rules.pair(K::Pour, K::Pour).unwrap()), 35.0);
+        assert_eq!(mil(rules.pair(K::Track, K::Via).unwrap()), 5.0);
+        // What isn't copper to copper (holes, text) is left out, and what isn't listed isn't there.
+        assert_eq!(rules.gaps.len(), 5, "{:?}", rules.gaps);
+        assert_eq!(rules.pair(K::Track, K::Track), None);
+    }
+
+    #[test]
+    fn a_designator_comes_with_its_height_and_its_middle() {
+        let w = crate::pcb::font::width("R25", 0.635);
+        // Altium starts the text at its lower left: its middle is half its width along, half its height up.
+        let (h, mid) = designator(&[text(prims::TOP_OVERLAY, p(10.0, 20.0), 0.635, 0.0, false, "R25")], "R25").unwrap();
+        assert_eq!(h, 0.635);
+        assert!(mid.dist(p(10.0 + w / 2.0, 20.0 + 0.635 / 2.0)) < 1e-9, "{mid:?}");
+        // Turned a quarter, along and up swap: the middle is up the page and to the left.
+        let (_, mid) = designator(&[text(prims::TOP_OVERLAY, p(10.0, 20.0), 0.635, 90.0, false, "R25")], "R25").unwrap();
+        assert!(mid.dist(p(10.0 - 0.635 / 2.0, 20.0 + w / 2.0)) < 1e-9, "{mid:?}");
+        // Mirrored, as text underneath is, the other way along.
+        let (_, mid) = designator(&[text(prims::BOTTOM_OVERLAY, p(10.0, 20.0), 0.635, 0.0, true, "R25")], "R25").unwrap();
+        assert!(mid.dist(p(10.0 - w / 2.0, 20.0 + 0.635 / 2.0)) < 1e-9, "{mid:?}");
+    }
+
+    #[test]
+    fn only_the_designator_on_an_overlay_counts() {
+        let others = [
+            // The part's comment, taller, on the same layer.
+            text(prims::TOP_OVERLAY, p(0.0, 0.0), 1.524, 0.0, false, "RC0402FR-071KL"),
+            // The special string on an assembly layer.
+            text(61, p(0.0, 0.0), 1.0, 0.0, false, ".Designator"),
+            // Text of no height.
+            text(prims::TOP_OVERLAY, p(0.0, 0.0), 0.0, 0.0, false, "R25"),
+        ];
+        assert!(designator(&others, "R25").is_none());
+        // The name spelt out, or as Altium's special string, either way; the first wins.
+        let mut both = others.to_vec();
+        both.push(text(prims::TOP_OVERLAY, p(1.0, 1.0), 0.889, 0.0, false, ".Designator"));
+        both.push(text(prims::TOP_OVERLAY, p(2.0, 2.0), 0.5, 0.0, false, "R25"));
+        assert_eq!(designator(&both, "R25").unwrap().0, 0.889);
+    }
 
     #[test]
     fn a_circuit_studio_board_reads() {

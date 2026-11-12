@@ -23,6 +23,9 @@ pub struct FootprintDef {
     pub graphics: Vec<Graphic>,
     #[serde(default)]
     pub label_at: P,
+    /// Areas kept free of copper, in the footprint's own coordinates.
+    #[serde(default)]
+    pub keepouts: Vec<Keepout>,
     /// Where it came from: "Built in" or a file name.
     #[serde(skip)]
     pub source: String,
@@ -48,7 +51,9 @@ impl FootprintDef {
             }).collect(),
             graphics: self.graphics.clone(),
             label_at: self.label_at,
+            label_height: None,
             locked: false,
+            keepouts: self.keepouts.clone(),
         }
     }
 
@@ -205,6 +210,7 @@ fn def(name: &str, category: &str, prefix: &str, description: String, pads: Vec<
         pads,
         graphics: g,
         label_at,
+        keepouts: Vec::new(),
         source: "Built in".into(),
     }
 }

@@ -32,6 +32,7 @@ pub enum Icon {
     Via,
     Outline,
     Pour,
+    Keepout,
     Chip,
     Save,
     New,
@@ -165,6 +166,12 @@ pub fn draw(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.add(Shape::convex_polygon(pts, color.gamma_multiply(0.35), Stroke::NONE));
             l(&[(2.4, 4.0), (8.6, 2.4), (13.6, 4.6), (13.6, 13.6), (2.4, 13.6), (2.4, 4.0)]);
             p.circle_stroke(at(8.4, 9.0), 2.1 * k, Stroke::new(1.2 * k, color));
+        }
+        Icon::Keepout => {
+            // An area marked off: a square crossed through.
+            l(&[(2.6, 2.6), (13.4, 2.6), (13.4, 13.4), (2.6, 13.4), (2.6, 2.6)]);
+            l(&[(2.6, 2.6), (13.4, 13.4)]);
+            l(&[(13.4, 2.6), (2.6, 13.4)]);
         }
         Icon::Chip => {
             l(&[(4.4, 3.0), (11.6, 3.0), (11.6, 13.0), (4.4, 13.0), (4.4, 3.0)]);

@@ -20,7 +20,23 @@ to it.
 | Via | V | Click to drop a via; it takes the net of what it lands on. |
 | Outline | O | Click the board's corners; click the first corner (or Enter) to close. |
 | Pour | P | Click a copper pour's corners on the layer in use; click the first corner (or Enter) to close. It takes the lit-up net, or the net under its first corner, or GND. See below. |
+| Keepout | K | Click an area's corners on the layer in use; click the first corner (or Enter) to close. Pours keep out of it. See below. |
 | Place | (click a footprint in the library) | Click to place, R turns, L puts it on the other side, Esc stops. |
+
+### Names on the silkscreen
+
+Click **Top silkscreen** or **Bottom silkscreen** in the layer list (or step to
+them with `+` and `−`, which cycle through the copper layers and then the two
+silkscreens) to work on that layer: it gets the *working* tag, and a part's name
+(its designator, such as R25) can be picked and dragged. Drag one and only it
+moves; its card on the right sets the name, its height and puts it back in the
+usual place above the part. A name follows its part when the part is moved, turned
+or flipped to the other side.
+
+Names are all the board's *Name height* (in the rules) unless one was given a
+height of its own, which a board from Altium has where a name wasn't the usual
+size; *Make the odd-sized names this tall* on the right gives them all the
+board's.
 
 ### Copper pours and planes
 
@@ -47,6 +63,19 @@ Routing treats it like any other copper.
 
 Gerbers write each poured piece as one region, its holes joined to the
 outline by cut-ins.
+
+### Keepouts
+
+A **keepout** is an area kept free of copper on one layer, or on every layer.
+Drawn with the Keepout tool it keeps **pours** out and nothing else: pours
+stop short of it by their clearance, and are poured again when it changes.
+Its card on the right says what else it keeps out (tracks, vias, surface pads,
+through-hole pads) and on which layer; the router goes round a keepout that
+keeps tracks out, and the rule check flags tracks, vias and pads in one that
+keeps them out ("In a keepout"; touching its edge is allowed). A part can carry
+keepouts of its own, which move, turn and flip to the other side with it; a part's
+own pads aren't held to its own keepouts. Keepouts aren't written to the Gerbers:
+they only shape what is.
 
 ### Moving keeps the corners
 
@@ -251,8 +280,25 @@ editor still to come. Writing Altium libraries is next.
 
 **Open** also takes `.PcbDoc` and `.CSPcbDoc` boards. The board comes in
 unsaved, as a new Coppersmith board: outline, copper layers, parts (with
-their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (clearance from the
-clearance table, track widths, via sizes, mask and edge clearance).
+their footprints as placed), nets, tracks, arcs and vias, fills and solid copper regions, and the design rules (the
+clearance rules, track widths, via sizes, mask and edge clearance).
+
+Clearance comes in as Altium has it: a general gap, and a table of gaps for the
+pairs of kinds of copper that need a different one (track, surface pad,
+through-hole pad, via, region and pour). A pair the table doesn't list needs the
+general gap, so on a board with a 3.5 mil general gap two tracks may be 3.5 mil
+apart while a via and a track need 5 mil, and a pour keeps 18 mil from a track and
+20 mil from a surface pad. The rule check, the router and the pours all ask for
+the gap of the pair in question; the rules card on the right shows the table. A
+clearance rule that applies only to particular objects (the fiducial pads, say)
+isn't taken, and the status bar says so. A gap is allowed to come out 10 nm short:
+Altium's coordinates are 2.5 nm apart, and each rounds on the way in.
+
+Keepouts come in as keepouts: fills, regions and tracks flagged as keepouts,
+on the board and on parts, and shapes on the Keep-Out layer. They keep pours
+out and nothing else, since tracks, vias and pads are wanted there; one whose
+restrictions don't include copper pours is left out. A shape on the Keep-Out
+layer that covers most of the board is the board's boundary, not a keepout.
 
 Pours come in as pours, from their outlines and settings (pour order,
 dead copper and small-island removal, neck width), with the clearance the
@@ -262,8 +308,9 @@ layers become plane pours: one per split plane, or the whole board for a
 plane layer with a net and no splits, with the plane clearance and
 plane-connect rules and the layer's pullback from the edge. Hatched pours
 are poured solid; pour cutouts, shelved pours and free pads are left out.
-The status bar says what was left out. Part names sit at Coppersmith's
-usual spot, not where Altium had them.
+The status bar says what was left out. Part names come in where Altium had
+them and as tall as it drew them: the usual height becomes the board's name
+height, and a name of any other height keeps its own.
 
     coppersmith --read-altium BOARD.CSPcbDoc
     coppersmith --read-altium SHEET.SchDoc

@@ -179,10 +179,12 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
         .flat_map(|c| {
             // Tracks can be pushed, arcs included (see Scene::new for the exceptions).
             let movable = matches!(c.item, Item::Track(_));
+            // How far a track must keep from this kind of copper.
+            let gap = r.gap(Kind::Track, c.kind());
             c.parts.iter().map(move |part| Obstacle {
                 blob: part.clone(),
                 bbox: part.bbox(),
-                gap: r.clearance,
+                gap,
                 item: Some(c.item),
                 net: c.net,
                 movable,
@@ -209,6 +211,13 @@ pub fn obstacles_all(board: &Board, copper: &Copper, layer: u8) -> Vec<Obstacle>
     for i in 0..o.len() {
         let blob = Blob::line(o[i], o[(i + 1) % o.len()], 0.0);
         out.push(Obstacle { bbox: blob.bbox(), blob, gap: r.edge_clearance, item: None, net: EDGE, movable: false });
+    }
+    // Keepouts that keep tracks out: walls to every net, up to their edge.
+    for k in board.placed_keepouts().iter().filter(|k| k.restrict.tracks && k.applies_to(layer)) {
+        for piece in k.pieces() {
+            let blob = Blob { core: piece, r: 0.0 };
+            out.push(Obstacle { bbox: blob.bbox(), blob, gap: 0.0, item: None, net: EDGE, movable: false });
+        }
     }
     out
 }
@@ -851,8 +860,9 @@ pub fn straighten(obs: &[Obstacle], pts: Vec<P>, w: f64, corner: Corner) -> Vec<
 /// What the router knows about one layer while routing one net.
 #[derive(Clone, Default)]
 pub struct Scene {
-    /// Everything on the layer, every net.
-    pub all: Vec<Obstacle>,
+    /// Everything on the layer, every net. Shared, so a list that hasn't
+    /// changed can be handed from one scene to the next.
+    pub all: std::sync::Arc<Vec<Obstacle>>,
     /// What the route has to keep clear of.
     pub own: Vec<Obstacle>,
     /// Other nets' tracks, as runs that can be pushed.
@@ -862,7 +872,7 @@ pub struct Scene {
     pub clearance: f64,
     /// The other copper layers, for vias that are pushed: everything on
     /// each, and its tracks as runs (which follow a via that moves).
-    pub others: Vec<(u8, Vec<Obstacle>, Vec<Line>)>,
+    pub others: Vec<(u8, std::sync::Arc<Vec<Obstacle>>, Vec<Line>)>,
     /// Other nets' vias: id, centre, pad size, net.
     pub vias: Vec<(u32, P, f64, u32)>,
     /// Whether Push may move vias too (Altium's "Allow via pushing").
@@ -874,6 +884,106 @@ pub struct Scene {
     /// The point before the route's end, when the route carries on from a
     /// placed piece on this layer: the joint can be cut back along it.
     pub lead: Option<P>,
+}
+
+thread_local! {
+    /// The push base last used; see `PushBase`.
+    static PUSH_BASE: std::cell::RefCell<Option<PushBase>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Forgets the push base, so the next scene is made from scratch.
+#[cfg(test)]
+pub fn forget_push_base() {
+    PUSH_BASE.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// What a push reads that stays as it is while tracks are dragged and pushed:
+/// the pads, vias, fills, holes and edge, listed as obstacles for each layer.
+/// It keeps a copy of the parts, vias, fills, outline and rules it was made
+/// from, and is used only while the board's are equal to that copy (compared
+/// field for field), so a part or via moved, or a rule changed, makes a new
+/// one. A layer's list also notes the tracks outside every run that it
+/// includes as walls, and is used only while those are unchanged.
+struct PushBase {
+    footprints: Vec<Footprint>,
+    vias: Vec<Via>,
+    fills: Vec<Fill>,
+    keepouts: Vec<Keepout>,
+    outline: Vec<P>,
+    rules: Rules,
+    layers: u8,
+    copper: Copper,
+    pinned: std::collections::HashSet<(i64, i64)>,
+    per_layer: std::collections::HashMap<u8, PushLayer>,
+}
+
+struct PushLayer {
+    /// Pads, vias, fills, holes and the edge on the layer.
+    fixed: Vec<Obstacle>,
+    /// The tracks in no run when `all` was made, which it includes as walls.
+    walls: Vec<Track>,
+    all: std::sync::Arc<Vec<Obstacle>>,
+}
+
+impl PushBase {
+    fn new(board: &Board) -> PushBase {
+        let copper = crate::pcb::copper::push_copper(board);
+        PushBase {
+            footprints: board.footprints.clone(),
+            vias: board.vias.clone(),
+            fills: board.fills.clone(),
+            keepouts: board.keepouts.clone(),
+            outline: board.outline.clone(),
+            rules: board.rules.clone(),
+            layers: board.copper,
+            pinned: pinned_ends(&copper),
+            copper,
+            per_layer: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Is this still what the board's untracked copper is?
+    fn holds_for(&self, board: &Board) -> bool {
+        self.layers == board.copper
+            && self.rules == board.rules
+            && self.outline == board.outline
+            && self.vias == board.vias
+            && self.fills == board.fills
+            && self.keepouts == board.keepouts
+            && self.footprints == board.footprints
+    }
+
+    /// The obstacles and the runs on a layer.
+    fn side(&mut self, board: &Board, layer: u8) -> (std::sync::Arc<Vec<Obstacle>>, Vec<Line>) {
+        let runs = lines_with(board, &self.pinned, layer, 0);
+        let in_runs: std::collections::HashSet<u32> = runs.iter().flat_map(|r| r.ids.iter().copied()).collect();
+        let walls: Vec<Track> = board.tracks.iter().filter(|t| t.layer == layer && !in_runs.contains(&t.id)).cloned().collect();
+        if let Some(have) = self.per_layer.get(&layer)
+            && have.walls == walls
+        {
+            return (have.all.clone(), runs);
+        }
+        let fixed = match self.per_layer.remove(&layer) {
+            Some(have) => have.fixed,
+            None => obstacles_all(board, &self.copper, layer),
+        };
+        let mut all = fixed.clone();
+        for t in &walls {
+            for part in t.blobs() {
+                all.push(Obstacle {
+                    bbox: part.bbox(),
+                    blob: part,
+                    gap: board.rules.gap(Kind::Track, Kind::Track),
+                    item: Some(Item::Track(t.id)),
+                    net: t.net,
+                    movable: false,
+                });
+            }
+        }
+        let all = std::sync::Arc::new(all);
+        self.per_layer.insert(layer, PushLayer { fixed, walls, all: all.clone() });
+        (all, runs)
+    }
 }
 
 impl Scene {
@@ -895,7 +1005,7 @@ impl Scene {
                         o.movable = false;
                     }
                 }
-                (l, all, runs)
+                (l, std::sync::Arc::new(all), runs)
             })
             .collect();
         let lines = lines(board, copper, layer, net);
@@ -912,10 +1022,10 @@ impl Scene {
         Scene {
             own: for_net(&all, net),
             lines,
-            all,
+            all: std::sync::Arc::new(all),
             net,
             layer,
-            clearance: board.rules.clearance,
+            clearance: board.rules.gap(Kind::Track, Kind::Track),
             others,
             vias: board.vias.iter().filter(|v| v.net != net || net == 0).map(|v| (v.id, v.at, v.dia, v.net)).collect(),
             via_push: true,
@@ -923,6 +1033,49 @@ impl Scene {
             min_diag: board.rules.min_diag,
             lead: None,
         }
+    }
+
+    /// A scene for pushing tracks aside on `layer`. A push never reads the
+    /// obstacles of tracks that are in runs, as it moves those runs; so only
+    /// tracks that are in none, which can't move and are walls, are listed
+    /// with the pads, vias, fills, holes and edge. The same pushes come of
+    /// this as of `Scene::new(.., 0)`, for much less work.
+    ///
+    /// What doesn't change from one push to the next (those pads, vias and so
+    /// on, while the parts and vias stay where they are, as when a track is
+    /// dragged) is listed once and handed on: see `PushBase`.
+    pub fn for_push(board: &Board, layer: u8) -> Scene {
+        PUSH_BASE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if !slot.as_ref().is_some_and(|b| b.holds_for(board)) {
+                *slot = Some(PushBase::new(board));
+            }
+            let base = slot.as_mut().expect("just made");
+            let (all, lines) = base.side(board, layer);
+            let others = board
+                .copper_layers()
+                .into_iter()
+                .filter(|l| *l != layer)
+                .map(|l| {
+                    let (all, runs) = base.side(board, l);
+                    (l, all, runs)
+                })
+                .collect();
+            Scene {
+                own: Vec::new(),
+                lines,
+                all,
+                net: 0,
+                layer,
+                clearance: board.rules.gap(Kind::Track, Kind::Track),
+                others,
+                vias: board.vias.iter().map(|v| (v.id, v.at, v.dia, v.net)).collect(),
+                via_push: true,
+                arc_radius: 1.0,
+                min_diag: board.rules.min_diag,
+                lead: None,
+            }
+        })
     }
 
     /// Can this be moved by a push?
@@ -1131,19 +1284,28 @@ fn key(q: P) -> (i64, i64) {
 
 /// Other nets' tracks on a layer, joined into runs.
 pub fn lines(board: &Board, copper: &Copper, layer: u8, skip_net: u32) -> Vec<Line> {
-    use std::collections::{HashMap, HashSet};
+    lines_with(board, &pinned_ends(copper), layer, skip_net)
+}
+
+/// Where pads and vias pin a run's end, whatever the net.
+pub fn pinned_ends(copper: &Copper) -> std::collections::HashSet<(i64, i64)> {
+    let mut pinned = std::collections::HashSet::new();
+    for c in &copper.items {
+        if matches!(c.item, Item::Pad(..) | Item::Via(_)) {
+            pinned.insert(key(c.anchors[0]));
+        }
+    }
+    pinned
+}
+
+/// As `lines`, given the ends that are pinned.
+pub fn lines_with(board: &Board, pinned: &std::collections::HashSet<(i64, i64)>, layer: u8, skip_net: u32) -> Vec<Line> {
+    use std::collections::HashMap;
     let tracks: Vec<&Track> = board.tracks.iter().filter(|t| t.layer == layer && (t.net != skip_net || skip_net == 0)).collect();
     let mut ends: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         ends.entry(key(t.a)).or_default().push(i);
         ends.entry(key(t.b)).or_default().push(i);
-    }
-    // Pads and vias pin a run's end, whatever the net.
-    let mut pinned: HashSet<(i64, i64)> = HashSet::new();
-    for c in &copper.items {
-        if matches!(c.item, Item::Pad(..) | Item::Via(_)) {
-            pinned.insert(key(c.anchors[0]));
-        }
     }
     let fixed = |q: P| pinned.contains(&key(q)) || ends.get(&key(q)).is_none_or(|v| v.len() != 2);
     let mut used = vec![false; tracks.len()];
@@ -1653,7 +1815,7 @@ mod tests {
     use super::*;
 
     fn scene(obs: Vec<Obstacle>) -> Scene {
-        Scene { all: obs.clone(), own: obs, net: 1, layer: TOP, clearance: 0.2, ..Default::default() }
+        Scene { all: std::sync::Arc::new(obs.clone()), own: obs, net: 1, layer: TOP, clearance: 0.2, ..Default::default() }
     }
 
     fn wall() -> Vec<Obstacle> {
@@ -1762,7 +1924,9 @@ mod pushing {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -1948,7 +2112,9 @@ mod via_pushing {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.8, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
     }
 
@@ -2035,7 +2201,9 @@ fn pushing_board() -> (Board, u32, u32) {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
     }
     let id = b.new_id();
@@ -2245,7 +2413,9 @@ mod pushing_arcs {
                 pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill: 0.0, net: n }],
                 graphics: vec![],
                 label_at: P::default(),
+                label_height: None,
                 locked: false,
+                keepouts: vec![],
             });
         }
         for (s0, e, mid) in [
@@ -2325,5 +2495,152 @@ mod pushing_arcs {
         let b2 = after(&b, &moved);
         assert!(problems(&b2, &head).is_empty(), "{:?}", problems(&b2, &head));
         assert!(tangent(&b2), "{:?}", b2.tracks);
+    }
+}
+
+#[cfg(test)]
+mod keepout_walls {
+    use super::*;
+    use crate::pcb::copper::analyse;
+    use crate::pcb::drc;
+
+    fn board(layer: Option<u8>, restrict: Restrict) -> (Board, u32) {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer, pts: rect_outline(p(15.0, 17.0), p(19.0, 23.0)), restrict });
+        (b, n)
+    }
+
+    fn route(b: &Board, n: u32, layer: u8) -> Plan {
+        let scene = Scene::new(b, &analyse(b), layer, n);
+        plan(&scene, p(5.0, 20.0), p(30.0, 20.0), 0.25, Corner::D45, false, Conflict::Walkaround, b.outline_bbox(), &[])
+    }
+
+    /// What the rule check says of the board with the plan laid on it.
+    fn laid(b: &Board, n: u32, layer: u8, plan: &Plan) -> Vec<String> {
+        let mut b = b.clone();
+        for s in plan.pts.windows(2) {
+            let id = b.new_id();
+            b.tracks.push(Track { mid: None, id, a: s[0], b: s[1], w: 0.25, layer, net: n });
+        }
+        drc::check(&b, &analyse(&b)).into_iter().filter(|p| p.title == "In a keepout").map(|p| p.detail).collect()
+    }
+
+    #[test]
+    fn a_keepout_is_a_wall_on_its_layer_and_no_other() {
+        let (b, _) = board(Some(TOP), Restrict::default());
+        let here = BBox::of(&[p(16.0, 20.0)]);
+        let top = obstacles_all(&b, &analyse(&b), TOP);
+        let walls: Vec<&Obstacle> = top.iter().filter(|o| o.item.is_none() && o.net == EDGE && o.bbox.touches(&here)).collect();
+        assert!(!walls.is_empty(), "a wall on the top");
+        assert!(walls.iter().all(|o| !o.movable && o.gap == 0.0));
+        let bottom = obstacles_all(&b, &analyse(&b), BOTTOM);
+        assert!(!bottom.iter().any(|o| o.net == EDGE && o.bbox.touches(&here)), "none underneath");
+    }
+
+    #[test]
+    fn a_route_walks_round_a_keepout_and_so_breaks_no_rule() {
+        let (b, n) = board(Some(TOP), Restrict::default());
+        let plan = route(&b, n, TOP);
+        assert!(!plan.blocked, "{plan:?}");
+        assert!(plan.pts.len() > 2, "it had to go round: {:?}", plan.pts);
+        assert!(plan.pts.last().unwrap().same(p(30.0, 20.0)));
+        assert!(laid(&b, n, TOP, &plan).is_empty(), "{:?}", laid(&b, n, TOP, &plan));
+    }
+
+    #[test]
+    fn a_route_goes_straight_where_the_keepout_isnt() {
+        // On the other layer.
+        let (b, n) = board(Some(TOP), Restrict::default());
+        assert_eq!(route(&b, n, BOTTOM).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+        // Or where it lets tracks through.
+        let (b, n) = board(Some(TOP), Restrict { tracks: false, ..Restrict::default() });
+        assert_eq!(route(&b, n, TOP).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+        // On every layer, it holds on the bottom too.
+        let (b, n) = board(None, Restrict::default());
+        assert!(route(&b, n, BOTTOM).pts.len() > 2);
+    }
+
+    #[test]
+    fn a_keepout_on_a_part_is_a_wall_where_the_part_is() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "K".into(),
+            refdes: "K1".into(),
+            value: String::new(),
+            at: p(17.0, 20.0),
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![],
+            graphics: vec![],
+            label_at: P::default(),
+            label_height: None,
+            locked: false,
+            keepouts: vec![Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-2.0, -3.0), p(2.0, 3.0)), restrict: Restrict::default() }],
+        });
+        let plan = route(&b, n, TOP);
+        assert!(plan.pts.len() > 2 && laid(&b, n, TOP, &plan).is_empty(), "{:?}", plan.pts);
+        // Moved clear of the route's way, the route is straight again.
+        b.footprints[0].at = p(17.0, 35.0);
+        assert_eq!(route(&b, n, TOP).pts, vec![p(5.0, 20.0), p(30.0, 20.0)]);
+    }
+}
+
+#[cfg(test)]
+mod gap_kinds {
+    use super::*;
+    use crate::pcb::copper::analyse;
+
+    fn part(b: &mut Board, at: P, drill: f64, net: u32) {
+        let id = b.new_id();
+        b.footprints.push(Footprint {
+            id,
+            def: "TP".into(),
+            refdes: format!("TP{id}"),
+            value: String::new(),
+            at,
+            rot: 0.0,
+            side: Side::Top,
+            pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.0, 1.0), rot: 0.0, shape: PadShape::Circle, drill, net }],
+            graphics: vec![],
+            label_at: P::default(),
+            label_height: None,
+            locked: false,
+            keepouts: vec![],
+        });
+    }
+
+    #[test]
+    fn a_track_keeps_the_gap_the_table_gives_for_each_kind_of_copper_it_meets() {
+        let mut b = Board::default();
+        let n = b.net("A");
+        b.rules.clearance = 0.1;
+        b.rules.gaps = vec![Gap { a: Kind::Track, b: Kind::Via, mm: 0.3 }, Gap { a: Kind::ThPad, b: Kind::Track, mm: 0.2 }];
+        let v = b.new_id();
+        b.vias.push(Via { id: v, at: p(10.0, 10.0), dia: 0.6, drill: 0.3, net: n });
+        let t = b.new_id();
+        b.tracks.push(Track { mid: None, id: t, a: p(20.0, 10.0), b: p(30.0, 10.0), w: 0.25, layer: TOP, net: n });
+        part(&mut b, p(40.0, 10.0), 0.0, n);
+        part(&mut b, p(50.0, 10.0), 0.5, n);
+        let gap_of = |what: &dyn Fn(Item) -> bool| {
+            let found: Vec<f64> = obstacles_all(&b, &analyse(&b), TOP).iter().filter(|o| o.item.is_some_and(what)).map(|o| o.gap).collect();
+            assert!(!found.is_empty());
+            assert!(found.windows(2).all(|w| w[0] == w[1]), "one gap for one kind: {found:?}");
+            found[0]
+        };
+        assert_eq!(gap_of(&|i| matches!(i, Item::Via(_))), 0.3, "a via: the table's");
+        assert_eq!(gap_of(&|i| matches!(i, Item::Track(_))), 0.1, "a track: the general one");
+        let (smd, through) = (b.footprints[0].id, b.footprints[1].id);
+        assert_eq!(gap_of(&|i| matches!(i, Item::Pad(f, _) if f == smd)), 0.1, "a surface pad: the general one");
+        assert_eq!(gap_of(&|i| matches!(i, Item::Pad(f, _) if f == through)), 0.2, "a through-hole pad: the table's");
+        // A scene keeps tracks from each other by the track-to-track gap.
+        assert_eq!(Scene::new(&b, &analyse(&b), TOP, n).clearance, 0.1);
+        b.rules.gaps.push(Gap { a: Kind::Track, b: Kind::Track, mm: 0.15 });
+        assert_eq!(Scene::new(&b, &analyse(&b), TOP, n).clearance, 0.15);
+        assert_eq!(Scene::for_push(&b, TOP).clearance, 0.15);
     }
 }

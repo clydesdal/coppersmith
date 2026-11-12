@@ -220,8 +220,19 @@ fn run() -> Result<(), String> {
     }
 
     if gerbers.is_some() || check {
-        let board = load(&launch.path)?;
-        let found = drc::check(&board, &copper::analyse(&board));
+        let t = std::time::Instant::now();
+        let mut board = load(&launch.path)?;
+        eprintln!("[time] load {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        board.repour();
+        eprintln!("[time] repour {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let cu = copper::analyse(&board);
+        eprintln!("[time] analyse {:?} ({} items, {} parts)", t.elapsed(), cu.items.len(), cu.items.iter().map(|c| c.parts.len()).sum::<usize>());
+        eprintln!("[count] tracks {} vias {} fps {} pours {} fills {} keepouts {} (on parts {})", board.tracks.len(), board.vias.len(), board.footprints.len(), board.pours.len(), board.fills.len(), board.keepouts.len(), board.footprints.iter().map(|f| f.keepouts.len()).sum::<usize>());
+        let t = std::time::Instant::now();
+        let found = drc::check(&board, &cu);
+        eprintln!("[time] drc {:?}", t.elapsed());
         if check {
             for prob in &found {
                 println!("{:?}\t{}\t{}", prob.severity, prob.title, prob.detail);

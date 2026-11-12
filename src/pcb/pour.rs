@@ -90,6 +90,8 @@ struct Around {
     /// Fixed copper (no pours), with its holes.
     items: Vec<(copper::Cu, f64)>,
     bare_holes: Vec<Blob>,
+    /// Keepouts that keep pours out, board's and parts', each as convex pieces.
+    keepouts: Vec<(PlacedKeepout, Vec<Vec<P>>)>,
 }
 
 fn around(board: &Board) -> Around {
@@ -112,10 +114,72 @@ fn around(board: &Board) -> Around {
             }
         }
     }
-    Around { items, bare_holes }
+    let keepouts = board.placed_keepouts().into_iter().filter(|k| k.restrict.pours).map(|k| {
+        let pieces = k.pieces();
+        (k, pieces)
+    }).collect();
+    Around { items, bare_holes, keepouts }
 }
 
-/// Pours every pour on the board, in order.
+/// What a poured pour keeps for those poured after it on its layer.
+type Done = (u8, u32, f64, Vec<Shape>);
+
+fn done_of(pour: &Pour, islands: &[Island]) -> Done {
+    (pour.layer, pour.net, pour.clearance, islands.iter().map(|is| is.rings.iter().map(|r| to(r)).collect()).collect())
+}
+
+/// A fingerprint of everything a pour's shape is worked out from: its own
+/// settings, the board's edge, the copper on its layer and the pours poured
+/// before it there (through `before`, their fingerprints in turn).
+fn signature(board: &Board, pour: &Pour, env: &Around, before: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let f = |h: &mut std::collections::hash_map::DefaultHasher, v: f64| v.to_bits().hash(h);
+    let pts = |h: &mut std::collections::hash_map::DefaultHasher, ring: &[P]| {
+        ring.len().hash(h);
+        for q in ring {
+            f(h, q.x);
+            f(h, q.y);
+        }
+    };
+    (pour.layer, pour.net, pour.plane, pour.connect as u8, pour.remove_islands, before).hash(&mut h);
+    for v in [pour.clearance, pour.edge, pour.spoke, pour.gap, pour.min_area, pour.neck, board.rules.clearance] {
+        f(&mut h, v);
+    }
+    for g in &board.rules.gaps {
+        (g.a, g.b).hash(&mut h);
+        f(&mut h, g.mm);
+    }
+    pts(&mut h, pour.area(board));
+    pts(&mut h, &board.outline);
+    for hole in &env.bare_holes {
+        pts(&mut h, &hole.core);
+        f(&mut h, hole.r);
+    }
+    for (k, _) in env.keepouts.iter().filter(|(k, _)| k.applies_to(pour.layer)) {
+        pts(&mut h, &k.pts);
+    }
+    for (cu, drill) in &env.items {
+        if !cu.on.has(pour.layer) {
+            continue;
+        }
+        cu.item.hash(&mut h);
+        cu.net.hash(&mut h);
+        f(&mut h, *drill);
+        pts(&mut h, &cu.anchors);
+        pts(&mut h, &cu.blob.core);
+        f(&mut h, cu.blob.r);
+        for part in cu.parts.iter() {
+            pts(&mut h, &part.core);
+            f(&mut h, part.r);
+        }
+    }
+    h.finish() | 1
+}
+
+/// Pours every pour on the board, in order. Pours on different layers don't
+/// affect each other, so each layer's go on a thread of their own; a pour
+/// whose surroundings are as they were when it last poured is left alone.
 pub fn repour(board: &mut Board) {
     if board.pours.is_empty() {
         return;
@@ -123,13 +187,50 @@ pub fn repour(board: &mut Board) {
     let env = around(board);
     let mut order: Vec<usize> = (0..board.pours.len()).collect();
     order.sort_by_key(|&i| (board.pours[i].plane, board.pours[i].order, board.pours[i].id));
-    let mut done: Vec<(u8, u32, f64, Vec<Shape>)> = Vec::new();
+    let mut layers: Vec<(u8, Vec<usize>)> = Vec::new();
     for i in order {
-        let shapes = pour_one(board, &board.pours[i], &env, &done);
-        let pour = &board.pours[i];
-        let islands = finish(board, pour, &env, &shapes);
-        done.push((pour.layer, pour.net, pour.clearance, islands.iter().map(|is| is.rings.iter().map(|r| to(r)).collect()).collect()));
-        board.pours[i].fill = islands;
+        let layer = board.pours[i].layer;
+        match layers.iter_mut().find(|(l, _)| *l == layer) {
+            Some((_, group)) => group.push(i),
+            None => layers.push((layer, vec![i])),
+        }
+    }
+
+    // (pour, its new fill and fingerprint), or None where it stands as it was.
+    type Poured = Vec<(usize, Option<(Vec<Island>, u64)>)>;
+    let pour_layer = |group: &[usize]| -> Poured {
+        let mut done: Vec<Done> = Vec::new();
+        let mut before = 0u64;
+        let mut out: Poured = Vec::new();
+        for &i in group {
+            let pour = &board.pours[i];
+            let sig = signature(board, pour, &env, before);
+            before = sig;
+            if pour.sig == sig {
+                done.push(done_of(pour, &pour.fill));
+                out.push((i, None));
+                continue;
+            }
+            let shapes = pour_one(board, pour, &env, &done);
+            let islands = finish(board, pour, &env, &shapes);
+            done.push(done_of(pour, &islands));
+            out.push((i, Some((islands, sig))));
+        }
+        out
+    };
+    let results: Vec<Poured> = if layers.len() < 2 {
+        layers.iter().map(|(_, g)| pour_layer(g)).collect()
+    } else {
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = layers.iter().map(|(_, g)| scope.spawn(|| pour_layer(g))).collect();
+            jobs.into_iter().map(|j| j.join().expect("a pour panicked")).collect()
+        })
+    };
+    for (i, poured) in results.into_iter().flatten() {
+        if let Some((islands, sig)) = poured {
+            board.pours[i].fill = islands;
+            board.pours[i].sig = sig;
+        }
     }
 }
 
@@ -160,7 +261,10 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
         }
         let ours = pour.net != 0 && cu.net == pour.net;
         if !ours {
-            for part in &cu.parts {
+            // How far a pour keeps from this kind of copper: what the rules ask of the pair
+            // (the general clearance where the table doesn't list it), if more than the pour's own.
+            let near = near.max(board.rules.gap(Kind::Pour, cu.kind()));
+            for part in cu.parts.iter() {
                 away.push(cut(part, near));
             }
             if pour.plane && *drill > 0.0 {
@@ -185,10 +289,20 @@ fn pour_one(board: &Board, pour: &Pour, env: &Around, done: &[(u8, u32, f64, Vec
             }
         }
     }
+    // Keepouts that keep pours out, on this layer or every one.
+    for (k, pieces) in &env.keepouts {
+        if k.applies_to(layer) {
+            for piece in pieces {
+                away.push(cut(&Blob { core: piece.clone(), r: 0.0 }, near));
+            }
+        }
+    }
     // Pours poured before this one, of other nets.
     for (l, net, gap, shapes) in done {
         if *l == layer && (*net != pour.net || pour.net == 0) {
-            let grown = offset(shapes, near.max(*gap) + MARGIN);
+            // The offset's round corners are drawn a little inside the true curve, so go 1% further.
+            let apart = near.max(*gap).max(board.rules.gap(Kind::Pour, Kind::Pour));
+            let grown = offset(shapes, apart * 1.01 + MARGIN);
             away.extend(rings_of(&grown));
         }
     }
@@ -240,7 +354,8 @@ fn finish(board: &Board, pour: &Pour, env: &Around, shapes: &[Shape]) -> Vec<Isl
             continue;
         }
         let tris = triangles(s);
-        out.push(Island { rings, tris, area });
+        let parts = Parts::new(tris.iter().map(|t| Blob { core: t.to_vec(), r: 0.0 }).collect());
+        out.push(Island { rings, tris, area, parts });
     }
     out
 }
@@ -355,7 +470,9 @@ mod tests {
             pads: vec![Pad { num: "1".into(), at: p(0.0, 0.0), size: p(1.5, 1.5), rot: 0.0, shape: PadShape::Circle, drill, net }],
             graphics: vec![],
             label_at: P::default(),
+            label_height: None,
             locked: false,
+            keepouts: vec![],
         });
         id
     }
@@ -381,6 +498,200 @@ mod tests {
         assert!(bad.is_empty(), "{bad:?}");
         // The GND pad is joined to the pour, so nothing's left to connect.
         assert!(c.rats.is_empty(), "{:?}", c.rats);
+    }
+
+    /// A board with a GND pour on the top and another on the bottom.
+    fn two_pours() -> Board {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        // A through-hole pad, so GND is there on both layers for the pours to join.
+        pad(&mut b, p(10.0, 10.0), gnd, 0.8);
+        b.tracks.push(Track { mid: None, id: 900, a: p(20.0, 10.0), b: p(30.0, 30.0), w: 0.25, layer: TOP, net: sig });
+        for layer in [TOP, BOTTOM] {
+            let id = b.new_id();
+            b.pours.push(Pour::new(id, layer, gnd, Vec::new(), &b.rules));
+        }
+        b
+    }
+
+    #[test]
+    fn a_pour_is_left_alone_while_its_surroundings_stand() {
+        let mut b = two_pours();
+        b.repour();
+        let (areas, sigs) = (b.pours.iter().map(|p| p.copper_area()).collect::<Vec<_>>(), b.pours.iter().map(|p| p.sig).collect::<Vec<_>>());
+        assert!(areas.iter().all(|a| *a > 100.0) && sigs.iter().all(|s| *s != 0), "{areas:?} {sigs:?}");
+        // Poured again with nothing changed: nothing is redone.
+        b.repour();
+        assert_eq!(sigs, b.pours.iter().map(|p| p.sig).collect::<Vec<_>>());
+        assert_eq!(areas, b.pours.iter().map(|p| p.copper_area()).collect::<Vec<_>>());
+        // Copper of another net on the top pours it again there, and only there.
+        let sig = b.net("SIG");
+        b.tracks.push(Track { mid: None, id: 901, a: p(5.0, 30.0), b: p(40.0, 30.0), w: 1.0, layer: TOP, net: sig });
+        b.repour();
+        assert_ne!(sigs[0], b.pours[0].sig);
+        assert!(b.pours[0].copper_area() < areas[0] - 10.0, "the top pour gave way");
+        assert_eq!(sigs[1], b.pours[1].sig);
+        assert_eq!(areas[1], b.pours[1].copper_area());
+    }
+
+    fn keepout(b: &mut Board, layer: Option<u8>, restrict: Restrict) -> u32 {
+        let id = b.new_id();
+        b.keepouts.push(Keepout { id, layer, pts: rect_outline(p(15.0, 12.0), p(25.0, 22.0)), restrict });
+        id
+    }
+
+    fn poured_at(b: &Board, pour: usize, q: P) -> bool {
+        b.pours[pour].fill.iter().any(|i| in_shape(q, &i.rings))
+    }
+
+    #[test]
+    fn a_pour_keeps_out_of_a_keepout_and_clear_of_its_edge() {
+        let mut b = two_pours();
+        b.repour();
+        let before: Vec<f64> = b.pours.iter().map(|p| p.copper_area()).collect();
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && poured_at(&b, 1, p(20.0, 17.0)));
+        keepout(&mut b, Some(TOP), Restrict::default());
+        b.repour();
+        // The top pour has a hole where the keepout is; the bottom pour doesn't.
+        assert!(!poured_at(&b, 0, p(20.0, 17.0)), "nothing poured in the keepout");
+        assert!(b.pours[0].copper_area() < before[0] - 90.0, "{} -> {}", before[0], b.pours[0].copper_area());
+        assert!(poured_at(&b, 1, p(20.0, 17.0)) && (b.pours[1].copper_area() - before[1]).abs() < 1e-6);
+        // Held off by the pour's clearance (0.25) from its edge, and no further.
+        assert!(!poured_at(&b, 0, p(14.9, 17.0)), "0.1 from the edge is too near");
+        assert!(poured_at(&b, 0, p(14.5, 17.0)), "0.5 from the edge is fine");
+        // The pour is clear of it by the rule check's own measure too. (The
+        // board's SIG track crosses the keepout, and is rightly reported.)
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        let in_it: Vec<_> = found.iter().filter(|p| p.title == "In a keepout").collect();
+        assert!(in_it.iter().all(|p| p.items.iter().all(|i| matches!(i, Item::Track(_)))), "{in_it:?}");
+        assert!(found.iter().all(|p| !(p.title == "Too close" && p.items.iter().any(|i| matches!(i, Item::Pour(..))))), "{found:?}");
+    }
+
+    #[test]
+    fn a_keepout_on_every_layer_holds_every_pour_off_and_one_that_allows_pours_holds_none() {
+        let mut b = two_pours();
+        b.repour();
+        let k = keepout(&mut b, None, Restrict::default());
+        b.repour();
+        assert!(!poured_at(&b, 0, p(20.0, 17.0)) && !poured_at(&b, 1, p(20.0, 17.0)));
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().restrict = Restrict { pours: false, ..Restrict::default() };
+        b.repour();
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && poured_at(&b, 1, p(20.0, 17.0)), "a keepout that lets pours in isn't a hole");
+    }
+
+    #[test]
+    fn a_pour_is_poured_again_when_a_keepout_moves_and_not_when_nothing_changes() {
+        let mut b = two_pours();
+        let k = keepout(&mut b, Some(TOP), Restrict::default());
+        b.repour();
+        let sig = b.pours[0].sig;
+        b.repour();
+        assert_eq!(sig, b.pours[0].sig, "nothing changed, nothing redone");
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().pts = rect_outline(p(30.0, 5.0), p(35.0, 9.0));
+        b.repour();
+        assert_ne!(sig, b.pours[0].sig);
+        assert!(poured_at(&b, 0, p(20.0, 17.0)) && !poured_at(&b, 0, p(32.0, 7.0)));
+        // A keepout on another layer doesn't touch the bottom pour's fingerprint.
+        let bottom = b.pours[1].sig;
+        b.keepouts.iter_mut().find(|x| x.id == k).unwrap().pts = rect_outline(p(30.0, 5.0), p(36.0, 9.0));
+        b.repour();
+        assert_eq!(bottom, b.pours[1].sig);
+    }
+
+    #[test]
+    fn a_keepout_on_a_part_keeps_pours_out_and_goes_with_the_part() {
+        let mut b = two_pours();
+        let f = pad(&mut b, p(20.0, 30.0), 0, 0.0);
+        b.fp_mut(f).unwrap().keepouts.push(Keepout { id: 0, layer: Some(TOP), pts: rect_outline(p(-3.0, -3.0), p(3.0, 3.0)), restrict: Restrict::default() });
+        b.repour();
+        assert!(!poured_at(&b, 0, p(20.0, 30.0)) && !poured_at(&b, 0, p(22.0, 32.0)));
+        b.fp_mut(f).unwrap().at = p(40.0, 10.0);
+        b.repour();
+        assert!(poured_at(&b, 0, p(20.0, 30.0)), "where it was, poured again");
+        assert!(!poured_at(&b, 0, p(41.0, 11.0)), "where it is");
+    }
+
+    #[test]
+    fn a_pour_keeps_the_gap_the_table_gives_for_each_kind_of_copper() {
+        let mut b = Board::default();
+        let (gnd, sig) = (b.net("GND"), b.net("SIG"));
+        b.rules.clearance = 0.1;
+        b.rules.gaps = vec![Gap { a: Kind::Pour, b: Kind::Track, mm: 0.5 }, Gap { a: Kind::Pour, b: Kind::SmdPad, mm: 0.8 }];
+        b.tracks.push(Track { mid: None, id: 900, a: p(10.0, 20.0), b: p(40.0, 20.0), w: 0.25, layer: TOP, net: sig });
+        pad(&mut b, p(25.0, 30.0), sig, 0.0);
+        let id = b.new_id();
+        let mut pour = Pour::new(id, TOP, gnd, Vec::new(), &b.rules);
+        pour.clearance = 0.2;
+        pour.remove_islands = false;
+        b.pours.push(pour);
+        b.repour();
+        // The track's edge is at y = 20.125: held off by 0.5, not by the pour's own 0.2.
+        assert!(!poured_at(&b, 0, p(25.0, 20.125 + 0.45)), "0.45 from the track is too near");
+        assert!(poured_at(&b, 0, p(25.0, 20.125 + 0.55)), "0.55 is not");
+        // A surface pad (radius 0.75): the table asks 0.8.
+        assert!(!poured_at(&b, 0, p(25.0, 30.0 + 0.75 + 0.75)), "0.75 from the pad is too near");
+        assert!(poured_at(&b, 0, p(25.0, 30.0 + 0.75 + 0.85)), "0.85 is not");
+        // And the rule check, asking the same, finds the pour clear of both.
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        assert!(found.iter().all(|p| p.title != "Too close"), "{found:?}");
+    }
+
+    #[test]
+    fn two_pours_keep_the_gap_the_table_gives_between_pours() {
+        let mut b = Board::default();
+        let (gnd, vbat) = (b.net("GND"), b.net("VBAT"));
+        b.rules.gaps = vec![Gap { a: Kind::Pour, b: Kind::Pour, mm: 0.889 }];
+        // GND's corners at (30, 5) and (30, 35) are inside VBAT's area, where
+        // VBAT is cut back from them by a rounded offset.
+        for (net, lo, hi) in [(gnd, (5.0, 5.0), (30.0, 35.0)), (vbat, (20.0, 0.0), (50.0, 40.0))] {
+            let id = b.new_id();
+            let mut pour = Pour::new(id, TOP, net, rect_outline(p(lo.0, lo.1), p(hi.0, hi.1)), &b.rules);
+            pour.remove_islands = false;
+            b.pours.push(pour);
+        }
+        b.repour();
+        assert!(b.pours.iter().all(|p| p.copper_area() > 100.0), "both poured");
+        let found = crate::pcb::drc::check(&b, &copper::analyse(&b));
+        assert!(found.iter().all(|p| p.title != "Too close"), "{:?}", found.iter().filter(|p| p.title == "Too close").collect::<Vec<_>>());
+        // And not further than it had to be, by much: the first pour reaches to within a hair of the gap.
+        let edge = b.pours[0].fill.iter().flat_map(|i| i.rings[0].iter().map(|q| q.x)).fold(f64::MIN, f64::max);
+        let first = b.pours[1].fill.iter().flat_map(|i| i.rings[0].iter().map(|q| q.x)).fold(f64::MAX, f64::min);
+        assert!(first - edge < 0.889 + 0.05, "gap {}", first - edge);
+    }
+
+    #[test]
+    fn emptied_pours_keep_their_areas_and_pour_again_the_same() {
+        let mut b = two_pours();
+        b.repour();
+        let poured: Vec<_> = b.pours.iter().map(|p| p.fill.clone()).collect();
+        let settings: Vec<_> = b.pours.iter().map(|p| (p.id, p.layer, p.net, p.outline.clone(), p.clearance)).collect();
+        assert!(b.clear_fills());
+        assert!(!b.clear_fills(), "nothing left to take out");
+        assert!(b.pours.iter().all(|p| p.fill.is_empty()));
+        assert_eq!(settings, b.pours.iter().map(|p| (p.id, p.layer, p.net, p.outline.clone(), p.clearance)).collect::<Vec<_>>());
+        // With no copper they're not in the way of a track laid right through them…
+        let sig = b.net("SIG");
+        b.tracks.push(Track { mid: None, id: 950, a: p(2.0, 12.0), b: p(40.0, 12.0), w: 0.25, layer: TOP, net: sig });
+        let c = copper::analyse(&b);
+        assert!(c.items.iter().all(|cu| !matches!(cu.item, Item::Pour(..))));
+        // …and poured again they work round it.
+        b.repour();
+        assert!(b.pours[0].copper_area() < poured[0].iter().map(|i| i.area).sum::<f64>());
+        b.tracks.pop();
+        b.repour();
+        assert_eq!(poured, b.pours.iter().map(|p| p.fill.clone()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn pouring_layers_side_by_side_gives_what_pouring_each_alone_does() {
+        let mut both = two_pours();
+        both.repour();
+        for k in 0..2 {
+            let mut alone = two_pours();
+            alone.pours.remove(1 - k);
+            alone.repour();
+            assert_eq!(alone.pours[0].fill, both.pours[k].fill, "layer {k}");
+        }
     }
 
     #[test]
